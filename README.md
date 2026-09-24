@@ -1,12 +1,18 @@
 <p align="center">
-  <img src="assets/readme/hero.svg" width="100%" alt="ezDIC: dual-mode 1D strain and in-plane full-field 2D DIC for image sequences.">
+  <img src="assets/readme/hero.svg" width="100%" alt="StrainTrace: virtual extensometer and in-plane full-field 2D DIC for image sequences.">
 </p>
 
-# ezDIC
+# StrainTrace
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465)
 
+**虚拟引伸计与全场应变分析工具**
+
 **A lightweight dual-mode strain workstation for image sequences.**
+
+This repository uses **StrainTrace** as its project name. Existing Windows
+executables, CLI commands, and Zenodo citation/DOI metadata retain the name
+`ezDIC`.
 
 Main/source version: **0.1.4** · release-ready source · 2026-08-30
 
@@ -30,7 +36,7 @@ IC-GN/IC-LM solver diagnostics, explicit point `valid` versus strain-fit
 `strain_valid`, and hash-linked run provenance. The locked synthetic benchmark
 is a regression gate, not an estimate of experimental uncertainty.
 
-ezDIC has two explicit workflows:
+StrainTrace has two explicit workflows:
 
 1. **Virtual extensometer:** track two user-defined ROI markers and export engineering strain, true strain, QC, and Origin-compatible TXT (optional OPJU).
 2. **Full-field 2D DIC:** correlate a rectangular ROI on a fixed reference frame with IC-GN or IC-LM, sample a POI grid, and export displacement and strain maps.
@@ -43,7 +49,7 @@ Developed by **Dr. Delun Gong** · [DOI 10.5281/zenodo.20222465](https://doi.org
   <img src="assets/readme/section-01-why.svg" width="100%" alt="01 Modes: virtual extensometer strain histories and full-field 2D maps.">
 </p>
 
-| You need | ezDIC provides |
+| You need | StrainTrace provides |
 | --- | --- |
 | Fast 1D strain | Two-ROI virtual extensometer |
 | In-plane full-field maps | Rectangular ROI, POI grid, IC-GN / IC-LM, `u`/`v` and strain components |
@@ -130,7 +136,7 @@ Failed tracking frames stay `NaN`. Poisson uses role-averaged groups; tiny axial
 
 ## Windows quick start
 
-1. Open the [Releases page](https://github.com/D-sudoasd/ezDIC/releases). The latest published portable ZIP is currently **v0.1.3** (1D virtual extensometer). This `main` source tree is unreleased **v0.2.0-dev** with **v0.1.4** citation metadata; it is not a GitHub Release asset. An unverified local ZIP is not a release asset.
+1. Open the [Releases page](https://github.com/D-sudoasd/StrainTrace/releases). The latest published portable ZIP is currently **v0.1.3** (1D virtual extensometer). This `main` source tree is unreleased **v0.2.0-dev** with **v0.1.4** citation metadata; it is not a GitHub Release asset. An unverified local ZIP is not a release asset.
 2. Extract the full downloaded folder; the portable package's top-level directory is `ezDIC_Windows_x64`. Keep `_internal/` next to `ezDIC.exe` and retain the license, citation, version, and notice files.
 3. Run `ezDIC.exe` on Windows 10/11 x64.
 
@@ -155,7 +161,7 @@ The implemented source CLI is GUI-independent and reads strict UTF-8 JSON
 configuration against `schemas/run_config_v1.json`. Relative paths resolve next
 to the configuration file; non-finite numbers, unknown keys, invalid mode
 fields, and unsupported input shapes are rejected. `image_paths` and
-`image_folder` are mutually exclusive. A folder is collected with ezDIC's
+`image_folder` are mutually exclusive. A folder is collected with StrainTrace's
 natural image ordering and supported image suffixes. Keep analysis outputs and
 benchmark reports outside the repository (for example under a caller-owned
 temporary directory).
@@ -331,14 +337,14 @@ The canonical evidence CSV SHA-256 is
 
 These are deterministic synthetic engineering-gate observations for the locked
 geometry, seeds, clean baselines, and image-corruption panel. They are not
-experimental uncertainty, calibration validation, or evidence that ezDIC is
+experimental uncertainty, calibration validation, or evidence that StrainTrace is
 more accurate or robust than every other DIC project.
 
 ## Scientific and implementation limits
 
 Full-field DIC is an in-plane local-subset method using IC-GN / IC-LM with a first-order affine subset warp. It reports a POI grid, not per-pixel values; it is not stereo / 3D DIC, DVC, GPU/MPI, SIFT/AKAZE feature guidance, crack-topology masking, or global finite-element DIC. Arbitrary experimental texture is not an accepted capability claim. Pixel coordinates and displacements remain in px unless the user supplies an external calibration; strain values are dimensionless. Experimental calibration and uncertainty quantification are not implemented in this target. Failed subsets stay `NaN`, and finite output or a passing synthetic gate is not by itself experimental validation.
 
-Relative to projects with stereo/3D, DVC, global-FE, GPU/MPI, or broader feature-guided solvers, ezDIC deliberately does not claim those capabilities. Its intended narrow advantage is an auditable local workflow for the fixed-reference 2D tensile-image scenario: one numerical core, deterministic normalization, explicit quality/strain validity, transactional output, and reproducible synthetic gates.
+Relative to projects with stereo/3D, DVC, global-FE, GPU/MPI, or broader feature-guided solvers, StrainTrace deliberately does not claim those capabilities. Its intended narrow advantage is an auditable local workflow for the fixed-reference 2D tensile-image scenario: one numerical core, deterministic normalization, explicit quality/strain validity, transactional output, and reproducible synthetic gates.
 
 ## Cite
 

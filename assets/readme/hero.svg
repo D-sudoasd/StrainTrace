@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
-  <title id="title">ezDIC</title>
+  <title id="title">StrainTrace</title>
   <desc id="desc">Dual-mode virtual extensometer and in-plane full-field 2D DIC workstation for image sequences.</desc>
   <rect width="1200" height="360" rx="26" fill="#0B1018"/>
   <path d="M0 54H1200M700 0V360" stroke="#1A2230"/>
   <g transform="translate(56 42)" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
     <text fill="#8A93A3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" letter-spacing="2.2">DUAL-MODE DIC WORKSTATION · 1D + FULL-FIELD 2D</text>
-    <text y="108" fill="#F5F3EC" font-family="Georgia,'Times New Roman',serif" font-size="72" font-weight="700" letter-spacing="-1.4">ezDIC</text>
+    <text y="108" fill="#F5F3EC" font-family="Georgia,'Times New Roman',serif" font-size="72" font-weight="700" letter-spacing="-1.4">StrainTrace</text>
     <text y="158" fill="#B8C0CC" font-size="23">1D strain histories and in-plane maps from image sequences.</text>
     <path d="M0 186H500" stroke="#2A3444"/>
     <g transform="translate(0 220)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">
@@ -29,5 +29,5 @@
     <polyline points="40,250 90,246 140,238 190,228 240,220 290,214 340,210" fill="none" stroke="#6EC1FF" stroke-width="2"/>
     <text x="36" y="278" fill="#5A6474" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">1D core/ · full-field dic/ · optional Exx overlay</text>
   </g>
-  <text x="1144" y="336" text-anchor="end" fill="#4A5464" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">D-sudoasd / ezDIC</text>
+  <text x="1144" y="336" text-anchor="end" fill="#4A5464" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">D-sudoasd / StrainTrace</text>
 </svg>
