@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "straintrace"
+version = "0.1.4"
+description = "Virtual extensometry and fixed-reference in-plane digital image correlation"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [{name = "Delun Gong", email = "dlgong17s@imr.ac.cn"}]
+dependencies = ["opencv-python>=4.8", "numpy>=1.26", "pandas>=2", "matplotlib>=3.8", "pillow>=10"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "build>=1.2", "cffconvert>=2", "PyYAML>=6"]
+origin = ["originpro; sys_platform == 'win32'"]
+
+[project.scripts]
+straintrace = "ezdic_cli:main"
+ezdic-cli = "ezdic_cli:main"
+
+[project.gui-scripts]
+straintrace-gui = "dic_virtual_extensometer_gui_v7_multi_roi_range:main"
+
+[project.urls]
+Repository = "https://github.com/D-sudoasd/StrainTrace"
+Issues = "https://github.com/D-sudoasd/StrainTrace/issues"
+Documentation = "https://github.com/D-sudoasd/StrainTrace#readme"
+
+[tool.setuptools]
+py-modules = ["ezdic_core", "ezdic_cli", "ezdic_benchmark", "ezdic_cli_entrypoint", "ezdic_frozen_entrypoint", "dic_virtual_extensometer_gui_v7_multi_roi_range"]
+packages = ["benchmarks", "straintrace_data"]
+package-dir = {straintrace_data = "schemas"}
+
+[tool.setuptools.package-data]
+benchmarks = ["cases_v1.json"]
+straintrace_data = ["run_config_v1.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

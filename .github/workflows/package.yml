@@ -1,0 +1,38 @@
+name: Python distribution
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wheel:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Install and run outside source
+        shell: pwsh
+        run: |
+          python -m venv "$env:RUNNER_TEMP/wheel-env"
+          $python = "$env:RUNNER_TEMP/wheel-env/Scripts/python.exe"
+          $wheel = (Get-ChildItem dist/*.whl).FullName
+          & $python -m pip install $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location $env:RUNNER_TEMP
+          & $python -I -c "import ezdic_cli; assert ezdic_cli.SCHEMA_PATH.is_file()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -I -m ezdic_cli benchmark --output wheel-benchmark
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error

@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+title: ezDIC
+message: "If ezDIC supports your research, please cite the Zenodo DOI: 10.5281/zenodo.20222465."
+type: software
+authors:
+  - family-names: Gong
+    email: "dlgong17s@imr.ac.cn"
+    given-names: Delun
+    name-particle: Dr.
+version: 0.1.4
+date-released: 2026-08-30
+doi: 10.5281/zenodo.20222465
+url: "https://github.com/D-sudoasd/ezDIC"
+repository-code: "https://github.com/D-sudoasd/ezDIC"
+abstract: "ezDIC is a lightweight dual-mode workstation for image sequences: a virtual extensometer for engineering and true strain histories, and an in-plane full-field 2D DIC workflow that correlates each deformation frame to one fixed reference frame and computes displacement and strain on a POI grid with IC-GN or IC-LM. Full-field x/y/u/v values are in px, strain is dimensionless, Exy/exy are tensor shear components, and failed points remain NaN; the result is not per-pixel or 3D DIC."
+keywords:
+  - Digital image correlation
+  - virtual extensometer
+  - strain extraction
+  - engineering strain
+  - true strain
+  - materials testing
+  - full-field 2D DIC
+  - POI grid
+license: LicenseRef-Proprietary-Research-Use
+preferred-citation:
+  type: software
+  title: "ezDIC: A lightweight virtual extensometer for extracting linear strain from image sequences"
+  authors:
+    - family-names: Gong
+      given-names: Delun
+      name-particle: Dr.
+  version: 0.1.4
+  date-released: 2026-08-30
+  doi: 10.5281/zenodo.20222465
+  url: "https://doi.org/10.5281/zenodo.20222465"

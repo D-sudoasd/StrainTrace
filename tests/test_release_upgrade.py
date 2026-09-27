@@ -488,14 +488,16 @@ def test_development_docs_state_scope_metrics_limits_and_attribution():
     assert "not replaced or published" in notes
 
 
-def test_support_metadata_and_license_files_are_not_rewritten():
+def test_mit_transition_preserves_historical_license_and_source_version():
     citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
     version = (ROOT / "VERSION.txt").read_text(encoding="utf-8")
     notice = (ROOT / "NOTICE_Attribution_and_Usage.txt").read_text(encoding="utf-8")
     license_text = (ROOT / "LICENSE.txt").read_text(encoding="utf-8")
     assert DOI in citation and DOI in version
     assert "Developer:\nDr. Delun Gong" in notice
-    assert "all rights are reserved" in license_text.lower()
+    assert "Permission is hereby granted" in license_text
+    historical = (ROOT / "docs/history/pre-mit/LICENSE.txt").read_text(encoding="utf-8")
+    assert "all rights are reserved" in historical.lower()
     assert "0.1.4" in citation and "0.1.4" in version
 
 

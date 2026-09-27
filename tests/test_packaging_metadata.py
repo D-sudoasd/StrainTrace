@@ -1524,8 +1524,8 @@ def test_release_support_files_exist_and_include_usage_limits():
     release_notes_text = release_notes.read_text(encoding="utf-8")
 
     assert "Developer:\nDr. Delun Gong" in notice_text
-    assert "claim that they developed this software" in notice_text
-    assert "redistribute, copy, forward, or share" in notice_text
+    assert "MIT" in notice_text
+    assert "redistribution are permitted" in notice_text
     assert "Windows 10/11 x64" in readme_text
     assert "Do not copy ezDIC.exe alone" in readme_text
     assert "Dr. Delun Gong" in readme_text
@@ -1543,13 +1543,13 @@ def test_release_support_files_exist_and_include_usage_limits():
     assert "Dr. Delun Gong" in github_readme_text
     assert DOI in github_readme_text
     assert DOI_URL in github_readme_text
-    assert f"doi: {DOI}" in citation_text
-    assert DOI_URL in citation_text
+    assert DOI in citation_text and "Historical ezDIC archive" in citation_text
+    assert "license: MIT" in citation_text
     assert "ezDIC v0.1.4" in version_text
     assert DOI in version_text
     assert '"upload_type": "software"' in zenodo_text
-    assert '"access_right": "restricted"' in zenodo_text
-    assert '"title": "ezDIC: Lightweight Virtual Extensometer for Linear Strain Extraction from Image Sequences"' in zenodo_text
+    assert '"access_right": "open"' in zenodo_text
+    assert '"title": "StrainTrace: Virtual extensometry and in-plane digital image correlation"' in zenodo_text
     assert "Poisson ratio export and GUI workflow update" in release_notes_text
     assert "How to cite" in release_notes_text
     assert DOI_URL in release_notes_text

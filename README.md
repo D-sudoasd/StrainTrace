@@ -24,7 +24,7 @@ smoke-verified Windows asset.
 
 The current `main` source tree contains a narrowly scoped research-grade
 upgrade. It does **not** bump `VERSION.txt`, `CITATION.cff`, the Zenodo record,
-or the DOI: those remain the v0.1.4 metadata of this source snapshot. The
+or the existing DOI. The 27 September MIT preparation updates repository citation and license metadata; the archived DOI remains historical. The
 implemented development capability is a reproducible fixed-reference,
 local-subset, in-plane 2D DIC workflow plus the existing 1D virtual
 extensometer; it is not a claim of universal DIC superiority or experimental
@@ -353,3 +353,37 @@ Gong, D. (2026). ezDIC (v0.1.4). Zenodo. https://doi.org/10.5281/zenodo.20222465
 ```
 
 See `CITATION.cff`, `NOTICE_Attribution_and_Usage.txt`, `LICENSE.txt`, and `RELEASE_NOTES_v0.1.4.md` for attribution, redistribution terms, and the release boundary.
+
+## JOSS preparation
+
+See the [submission guide](docs/joss/README.md) for the manuscript, verified author metadata, research-use evidence and final checks. This repository is being prepared for submission; no JOSS acceptance is claimed.
+
+## Installable Python package
+
+Python 3.11–3.13; desktop use requires Tk. Windows is the maintained desktop platform.
+From a source checkout:
+
+```bash
+python -m pip install ".[test]"
+straintrace --help
+straintrace-gui
+```
+
+For a reproducible numerical check, run from a different directory:
+
+```bash
+straintrace benchmark --output straintrace-synthetic-check
+```
+
+This generates its own synthetic images and reports defined numerical gates. It is
+not experimental accuracy or quality-threshold calibration. See [API](docs/API.md),
+[contributing](CONTRIBUTING.md), and [support](SUPPORT.md).
+
+## Current license and historical archives
+
+The author authorized **MIT** licensing of the current source on 27 September 2026.
+See [LICENSE.txt](LICENSE.txt). Historical ezDIC archives retain their original records;
+[the historical metadata](docs/history/pre-mit/LICENSE.txt) does not govern this candidate.
+The existing DOI is not an archive of the new MIT preparation. Legacy module names,
+source version 0.1.4 and executable identity remain for compatibility; use the Git commit
+to identify this candidate and choose a distinct final release version after review.
