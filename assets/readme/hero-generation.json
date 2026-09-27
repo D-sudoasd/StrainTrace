@@ -1,0 +1,12 @@
+{
+  "name": "StrainTrace",
+  "subtitle": "Image-based displacement and strain",
+  "palette": "Deep forest navy, jade, pale mint and restrained orange",
+  "motif": "A clear speckled reference specimen plane next to a slightly deformed plane, linked by fine tracking guides. A few tasteful displacement arrows and a sparse deformation grid communicate digital image correlation. No machinery, no human hands, no invented colorbar or numerical measurement.",
+  "tool": "image_gen built-in; model identifier not exposed",
+  "revision": null,
+  "prompt": "Create one exceptionally polished scientific software README cover banner, wide landscape approximately 2.4:1 aspect ratio, premium editorial art direction, high resolution. Project: StrainTrace. Palette: Deep forest navy, jade, pale mint and restrained orange. Concept: A clear speckled reference specimen plane next to a slightly deformed plane, linked by fine tracking guides. A few tasteful displacement arrows and a sparse deformation grid communicate digital image correlation. No machinery, no human hands, no invented colorbar or numerical measurement. Compose generous negative space and sharply legible refined sans-serif typography integrated with the scientific motif. Exact text, no other copy: \"StrainTrace\" large, \"Image-based displacement and strain\" smaller, and a discreet \"Conceptual illustration\". Make name/subtitle read immediately at GitHub width. Restrained three-dimensional material, carefully controlled highlights, precise linework, sophisticated hierarchy and balanced composition. No generic AI neon clouds, no random particles, no badges, no claims, no photoreal experimental data, no fake application screenshot, no watermarks or publisher branding. This is an editorial cover, not a quantitative paper figure.",
+  "created_on": "2026-09-27",
+  "purpose": "README conceptual cover only, not experimental data or software output",
+  "sha256": "65a5cbe82226578358162b5ce0c6bc65174593761a9e4f80622c70c8f713b8b5"
+}

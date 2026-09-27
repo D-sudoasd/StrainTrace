@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme/hero.svg" width="100%" alt="StrainTrace: virtual extensometer and in-plane full-field 2D DIC for image sequences.">
+  <img src="assets/readme/hero.png" width="100%" alt="StrainTrace: Image-based displacement and strain. AI-generated conceptual illustration.">
 </p>
 
 # StrainTrace
@@ -65,6 +65,8 @@ Full-field 2D DIC:    Load images → draw field ROI → IC-GN/IC-LM → dic/
 ```
 
 ## Full-field output contract
+
+<p align="center"><img src="paper/figures/workflow.png" width="100%" alt="Virtual-extensometer and fixed-reference 2D DIC workflows and output records."></p>
 
 Full-field analysis uses the first frame in the selected analysis range as one fixed reference. Each later frame is correlated to that same reference; the workflow does not silently switch to a frame-to-frame reference. The rectangular ROI is sampled at points of interest (POIs), so the result is a POI grid rather than a value at every image pixel. It is not a 3D measurement.
 

@@ -1,0 +1,984 @@
+{
+  "report_version": "ezdic-benchmark-report-v5",
+  "cases_version": "ezdic-benchmark-cases-v3",
+  "migration": {
+    "previous_report_version": "ezdic-benchmark-report-v4",
+    "previous_cases_version": "ezdic-benchmark-cases-v2",
+    "reason": "quality threshold was reclassified as NOT_CALIBRATED and rejected outcomes entered the ranking population"
+  },
+  "locked_cases_hash": "3dbe0dae3fdf8f30ec32c9fd8f036f0a53b4a705380626e7860773f62f31cb20",
+  "app": {
+    "name": "ezDIC",
+    "benchmark": "quality_to_known_error",
+    "version": "v0.2.0-dev"
+  },
+  "code": {
+    "module": "benchmarks.run_benchmark",
+    "source_sha256": "fe6b69a46bd356c426b811b2236889a2247b22407470478a75803c6c8ef3996d",
+    "benchmark_runner_source_sha256": "fe6b69a46bd356c426b811b2236889a2247b22407470478a75803c6c8ef3996d",
+    "benchmark_source_sha256": "500166303fc7570738eb73507e817d02e44f6ab710cb182c4fb3c8a01fb5851c",
+    "synthetic_cases_source_sha256": "152737174ed7e1375e8548ddcb668acfafe81ded6b71b0543833b1b0ae5ed92f",
+    "cases_json_sha256": "1937ce09f8c7c532769d24ab488051777d7a13486b16e099d8e46abab79219af",
+    "core_source_sha256": "c48d289020cf28f7ec0ae262dddb83caa6df67f937f7c1fbcdb99b774f9179e6",
+    "cli_source_sha256": "a97692774cda2d44916c1b1f2b49f72b16786450086e72328babbb48eac433b5",
+    "benchmark_facade": {
+      "module": "ezdic_benchmark",
+      "source_sha256": "500166303fc7570738eb73507e817d02e44f6ab710cb182c4fb3c8a01fb5851c"
+    },
+    "core": {
+      "module": "ezdic_core",
+      "source_sha256": "c48d289020cf28f7ec0ae262dddb83caa6df67f937f7c1fbcdb99b774f9179e6"
+    },
+    "cli": {
+      "module": "ezdic_cli",
+      "source_sha256": "a97692774cda2d44916c1b1f2b49f72b16786450086e72328babbb48eac433b5"
+    }
+  },
+  "environment": {
+    "python": "3.13.0",
+    "platform": "Windows",
+    "image_shape": [
+      192,
+      192
+    ]
+  },
+  "contract": {
+    "image_shape": [
+      192,
+      192
+    ],
+    "roi": [
+      40,
+      60,
+      88,
+      88
+    ],
+    "subset_size": 21,
+    "step": 8,
+    "strain_window": 5,
+    "coordinate_order": "row-major y then x; exactly 81 locked POIs",
+    "reference_frame": "fixed clean reference; each deformed image is compared to it",
+    "solver": {
+      "subset_size": 21,
+      "step": 8,
+      "zncc_min": 0.75,
+      "strain_window": 5,
+      "smooth_sigma": 0.0
+    }
+  },
+  "texture_preflight_contract": {
+    "version": "texture_preflight_v2",
+    "min_std": 8.0,
+    "min_contrast": 25.0,
+    "max_saturated_frac": 0.2,
+    "min_structure_ratio": 0.02,
+    "max_directional_coherence": 0.85,
+    "min_periodicity_score": 0.9
+  },
+  "quality_contract": {
+    "version": "quality_score_v1",
+    "error_tolerance_px": 0.25,
+    "quality_validity_required": true,
+    "illustrative_quality_threshold": {
+      "status": "NOT_CALIBRATED",
+      "quality_accept_score_min": 0.5
+    },
+    "roc_auc_min": 0.9,
+    "minimum_bad_label_count": 2,
+    "minimum_corruption_row_count": 4,
+    "score_components": {
+      "zncc": 0.25,
+      "second_peak_margin": 0.15,
+      "second_peak_ratio_best_over_second": 0.15,
+      "residual_rms": 0.15,
+      "hessian_condition_number": 0.15,
+      "iterations": 0.05,
+      "converged": 0.1
+    },
+    "score_normalization": {
+      "zncc_floor": 0.5,
+      "zncc_span": 0.5,
+      "second_peak_margin_span": 0.25,
+      "second_peak_ratio_floor": 1.0,
+      "second_peak_ratio_span": 0.75,
+      "residual_rms_scale": 0.1,
+      "hessian_condition_ceiling": 1000.0,
+      "iterations_free_ceiling": 8.0,
+      "iterations_span": 40.0
+    },
+    "texture_preflight": {
+      "version": "texture_preflight_v2",
+      "min_std": 8.0,
+      "min_contrast": 25.0,
+      "max_saturated_frac": 0.2,
+      "min_structure_ratio": 0.02,
+      "max_directional_coherence": 0.85,
+      "min_periodicity_score": 0.9
+    },
+    "corruption_panel": {
+      "version": "image_corruption_panel_v1",
+      "apply_to": "deformed_image_only",
+      "target_coordinate": "oracle_deformed_poi_center",
+      "variants": [
+        {
+          "variant_id": "gaussian_noise_target_0",
+          "case_ids": [
+            "small_translation",
+            "large_translation"
+          ],
+          "target_point_indices": [
+            0
+          ],
+          "radius_px": 3,
+          "sigma_gray": 160.0,
+          "seed": 1701
+        },
+        {
+          "variant_id": "gaussian_noise_target_80",
+          "case_ids": [
+            "small_translation",
+            "large_translation"
+          ],
+          "target_point_indices": [
+            80
+          ],
+          "radius_px": 4,
+          "sigma_gray": 160.0,
+          "seed": 1701
+        }
+      ]
+    }
+  },
+  "quality_error": {
+    "version": "quality_score_v1",
+    "threshold_status": "NOT_CALIBRATED",
+    "quality_threshold_evaluated": false,
+    "quality_threshold_pass": null,
+    "error_tolerance_px": 0.25,
+    "illustrative_quality_accept_score_min": 0.5,
+    "point_count": 565,
+    "finite_error_label_count": 565,
+    "ranking_point_count": 567,
+    "ranking_label_basis": "numeric solver rows; accepted finite error <= tolerance is good, rejected or nonfinite is bad; near-1D preflight excluded",
+    "all_row_count": 648,
+    "rejected_point_count": 83,
+    "good_label_count": 563,
+    "bad_label_count": 2,
+    "ranking_good_label_count": 563,
+    "ranking_bad_label_count": 4,
+    "ranking_rejected_bad_count": 2,
+    "minimum_bad_label_count": 2,
+    "corruption_row_count": 4,
+    "minimum_corruption_row_count": 4,
+    "roc_auc": 0.9942273534635879,
+    "roc_auc_min": 0.9,
+    "roc_auc_gate": true,
+    "false_accept_count": 2,
+    "false_reject_count": 0,
+    "false_accept_rate": 1.0,
+    "false_reject_rate": 0.0,
+    "ranking_false_accept_count": 2,
+    "ranking_false_reject_count": 0,
+    "ranking_false_accept_rate": 0.5,
+    "ranking_false_reject_rate": 0.0,
+    "class_conditional_rates": {
+      "finite_error_labels": {
+        "false_accept_count": 2,
+        "bad_label_count": 2,
+        "false_accept_rate": 1.0,
+        "false_reject_count": 0,
+        "good_label_count": 563,
+        "false_reject_rate": 0.0
+      },
+      "ranking_outcomes": {
+        "false_accept_count": 2,
+        "bad_label_count": 4,
+        "false_accept_rate": 0.5,
+        "false_reject_count": 0,
+        "good_label_count": 563,
+        "false_reject_rate": 0.0
+      }
+    }
+  },
+  "quality_score": {
+    "version": "quality_score_v1",
+    "components": {
+      "zncc": 0.25,
+      "second_peak_margin": 0.15,
+      "second_peak_ratio_best_over_second": 0.15,
+      "residual_rms": 0.15,
+      "hessian_condition_number": 0.15,
+      "iterations": 0.05,
+      "converged": 0.1
+    },
+    "normalization": {
+      "zncc_floor": 0.5,
+      "zncc_span": 0.5,
+      "second_peak_margin_span": 0.25,
+      "second_peak_ratio_floor": 1.0,
+      "second_peak_ratio_span": 0.75,
+      "residual_rms_scale": 0.1,
+      "hessian_condition_ceiling": 1000.0,
+      "iterations_free_ceiling": 8.0,
+      "iterations_span": 40.0
+    },
+    "validity_required": true,
+    "ratio_direction": "best_over_second",
+    "threshold_status": "NOT_CALIBRATED",
+    "quality_threshold_evaluated": false,
+    "quality_threshold_pass": null,
+    "illustrative_accept_score_min": 0.5,
+    "error_tolerance_px": 0.25,
+    "roc_auc": 0.9942273534635879,
+    "roc_auc_min": 0.9
+  },
+  "quality_auc": 0.9942273534635879,
+  "thresholds": {
+    "small_translation": {
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.05,
+      "p95_error_px_max": 0.1,
+      "max_error_px_max": 0.15
+    },
+    "large_translation": {
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.05,
+      "p95_error_px_max": 0.1,
+      "max_error_px_max": 0.15
+    },
+    "small_affine_strain": {
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.05,
+      "p95_error_px_max": 0.1,
+      "max_error_px_max": 0.15,
+      "strain_component_abs_error_max": 0.0005,
+      "strain_valid_fraction_min": 0.8,
+      "strain_consistency_abs_error_max": 0.0005
+    },
+    "near_1d_periodic": {
+      "expected_failure_code": "AMBIGUOUS_TEXTURE",
+      "max_successful_export_artifacts": 0
+    }
+  },
+  "cases": [
+    {
+      "case_id": "small_translation",
+      "kind": "translation",
+      "seed": 17,
+      "case_hash": "3e798dbedd361b30fbff33638de665a588189a1fa5772de167d669b876c4408c",
+      "config_hash": "3e798dbedd361b30fbff33638de665a588189a1fa5772de167d669b876c4408c",
+      "input_sha256": "3e804075a1c0fbe3bc2a61d5bfc33184065613263cc05adb328edb1abaad74bc",
+      "thresholds": {
+        "valid_fraction_min": 0.95,
+        "rmse_px_max": 0.05,
+        "p95_error_px_max": 0.1,
+        "max_error_px_max": 0.15
+      },
+      "status": "PASS",
+      "benchmark_pass": true,
+      "scientific_ok": true,
+      "failure_code": null,
+      "texture_preflight": {
+        "ok": true,
+        "code": null,
+        "metrics": {
+          "std_gray": 77.69232940673828,
+          "contrast_p95_p5": 224.2419493675232,
+          "low_frac": 0.0,
+          "high_frac": 0.16206095041322313,
+          "structure_tensor_ratio": 0.9352860600952614,
+          "texture_rank_ratio": 0.9352860600952614,
+          "minor_to_major_gradient_eigenvalue_ratio": 0.9352860600952614,
+          "gradient_energy": 1745.5391597462635,
+          "directional_gradient_coherence": 0.00932645688962488,
+          "structure_tensor_eigenvalues": [
+            843.5850787767855,
+            901.954080969478
+          ],
+          "metrics_version": "structure_tensor_rank1_periodic_v2",
+          "periodicity_score": 0.6333981857811681,
+          "periodicity_period_px": 2,
+          "periodicity_axis": "x",
+          "discriminator_version": "rank_one_periodic_v1",
+          "rank_one_ratio": 0.9352860600952614,
+          "rank_one_score": 0.06471393990473862
+        },
+        "details": {},
+        "thresholds": {
+          "version": "texture_preflight_v2",
+          "min_std": 8.0,
+          "min_contrast": 25.0,
+          "max_saturated_frac": 0.2,
+          "min_structure_ratio": 0.02,
+          "max_directional_coherence": 0.85,
+          "min_periodicity_score": 0.9
+        }
+      },
+      "metrics": {
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "raw_finite_count": 81,
+        "rejected_count": 0,
+        "rmse_px": 0.019939074470495494,
+        "p95_error_px": 0.029262027232242572,
+        "max_error_px": 0.032582835504919486,
+        "false_accept_count": 0,
+        "false_reject_count": 0,
+        "quality_false_accept_count": 0,
+        "quality_false_reject_count": 0
+      },
+      "gates": {
+        "diagnostics_complete": true,
+        "valid_fraction": true,
+        "rmse_px": true,
+        "p95_error_px": true,
+        "max_error_px": true,
+        "corruption_rows": true
+      },
+      "runs": [
+        {
+          "run_id": "clean",
+          "panel": null,
+          "status": "PASS",
+          "strict_gate_evaluated": true,
+          "observed": {
+            "valid_fraction": 1.0,
+            "strain_valid_fraction": 1.0,
+            "raw_finite_count": 81,
+            "rejected_count": 0,
+            "rmse_px": 0.019939074470495494,
+            "p95_error_px": 0.029262027232242572,
+            "max_error_px": 0.032582835504919486,
+            "false_accept_count": 0,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 0,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true,
+            "valid_fraction": true,
+            "rmse_px": true,
+            "p95_error_px": true,
+            "max_error_px": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        },
+        {
+          "run_id": "gaussian_noise_target_0",
+          "panel": {
+            "panel_version": "image_corruption_panel_v1",
+            "variant_id": "gaussian_noise_target_0",
+            "target_point_indices": [
+              0
+            ],
+            "radius_px": 3,
+            "sigma_gray": 160.0,
+            "seed": 1701,
+            "applied_to": "deformed_image_only"
+          },
+          "status": "PANEL_OBSERVATION",
+          "strict_gate_evaluated": false,
+          "observed": {
+            "valid_fraction": 1.0,
+            "strain_valid_fraction": 1.0,
+            "raw_finite_count": 81,
+            "rejected_count": 0,
+            "rmse_px": 0.04628106565291975,
+            "p95_error_px": 0.032582835504919486,
+            "max_error_px": 0.25739955822182586,
+            "false_accept_count": 1,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 1,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        },
+        {
+          "run_id": "gaussian_noise_target_80",
+          "panel": {
+            "panel_version": "image_corruption_panel_v1",
+            "variant_id": "gaussian_noise_target_80",
+            "target_point_indices": [
+              80
+            ],
+            "radius_px": 4,
+            "sigma_gray": 160.0,
+            "seed": 1701,
+            "applied_to": "deformed_image_only"
+          },
+          "status": "PANEL_OBSERVATION",
+          "strict_gate_evaluated": false,
+          "observed": {
+            "valid_fraction": 0.9876543209876543,
+            "strain_valid_fraction": 0.9876543209876543,
+            "raw_finite_count": 80,
+            "rejected_count": 1,
+            "rmse_px": 0.02361856001201188,
+            "p95_error_px": 0.03072241002094009,
+            "max_error_px": 0.0933221265812201,
+            "false_accept_count": 0,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 0,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        }
+      ],
+      "corruption_panel_version": "image_corruption_panel_v1"
+    },
+    {
+      "case_id": "large_translation",
+      "kind": "translation",
+      "seed": 17,
+      "case_hash": "5ec5a9372697df0cdf63d9e3e27e78f72c8a5a8f95561157d2535a1c582c3c12",
+      "config_hash": "5ec5a9372697df0cdf63d9e3e27e78f72c8a5a8f95561157d2535a1c582c3c12",
+      "input_sha256": "64f19d9dfa3b21e9cc1811ddab0eeaf60d2e4260df0963124971690f32dc5ef3",
+      "thresholds": {
+        "valid_fraction_min": 0.95,
+        "rmse_px_max": 0.05,
+        "p95_error_px_max": 0.1,
+        "max_error_px_max": 0.15
+      },
+      "status": "PASS",
+      "benchmark_pass": true,
+      "scientific_ok": true,
+      "failure_code": null,
+      "texture_preflight": {
+        "ok": true,
+        "code": null,
+        "metrics": {
+          "std_gray": 77.69232940673828,
+          "contrast_p95_p5": 224.2419493675232,
+          "low_frac": 0.0,
+          "high_frac": 0.16206095041322313,
+          "structure_tensor_ratio": 0.9352860600952614,
+          "texture_rank_ratio": 0.9352860600952614,
+          "minor_to_major_gradient_eigenvalue_ratio": 0.9352860600952614,
+          "gradient_energy": 1745.5391597462635,
+          "directional_gradient_coherence": 0.00932645688962488,
+          "structure_tensor_eigenvalues": [
+            843.5850787767855,
+            901.954080969478
+          ],
+          "metrics_version": "structure_tensor_rank1_periodic_v2",
+          "periodicity_score": 0.6333981857811681,
+          "periodicity_period_px": 2,
+          "periodicity_axis": "x",
+          "discriminator_version": "rank_one_periodic_v1",
+          "rank_one_ratio": 0.9352860600952614,
+          "rank_one_score": 0.06471393990473862
+        },
+        "details": {},
+        "thresholds": {
+          "version": "texture_preflight_v2",
+          "min_std": 8.0,
+          "min_contrast": 25.0,
+          "max_saturated_frac": 0.2,
+          "min_structure_ratio": 0.02,
+          "max_directional_coherence": 0.85,
+          "min_periodicity_score": 0.9
+        }
+      },
+      "metrics": {
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "raw_finite_count": 81,
+        "rejected_count": 0,
+        "rmse_px": 0.011529723845911357,
+        "p95_error_px": 0.02398089477028113,
+        "max_error_px": 0.026990196683557104,
+        "false_accept_count": 0,
+        "false_reject_count": 0,
+        "quality_false_accept_count": 0,
+        "quality_false_reject_count": 0
+      },
+      "gates": {
+        "diagnostics_complete": true,
+        "valid_fraction": true,
+        "rmse_px": true,
+        "p95_error_px": true,
+        "max_error_px": true,
+        "pyramid_levels": true,
+        "corruption_rows": true
+      },
+      "runs": [
+        {
+          "run_id": "clean",
+          "panel": null,
+          "status": "PASS",
+          "strict_gate_evaluated": true,
+          "observed": {
+            "valid_fraction": 1.0,
+            "strain_valid_fraction": 1.0,
+            "raw_finite_count": 81,
+            "rejected_count": 0,
+            "rmse_px": 0.011529723845911357,
+            "p95_error_px": 0.02398089477028113,
+            "max_error_px": 0.026990196683557104,
+            "false_accept_count": 0,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 0,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true,
+            "valid_fraction": true,
+            "rmse_px": true,
+            "p95_error_px": true,
+            "max_error_px": true,
+            "pyramid_levels": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        },
+        {
+          "run_id": "gaussian_noise_target_0",
+          "panel": {
+            "panel_version": "image_corruption_panel_v1",
+            "variant_id": "gaussian_noise_target_0",
+            "target_point_indices": [
+              0
+            ],
+            "radius_px": 3,
+            "sigma_gray": 160.0,
+            "seed": 1701,
+            "applied_to": "deformed_image_only"
+          },
+          "status": "PANEL_OBSERVATION",
+          "strict_gate_evaluated": false,
+          "observed": {
+            "valid_fraction": 1.0,
+            "strain_valid_fraction": 1.0,
+            "raw_finite_count": 81,
+            "rejected_count": 0,
+            "rmse_px": 0.0490516427705283,
+            "p95_error_px": 0.026990196683557104,
+            "max_error_px": 0.3178957323053715,
+            "false_accept_count": 1,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 1,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        },
+        {
+          "run_id": "gaussian_noise_target_80",
+          "panel": {
+            "panel_version": "image_corruption_panel_v1",
+            "variant_id": "gaussian_noise_target_80",
+            "target_point_indices": [
+              80
+            ],
+            "radius_px": 4,
+            "sigma_gray": 160.0,
+            "seed": 1701,
+            "applied_to": "deformed_image_only"
+          },
+          "status": "PANEL_OBSERVATION",
+          "strict_gate_evaluated": false,
+          "observed": {
+            "valid_fraction": 0.9876543209876543,
+            "strain_valid_fraction": 0.9876543209876543,
+            "raw_finite_count": 80,
+            "rejected_count": 1,
+            "rmse_px": 0.03753840100543573,
+            "p95_error_px": 0.025428296855793377,
+            "max_error_px": 0.22923298645005563,
+            "false_accept_count": 0,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 0,
+            "quality_false_reject_count": 0
+          },
+          "gates": {
+            "diagnostics_complete": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        }
+      ],
+      "corruption_panel_version": "image_corruption_panel_v1"
+    },
+    {
+      "case_id": "small_affine_strain",
+      "kind": "affine",
+      "seed": 23,
+      "case_hash": "ceb0a63aa61ab37a76f463e55bb47127aba190ef219fd3313721aac727abba71",
+      "config_hash": "ceb0a63aa61ab37a76f463e55bb47127aba190ef219fd3313721aac727abba71",
+      "input_sha256": "bd6e4656149339e3e0e3ebbe0ad23c8d9eb77ec1815ed5829ff0683bb5a90d5f",
+      "thresholds": {
+        "valid_fraction_min": 0.95,
+        "rmse_px_max": 0.05,
+        "p95_error_px_max": 0.1,
+        "max_error_px_max": 0.15,
+        "strain_component_abs_error_max": 0.0005,
+        "strain_valid_fraction_min": 0.8,
+        "strain_consistency_abs_error_max": 0.0005
+      },
+      "status": "PASS",
+      "benchmark_pass": true,
+      "scientific_ok": true,
+      "failure_code": null,
+      "texture_preflight": {
+        "ok": true,
+        "code": null,
+        "metrics": {
+          "std_gray": 75.73677825927734,
+          "contrast_p95_p5": 221.67289905548097,
+          "low_frac": 0.0,
+          "high_frac": 0.16270661157024793,
+          "structure_tensor_ratio": 0.9382107030336673,
+          "texture_rank_ratio": 0.9382107030336673,
+          "minor_to_major_gradient_eigenvalue_ratio": 0.9382107030336673,
+          "gradient_energy": 1633.1240329258662,
+          "directional_gradient_coherence": 0.005519447542641189,
+          "structure_tensor_eigenvalues": [
+            790.5303817971642,
+            842.5936511287022
+          ],
+          "metrics_version": "structure_tensor_rank1_periodic_v2",
+          "periodicity_score": 0.6201619387536572,
+          "periodicity_period_px": 2,
+          "periodicity_axis": "y",
+          "discriminator_version": "rank_one_periodic_v1",
+          "rank_one_ratio": 0.9382107030336673,
+          "rank_one_score": 0.06178929696633273
+        },
+        "details": {},
+        "thresholds": {
+          "version": "texture_preflight_v2",
+          "min_std": 8.0,
+          "min_contrast": 25.0,
+          "max_saturated_frac": 0.2,
+          "min_structure_ratio": 0.02,
+          "max_directional_coherence": 0.85,
+          "min_periodicity_score": 0.9
+        }
+      },
+      "metrics": {
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "raw_finite_count": 81,
+        "rejected_count": 0,
+        "rmse_px": 0.0036344039490451537,
+        "p95_error_px": 0.006512649134610679,
+        "max_error_px": 0.010373674753570926,
+        "false_accept_count": 0,
+        "false_reject_count": 0,
+        "quality_false_accept_count": 0,
+        "quality_false_reject_count": 0,
+        "estimated_F": [
+          [
+            1.0119850289355974,
+            0.006974982837275979
+          ],
+          [
+            -0.004021334173409178,
+            0.989015622083158
+          ]
+        ],
+        "oracle_F": [
+          [
+            1.012,
+            0.007
+          ],
+          [
+            -0.004,
+            0.989
+          ]
+        ],
+        "estimated_E": [
+          0.012064934959158058,
+          -0.01089972444494186,
+          0.001540707944643743
+        ],
+        "oracle_E": [
+          0.01207999999999998,
+          -0.010915000000000008,
+          0.001564
+        ],
+        "fit_count": 81,
+        "fit_rank": 3,
+        "strain_component_abs_error_max": 0.0002738786399401061,
+        "strain_consistency_abs_error_max": 0.00027090769474797413
+      },
+      "gates": {
+        "diagnostics_complete": true,
+        "valid_fraction": true,
+        "rmse_px": true,
+        "p95_error_px": true,
+        "max_error_px": true,
+        "affine_fit": true,
+        "affine_metadata": true,
+        "strain_component_abs_error": true,
+        "strain_consistency_abs_error": true,
+        "strain_valid_fraction": true,
+        "corruption_rows": true
+      },
+      "runs": [
+        {
+          "run_id": "clean",
+          "panel": null,
+          "status": "PASS",
+          "strict_gate_evaluated": true,
+          "observed": {
+            "valid_fraction": 1.0,
+            "strain_valid_fraction": 1.0,
+            "raw_finite_count": 81,
+            "rejected_count": 0,
+            "rmse_px": 0.0036344039490451537,
+            "p95_error_px": 0.006512649134610679,
+            "max_error_px": 0.010373674753570926,
+            "false_accept_count": 0,
+            "false_reject_count": 0,
+            "quality_false_accept_count": 0,
+            "quality_false_reject_count": 0,
+            "estimated_F": [
+              [
+                1.0119850289355974,
+                0.006974982837275979
+              ],
+              [
+                -0.004021334173409178,
+                0.989015622083158
+              ]
+            ],
+            "oracle_F": [
+              [
+                1.012,
+                0.007
+              ],
+              [
+                -0.004,
+                0.989
+              ]
+            ],
+            "estimated_E": [
+              0.012064934959158058,
+              -0.01089972444494186,
+              0.001540707944643743
+            ],
+            "oracle_E": [
+              0.01207999999999998,
+              -0.010915000000000008,
+              0.001564
+            ],
+            "fit_count": 81,
+            "fit_rank": 3,
+            "strain_component_abs_error_max": 0.0002738786399401061,
+            "strain_consistency_abs_error_max": 0.00027090769474797413
+          },
+          "gates": {
+            "diagnostics_complete": true,
+            "valid_fraction": true,
+            "rmse_px": true,
+            "p95_error_px": true,
+            "max_error_px": true,
+            "affine_fit": true,
+            "affine_metadata": true,
+            "strain_component_abs_error": true,
+            "strain_consistency_abs_error": true,
+            "strain_valid_fraction": true
+          },
+          "diagnostic_keys": [
+            "converged",
+            "hessian_condition_number",
+            "iterations",
+            "residual_rms",
+            "second_peak_margin",
+            "stop_reason",
+            "zncc"
+          ],
+          "point_count": 81
+        }
+      ],
+      "corruption_panel_version": "image_corruption_panel_v1"
+    },
+    {
+      "run_id": "preflight",
+      "status": "REJECTED",
+      "benchmark_pass": true,
+      "scientific_ok": false,
+      "failure_code": "AMBIGUOUS_TEXTURE",
+      "outcome": "AMBIGUOUS_TEXTURE",
+      "solver_calls": 0,
+      "successful_export_artifacts": 0,
+      "texture_preflight": {
+        "ok": false,
+        "code": "AMBIGUOUS_TEXTURE",
+        "metrics": {
+          "std_gray": 70.47953033447266,
+          "contrast_p95_p5": 200.0,
+          "low_frac": 0.0,
+          "high_frac": 0.0,
+          "structure_tensor_ratio": 0.0,
+          "texture_rank_ratio": 0.0,
+          "minor_to_major_gradient_eigenvalue_ratio": 0.0,
+          "gradient_energy": 729.9887920199736,
+          "directional_gradient_coherence": 0.017320472616451612,
+          "structure_tensor_eigenvalues": [
+            0.0,
+            729.9887920199736
+          ],
+          "metrics_version": "structure_tensor_rank1_periodic_v2",
+          "periodicity_score": 0.8157926182583469,
+          "periodicity_period_px": 16,
+          "periodicity_axis": "x",
+          "discriminator_version": "rank_one_periodic_v1",
+          "rank_one_ratio": 0.0,
+          "rank_one_score": 1.0
+        },
+        "details": {
+          "roi": [
+            40,
+            60,
+            88,
+            88
+          ],
+          "metrics": {
+            "std_gray": 70.47953033447266,
+            "contrast_p95_p5": 200.0,
+            "low_frac": 0.0,
+            "high_frac": 0.0,
+            "structure_tensor_ratio": 0.0,
+            "texture_rank_ratio": 0.0,
+            "minor_to_major_gradient_eigenvalue_ratio": 0.0,
+            "gradient_energy": 729.9887920199736,
+            "directional_gradient_coherence": 0.017320472616451612,
+            "structure_tensor_eigenvalues": [
+              0.0,
+              729.9887920199736
+            ],
+            "metrics_version": "structure_tensor_rank1_periodic_v2",
+            "periodicity_score": 0.8157926182583469,
+            "periodicity_period_px": 16,
+            "periodicity_axis": "x",
+            "discriminator_version": "rank_one_periodic_v1",
+            "rank_one_ratio": 0.0,
+            "rank_one_score": 1.0
+          },
+          "min_std": 8.0,
+          "min_contrast": 25.0,
+          "max_saturated_frac": 0.2,
+          "min_structure_ratio": 0.02,
+          "max_directional_coherence": 0.85,
+          "min_periodicity_score": 0.9,
+          "metrics_version": "structure_tensor_rank1_periodic_v2",
+          "discriminator_version": "rank_one_periodic_v1",
+          "preflight_version": "texture_preflight_v2",
+          "message": "AMBIGUOUS_TEXTURE"
+        },
+        "thresholds": {
+          "version": "texture_preflight_v2",
+          "min_std": 8.0,
+          "min_contrast": 25.0,
+          "max_saturated_frac": 0.2,
+          "min_structure_ratio": 0.02,
+          "max_directional_coherence": 0.85,
+          "min_periodicity_score": 0.9
+        }
+      },
+      "gates": {
+        "ambiguous_texture_rejected": true,
+        "zero_successful_export_artifacts": true
+      },
+      "point_count": 81,
+      "case_id": "near_1d_periodic",
+      "kind": "near_1d_periodic",
+      "seed": 29,
+      "case_hash": "39e68dd5016afde118fde61cc62f50eba3fffce320580f3e18c00a6a8fd737cb",
+      "config_hash": "39e68dd5016afde118fde61cc62f50eba3fffce320580f3e18c00a6a8fd737cb",
+      "thresholds": {
+        "expected_failure_code": "AMBIGUOUS_TEXTURE",
+        "max_successful_export_artifacts": 0
+      },
+      "input_sha256": "6f77ebe6d64aead15f0c2c7e0797305b4e9dea71f2813b57b1e4f6eec00d5ec4"
+    }
+  ],
+  "artifacts": {
+    "benchmark_report_csv": "benchmark_report.csv",
+    "benchmark_report_csv_sha256": "55898d18291c1de595e6442a5ee7ad9fe4fc479954bdbc1fcefcd349b87a7939"
+  },
+  "gate_summary": {
+    "numeric_baseline_pass": true,
+    "near_1d_preflight_pass": true,
+    "quality_ranking_pass": true,
+    "quality_threshold_evaluated": false,
+    "quality_threshold_pass": null,
+    "code_provenance": true,
+    "csv_rows": true,
+    "csv_exists": true
+  },
+  "gates": {
+    "numeric_baseline_pass": true,
+    "near_1d_preflight_pass": true,
+    "quality_ranking_pass": true,
+    "quality_threshold_evaluated": false,
+    "quality_threshold_pass": null,
+    "code_provenance": true,
+    "csv_rows": true,
+    "csv_exists": true
+  },
+  "overall_pass": true,
+  "exit_code": 0
+}

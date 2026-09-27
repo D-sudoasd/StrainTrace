@@ -77,6 +77,8 @@ established package rather than interpret this scope as a substitute.
 
 # Software design
 
+![The two analysis paths share image inputs and configuration records but retain distinct measurement outputs. Displacement validity and strain validity remain separate in the full-field path.](figures/workflow.png){#fig:workflow width="100%"}
+
 StrainTrace separates its numerical and export functions from the Tk desktop
 interface. The command-line interface validates a versioned JSON configuration,
 normalizes defaults and rejects unknown fields or non-finite values. The same
@@ -115,6 +117,8 @@ The benchmark also distinguishes quality ranking from calibration of a quality
 threshold. Passing it does not establish uncertainty for an experimental camera,
 specimen or texture, and the paper makes no such claim.
 
+![Locked synthetic small-translation case. (a) The generated reference image and 81 evaluation points. (b) Signed displacement residuals relative to the prescribed translation of 2.3 pixels in x and -1.2 pixels in y. Observations are exported by the actual benchmark implementation; this is a software verification case, not experimental accuracy validation.](figures/synthetic_verification.png){#fig:verification width="100%"}
+
 # Research impact statement
 
 On 27 September 2026, the author confirmed using StrainTrace in the research
@@ -135,6 +139,8 @@ drafting, and automated verification. The complete history of earlier AI
 assistance has not been confirmed for this software. The sole author must review,
 edit and validate the assisted outputs and confirm the complete disclosure and
 human responsibility for scientific and design decisions before submission.
+
+The README cover is AI-generated conceptual artwork. Manuscript diagrams and numerical plots are produced by repository scripts; scientific data are not retouched by an image-generation model.
 
 # Acknowledgements
 

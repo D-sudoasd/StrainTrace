@@ -9,3 +9,7 @@ include RELEASE_NOTES*.md
 
 recursive-include docs/joss *.md *.json
 include scripts/check_joss_artifacts.py
+
+recursive-include assets/readme *.svg *.png *.json
+
+recursive-include paper *.pdf *.json

@@ -45,7 +45,8 @@
   },
   "ai_assistance": {
     "current_round": "OpenAI Codex, GPT-6, 2026-09-27: repository audit, packaging, tests, documentation, manuscript and bibliography preparation, validation and Git integration.",
-    "historical_disclosure": "Retain project-specific disclosures; AbsSAXS AI history is not copied to these projects."
+    "historical_disclosure": "Retain project-specific disclosures; AbsSAXS AI history is not copied to these projects.",
+    "visual_revision": "2026-09-27: Codex revised reproducible manuscript figure scripts, captured real application widgets and prepared conceptual README covers using the built-in image-generation tool (model identifier not exposed). Prompt and image provenance are retained in the repository. Final author review remains pending."
   },
   "submission_date": null,
   "related_publications": [
