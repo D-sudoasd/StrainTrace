@@ -24,3 +24,11 @@ strain_results_*.csv
 Thumbs.db
 .vscode/
 .idea/
+
+*.egg-info/
+outputs/
+paper/paper.pdf
+paper/paper.tex
+paper/paper.html
+paper/paper.jats
+paper/paper.crossref

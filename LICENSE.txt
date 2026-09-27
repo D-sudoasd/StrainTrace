@@ -1,30 +1,21 @@
-ezDIC Usage Terms
-=================
+MIT License
 
-Version: 0.1.4
-Release date: 2026-08-30
+Copyright (c) 2026 Delun Gong
 
-Developer:
-Dr. Delun Gong
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-DOI:
-10.5281/zenodo.20222465
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This software was developed by Dr. Delun Gong for lightweight extraction of linear strain from image sequences.
-
-Recommended citation:
-Gong, D. (2026). ezDIC: A lightweight virtual extensometer for extracting linear strain from image sequences (Version 0.1.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.20222465
-
-This repository is shared for research visibility, evaluation, and authorized research or teaching use. It is not released under an open-source license.
-
-Users are not permitted to:
-1. claim that they developed this software;
-2. remove or alter the developer attribution;
-3. redistribute, copy, forward, or share this software with unauthorized users;
-4. use this software outside the authorized research or teaching context.
-
-If you use ezDIC in a thesis, paper, presentation, or report, please cite the DOI above.
-
-If you need to share, reuse, modify, or redistribute this software, please obtain permission from Dr. Delun Gong first.
-
-Unless explicit written permission is granted, all rights are reserved.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

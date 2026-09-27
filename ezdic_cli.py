@@ -21,6 +21,10 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = 1
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "run_config_v1.json"
+if not SCHEMA_PATH.is_file():
+    from importlib.resources import files
+
+    SCHEMA_PATH = Path(str(files("straintrace_data").joinpath("run_config_v1.json")))
 EXIT_SUCCESS = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_RUNTIME_ERROR = 3

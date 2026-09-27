@@ -402,15 +402,21 @@ function Test-ReleaseContracts {
         throw "CITATION.cff does not define a readable version."
     }
     if ($Matches[1] -ne $Version) { throw "CITATION.cff version $($Matches[1]) does not match $Version." }
-    if ($citationText -notmatch '(?m)^\s*date-released:\s*2026-08-30\s*$') {
-        throw "CITATION.cff date-released must be 2026-08-30 for this source snapshot."
+    # An unreleased preparation candidate must not invent a release date.
+    $citationDate = $null
+    if ($citationText -match '(?m)^date-released:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$') {
+        $citationDate = $Matches[1]
     }
 
     $zenodoText = Read-RequiredText (Join-Path $Root ".zenodo.json")
     try { $zenodo = $zenodoText | ConvertFrom-Json }
     catch { throw ".zenodo.json is not valid JSON: $($_.Exception.Message)" }
     if ([string]$zenodo.version -ne $Version) { throw ".zenodo.json version $($zenodo.version) does not match $Version." }
-    if ([string]$zenodo.publication_date -ne "2026-08-30") { throw ".zenodo.json publication_date must be 2026-08-30." }
+    $zenodoDate = $zenodo.PSObject.Properties["publication_date"]
+    $publicationDate = if ($null -eq $zenodoDate) { $null } else { [string]$zenodoDate.Value }
+    if ([string]$publicationDate -ne [string]$citationDate) {
+        throw "CITATION.cff and .zenodo.json release dates must agree, or both be absent for an unreleased candidate."
+    }
 
     $specText = Read-RequiredText (Join-Path $Root "ezDIC.spec")
     if ($specText -notmatch 'name\s*=\s*[''\"]ezDIC[''\"]') { throw "ezDIC.spec does not define the ezDIC executable." }

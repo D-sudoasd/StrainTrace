@@ -1,14 +1,14 @@
 {
-  "title": "StrainTrace: Virtual extensometry and in-plane digital image correlation",
+  "title": "ezDIC: Lightweight Virtual Extensometer for Linear Strain Extraction from Image Sequences",
   "upload_type": "software",
   "version": "0.1.4",
+  "publication_date": "2026-08-30",
   "language": "eng",
-  "access_right": "open",
+  "access_right": "restricted",
+  "access_conditions": "Access is granted for authorized research or teaching use. Contact Dr. Delun Gong for permission before redistribution, reuse outside the authorized context, or derivative use.",
   "creators": [
     {
-      "name": "Gong, Delun",
-      "affiliation": "Institute of Metal Research, Chinese Academy of Sciences, Shenyang 110016, China",
-      "orcid": "0000-0001-7877-7707"
+      "name": "Gong, Delun"
     }
   ],
   "description": "<p>ezDIC is a lightweight dual-mode workstation for image sequences. The virtual-extensometer mode tracks two user-defined ROI markers and exports engineering strain, true strain, and quality-control results. The full-field mode correlates each deformation frame to one fixed reference frame, samples a rectangular ROI on a POI grid with IC-GN or IC-LM, and exports displacement and strain maps under <code>dic/</code> for frames with a finite strain field.</p><p>Full-field coordinates and displacements are in px; strain components are dimensionless, and Exy/exy are tensor shear components. The fixed full-field core outputs are tabular data plus u/v/Exx/Eyy/Exy maps. An Exx overlay is optional. The result is a POI grid, not a per-pixel or 3D measurement.</p><p>Failed tracking frames and failed POIs remain NaN rather than being silently interpolated. A full-field frame with no finite strain points is skipped as a failed frame, and a run with no finite strain points fails instead of being reported as completed.</p>",
@@ -31,12 +31,11 @@
   ],
   "related_identifiers": [
     {
-      "identifier": "https://github.com/D-sudoasd/StrainTrace",
+      "identifier": "https://github.com/D-sudoasd/ezDIC",
       "relation": "isSupplementTo",
       "resource_type": "software",
       "scheme": "url"
     }
   ],
-  "notes": "Metadata for a future archive of the MIT-licensed source candidate. Not an update to the historical DOI 10.5281/zenodo.20222465. The source retains legacy version 0.1.4; select a distinct final version after review.",
-  "license": "mit"
+  "notes": "Developed by Dr. Delun Gong. Release date: 2026-08-30. DOI: 10.5281/zenodo.20222465. Recommended citation: Gong, D. (2026). ezDIC: A lightweight virtual extensometer for extracting linear strain from image sequences (Version 0.1.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.20222465. Users are not permitted to claim authorship, remove or alter attribution, redistribute the software to unauthorized users, or use it outside the authorized research or teaching context."
 }

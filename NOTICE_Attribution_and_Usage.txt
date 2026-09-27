@@ -1,25 +1,15 @@
-ezDIC Attribution and Usage Notice
-
-Version: 0.1.4
-Release date: 2026-08-30
+StrainTrace attribution and licensing
 
 Developer:
 Dr. Delun Gong
 
-DOI:
-10.5281/zenodo.20222465
+The author authorized MIT licensing for the current repository source on
+27 September 2026. See LICENSE.txt. Modification, commercial use and
+redistribution are permitted under that license; preserve the copyright and
+permission notice. Citation in scholarly work is requested, not an additional
+license restriction.
 
-This software was developed by Dr. Delun Gong for lightweight extraction of linear strain from image sequences.
-
-Recommended citation:
-Gong, D. (2026). ezDIC: A lightweight virtual extensometer for extracting linear strain from image sequences (Version 0.1.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.20222465
-
-Users are not permitted to:
-1. claim that they developed this software;
-2. remove or alter the developer attribution;
-3. redistribute, copy, forward, or share this software with unauthorized users;
-4. use this software outside the authorized research or teaching context.
-
-If you need to share or reuse this software, please obtain permission from Dr. Delun Gong first.
-
-If you use ezDIC in a thesis, paper, presentation, or report, please cite the DOI above.
+Historical ezDIC archives retain their original records and terms. The old
+archive DOI 10.5281/zenodo.20222465 is not an archive of this MIT candidate.
+See docs/history/pre-mit/ for the superseded repository metadata and license.
+No remote archive was changed by this source-license transition.

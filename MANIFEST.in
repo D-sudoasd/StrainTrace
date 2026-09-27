@@ -1,0 +1,11 @@
+include README.md README_使用说明.txt LICENSE.txt NOTICE_Attribution_and_Usage.txt CITATION.cff VERSION.txt
+include requirements*.txt build_release.ps1 *.spec start_ezDIC.bat
+recursive-include docs *.md *.json *.txt *.cff
+recursive-include paper *.md *.bib *.png *.svg *.py
+recursive-include tests *.py
+recursive-include schemas *.json
+recursive-include benchmarks *.json
+include RELEASE_NOTES*.md
+
+recursive-include docs/joss *.md *.json
+include scripts/check_joss_artifacts.py

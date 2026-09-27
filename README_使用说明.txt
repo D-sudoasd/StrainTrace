@@ -1,3 +1,5 @@
+当前源码许可更新（2026-09-27）：StrainTrace 已获作者授权采用 MIT 许可。允许修改、商业使用和再分发，须保留版权与许可声明。旧 ezDIC 归档不代表当前候选版本；历史条款保留于 docs/history/pre-mit。
+
 ezDIC v0.1.4 使用说明
 ======================
 发布日期：2026-08-30
@@ -6,7 +8,7 @@ ezDIC v0.1.4 使用说明
 v0.2.0-dev 开发目标（尚未发布）
 ------------------------------
 当前 `main` 源码树已经实现一个有明确边界的研究级升级，但没有修改 `VERSION.txt`、
-`CITATION.cff`、Zenodo 元数据、许可证、作者署名或 DOI；这些仍是本源代码快照的
+历史归档 DOI；2026-09-27 的 JOSS 准备已更新源码许可及引用信息，源码版本仍为
 v0.1.4 元数据。目标是固定参考、局部子集、面内 2D DIC 加现有 1D 虚拟引伸计，
 不是“超过所有 DIC 软件”或“已证明适用于实验数据”的声明。
 
@@ -297,15 +299,9 @@ PoissonRatio       = - ε_transverse / ε_axial   (engineering)
 --------
 Gong, D. (2026). ezDIC: A lightweight virtual extensometer for extracting linear strain from image sequences (Version 0.1.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.20222465
 
-归属与使用限制
+当前源码许可
 --------------
-用户不得：
-1. 声称该软件由其开发；
-2. 删除或修改开发者署名；
-3. 向未经授权的用户重新分发、复制、转发或分享该软件；
-4. 在获授权的科研或教学范围之外使用该软件。
-
-如需分享、复用、修改或重新分发，请先联系 Dr. Delun Gong 获得许可。论文、学位论文、报告或演示文稿使用 ezDIC 时，请引用上述 DOI。具体条款见 LICENSE.txt 与 NOTICE_Attribution_and_Usage.txt。
+当前源码采用 MIT 许可。允许使用、复制、修改和再分发，须保留版权和许可声明。具体条款见 LICENSE.txt。上列 DOI 属于历史 ezDIC 归档，使用当前候选版本时请同时记录 Git 提交，勿将历史归档当作本次源码。
 
 安全提示
 --------

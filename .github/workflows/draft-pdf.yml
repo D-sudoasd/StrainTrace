@@ -1,0 +1,35 @@
+name: Draft JOSS PDF
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paper:
+    name: Paper draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Build draft PDF with the Open Journals action
+        # master commit observed and verified on 2026-07-30
+        uses: openjournals/openjournals-draft-action@85a18372e48f551d8af9ddb7a747de685fbbb01c
+        with:
+          journal: joss
+          paper-path: paper/paper.md
+
+      - name: Upload paper artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: straintrace-joss-paper
+          path: paper/paper.pdf
+          if-no-files-found: error

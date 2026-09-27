@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "project": "StrainTrace",
+  "repository": "https://github.com/D-sudoasd/StrainTrace",
+  "version": "0.1.4",
+  "status": "preparation_candidate_not_submitted",
+  "policy_checked_on": "2026-09-27",
+  "policy_sources": [
+    "https://joss.readthedocs.io/en/latest/submitting.html",
+    "https://joss.readthedocs.io/en/latest/paper.html",
+    "https://joss.readthedocs.io/en/latest/review_criteria.html"
+  ],
+  "author": {
+    "name": "Delun Gong",
+    "orcid": "0000-0001-7877-7707",
+    "email": "dlgong17s@imr.ac.cn",
+    "affiliation": "Institute of Metal Research, Chinese Academy of Sciences, Shenyang 110016, China",
+    "sole_author_confirmed_on": "2026-09-27",
+    "source": "Author explicitly confirmed sole authorship and directed reuse of the confirmed AbsSAXS identity and declarations in this preparation conversation on 2026-09-27."
+  },
+  "declarations": {
+    "funding": "No external funding",
+    "sponsor_role": "Not applicable",
+    "competing_interests": "The author declares no competing interests",
+    "source": "Author-directed reuse of AbsSAXS confirmed declarations, 2026-09-27",
+    "human_review_of_this_revision_confirmed": false
+  },
+  "history": {
+    "repository_created_on": "2026-05-16",
+    "public_since_verified": null,
+    "conditional_planning_date": "2026-11-17",
+    "note": "Creation date is a lower bound, not proof of public visibility. Verify public availability and substantive iteration spanning more than six calendar months; inspect releases/issues/PRs and visibility history before submission."
+  },
+  "research_use": {
+    "status": "author_confirmed_records_not_audited",
+    "confirmed_on": "2026-09-27",
+    "doi": "10.1016/j.actamat.2026.122455",
+    "bibliographic_metadata_verified_with": "Crossref DOI API, 2026-09-27",
+    "statement": "The author confirmed that all four programs were used in the recent Acta Materialia study and identified it through the completed AbsSAXS submission materials.",
+    "historical_version": null,
+    "specific_operations_and_outputs": null,
+    "processing_record_location": null,
+    "cited_by_article": null,
+    "note": "Author confirmation establishes reported use, not independent reproduction or a verified software citation. Do not infer that the current version or every current feature was used."
+  },
+  "ai_assistance": {
+    "current_round": "OpenAI Codex, GPT-6, 2026-09-27: repository audit, packaging, tests, documentation, manuscript and bibliography preparation, validation and Git integration.",
+    "historical_disclosure": "Retain project-specific disclosures; AbsSAXS AI history is not copied to these projects."
+  },
+  "submission_date": null,
+  "related_publications": [
+    {
+      "doi": "10.1016/j.actamat.2026.122455",
+      "relation": "Research application reported by author; disclose to editor."
+    }
+  ],
+  "archive": {
+    "current_candidate_version_doi": null,
+    "note": "Existing historical archives are not an archive of this candidate. Final accepted-version archive follows review."
+  }
+}
