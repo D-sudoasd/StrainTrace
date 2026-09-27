@@ -9,3 +9,7 @@ The source date is a preparation date. Before submission, complete the author re
 and research-use mapping in [the submission guide](../docs/joss/README.md), use the
 actual submission date, rebuild and inspect the PDF. The synthetic verification
 suite is documented in [validation](../docs/joss/validation.md).
+
+## Reproduce the figures
+
+Run `python paper/make_figures.py` from the repository root. It regenerates the workflow and reruns the locked synthetic benchmark before plotting the clean small-translation case. Vector SVG/PDF and 450 dpi PNG exports are saved under `paper/figures`, together with plotted observations and the full benchmark JSON. This is not experimental-data validation.
