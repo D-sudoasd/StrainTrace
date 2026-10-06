@@ -39,7 +39,7 @@ https://doi.org/10.5281/zenodo.20222465
 
 如何运行便携版
 --------------
-1. 打开 [Releases 页面](https://github.com/D-sudoasd/ezDIC/releases)。当前已发布的便携 ZIP 是 **v0.1.3**（仅虚拟引伸计）。本 `main` 源码是未发布的 **v0.2.0-dev**，引用元数据仍是 **v0.1.4**，不是 GitHub Release 资产。未经本轮验证的本地 ZIP 不应当当作发布资产。
+1. 打开 [Releases 页面](https://github.com/D-sudoasd/StrainTrace/releases)。当前已发布的便携 ZIP 是 **v0.1.3**（仅虚拟引伸计）。本 `main` 源码是未发布的 **v0.2.0-dev**，引用元数据仍是 **v0.1.4**，不是 GitHub Release 资产。未经本轮验证的本地 ZIP 不应当当作发布资产。
 2. 解压完整的已下载文件夹；便携包内的顶层目录名是 `ezDIC_Windows_x64`，版本号只出现在 ZIP 文件名中。
 3. 双击 ezDIC.exe。源码运行也可双击仓库根目录的 `start_ezDIC.bat`。
 
@@ -55,6 +55,26 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 .\.venv\Scripts\python.exe -m pytest -q
 ```
+
+可安装的 Python 包
+--------------------
+当前源码支持 Python 3.11–3.13；桌面 GUI 需要 Tk，Windows 是维护中的桌面平台。
+在源码仓库根目录安装后，可使用新的 StrainTrace 命令；旧 ezDIC 模块和命令仍保留：
+
+```powershell
+python -m pip install ".[test]"
+straintrace --help
+straintrace-gui
+```
+
+在仓库外的工作目录运行合成检查：
+
+```powershell
+straintrace benchmark --output straintrace-synthetic-check
+```
+
+该检查自行生成合成图像并验证定义的数值门槛，不代表实验精度或质量阈值已标定。
+API 与使用说明见 docs/API.md；这不会把当前源码变成已发布的便携版。
 
 无界面 CLI（v0.2.0-dev 源代码与冻结合约）
 ----------------------------------------------
