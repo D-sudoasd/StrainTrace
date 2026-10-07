@@ -49,6 +49,10 @@ def write_test_image(path, value=120, shape=(100, 140)):
 
 
 def reset_gui_app(app):
+    # Workers tested without draining the event loop can leave completion
+    # callbacks queued. Do not replay one scenario's dialogs in the next.
+    while not app.ui_queue.empty():
+        app.ui_queue.get_nowait()
     app.image_folder.set("")
     app.output_folder.set("")
     app.search_radius.set(180)
@@ -230,9 +234,10 @@ def test_gui_uses_readable_base_fonts(gui_app):
     root, app = gui_app
     root.update_idletasks()
 
-    assert actual_font_size(root, app.style.lookup("TLabel", "font")) >= 11
-    assert actual_font_size(root, app.style.lookup("TButton", "font")) >= 11
-    assert actual_font_size(root, app.style.lookup("TLabelframe.Label", "font")) >= 12
+    assert actual_font_size(root, app.style.lookup("TLabel", "font")) >= 10
+    assert actual_font_size(root, app.style.lookup("TButton", "font")) >= 10
+    assert actual_font_size(root, app.style.lookup("TLabelframe.Label", "font")) >= 11
+    assert actual_font_size(root, app.style.lookup("Brand.TLabel", "font")) > actual_font_size(root, app.style.lookup("TLabel", "font"))
     assert int(app.style.lookup("Treeview", "rowheight")) >= 30
     assert actual_font_size(root, app.log_text.cget("font")) >= 10
 
@@ -293,9 +298,10 @@ def test_gui_initializes_poisson_role_selection(gui_app):
 
 def test_gui_emphasizes_start_analysis_action(gui_app):
     _root, app = gui_app
-    assert app.start_button.cget("text") == "开始分析并导出结果"
+    assert app.start_button.cget("text") == "开始分析"
     assert app.start_button.cget("style") == "Primary.TButton"
-    assert "下一步" in app.workflow_hint_var.get()
+    assert app.workflow_hint_var.get().strip()
+    assert app.run_state_var.get() == "待加载"
     assert getattr(app, "workflow_hint_label", None) is not None
     assert getattr(app, "workflow_guide_frame", None) is not None
 
@@ -318,13 +324,16 @@ def test_gui_minimum_size_fits_research_laptop_width(gui_app):
     root.update_idletasks()
 
     min_w, min_h = root.minsize()
-    assert min_w >= root.winfo_reqwidth()
+    # Hidden tables and inactive notebook pages may request a wider size;
+    # the actual viewport is checked below, rather than their natural size.
+    assert min_w >= 1040
     assert min_w <= 1366
     assert min_h <= 768
 
 
 def test_gui_layout_fits_research_laptop_viewport(gui_app):
     root, app = gui_app
+    app.workspace_notebook.select(app.image_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
     root.update()
@@ -359,7 +368,7 @@ def test_gui_layout_fits_research_laptop_viewport(gui_app):
     root_h = root.winfo_height()
     root_x = root.winfo_rootx()
     root_y = root.winfo_rooty()
-    for widget in [app.canvas, app.controls_canvas, app.measure_frame, app.roi1_button, app.roi2_button]:
+    for widget in [app.canvas, app.controls_canvas, app.run_frame, app.start_button, app.progress]:
         assert widget.winfo_width() > 20
         assert widget.winfo_height() > 10
         x0 = widget.winfo_rootx() - root_x
@@ -371,13 +380,13 @@ def test_gui_layout_fits_research_laptop_viewport(gui_app):
         assert x1 <= root_w, f"{widget} x1={x1} root_w={root_w}"
         assert y1 <= root_h, f"{widget} y1={y1} root_h={root_h}"
 
-    assert_widget_fully_visible_in(root, app.roi1_button)
-    assert_widget_fully_visible_in(root, app.roi2_button)
-
     assert app.controls_panel.winfo_reqheight() > app.controls_canvas.winfo_height()
-    for widget in [app.group_tree, app.start_button, app.progress, app.log_text]:
+    for widget in [app.roi1_button, app.roi2_button, app.group_tree]:
         scroll_workflow_widget_into_view(root, app, widget)
         assert_widget_fully_visible_in(app.controls_canvas, widget)
+    app.workspace_notebook.select(app.quality_page)
+    root.update()
+    assert_widget_fully_visible_in(app.quality_page, app.log_text)
     root.withdraw()
 
 
@@ -391,10 +400,7 @@ def test_export_preset_buttons_fit_research_laptop_viewport(gui_app):
     root.update()
     root.update_idletasks()
 
-    assert app.export_preset_label.cget("text") == "导出预设："
-
     for widget in [
-        app.export_preset_label,
         app.export_research_preset_button,
         app.export_quick_preset_button,
         app.export_all_preset_button,
@@ -418,28 +424,35 @@ def test_measurement_settings_are_primary_and_visible_on_laptop_viewport(gui_app
     assert getattr(app, "measure_frame", None) is not None
     assert getattr(app, "workflow_canvas", None) is app.controls_canvas
     assert getattr(app, "workflow_panel", None) is app.controls_panel
-    assert app.controls_canvas.winfo_height() >= 500
-    assert app.measure_frame.winfo_height() >= 220
+    assert app.controls_canvas.winfo_height() >= 250
+    assert app.measure_frame.winfo_height() >= 160
     assert_widget_fully_visible_in(app.controls_frame, app.workflow_hint_label)
+    assert_widget_fully_visible_in(root, app.start_button)
 
     for widget in [
-        app.measure_frame,
         app.preview_frame_entry,
         app.start_frame_entry,
         app.end_frame_entry,
         app.strain_mode_box,
         app.tracking_preset_box,
-        app.pixel_size_entry,
         app.auto_align_roi2_check,
         app.advanced_toggle_btn,
     ]:
+        scroll_workflow_widget_into_view(root, app, widget)
         assert_widget_fully_visible_in(app.controls_canvas, widget)
+    assert not app.pixel_size_entry.winfo_ismapped()
+    app.toggle_advanced_settings()
+    root.update()
+    scroll_workflow_widget_into_view(root, app, app.pixel_size_entry)
+    assert_widget_fully_visible_in(app.controls_canvas, app.pixel_size_entry)
+    app.toggle_advanced_settings()
 
     root.withdraw()
 
 
 def test_minimum_view_keeps_measurement_panel_and_image_canvas_useful(gui_app):
     root, app = gui_app
+    app.workspace_notebook.select(app.image_page)
     root.deiconify()
     root.geometry("1120x740+0+0")
     root.update()
@@ -450,10 +463,10 @@ def test_minimum_view_keeps_measurement_panel_and_image_canvas_useful(gui_app):
 
     assert app.canvas.winfo_width() >= 560
     assert app.canvas.winfo_height() >= 360
-    assert_widget_fully_visible_in(app.controls_canvas, app.measure_frame)
-    assert_widget_fully_visible_in(app.controls_canvas, app.strain_mode_box)
-    assert_widget_fully_visible_in(app.controls_canvas, app.tracking_preset_box)
-    assert_widget_fully_visible_in(app.controls_canvas, app.advanced_toggle_btn)
+    for widget in [app.strain_mode_box, app.tracking_preset_box, app.advanced_toggle_btn]:
+        scroll_workflow_widget_into_view(root, app, widget)
+        assert_widget_fully_visible_in(app.controls_canvas, widget)
+    assert_widget_fully_visible_in(root, app.start_button)
 
     root.withdraw()
 
@@ -509,13 +522,22 @@ def test_workflow_panel_supports_mouse_wheel_scrolling(gui_app, monkeypatch):
 
     monkeypatch.setattr(app.controls_canvas, "yview_scroll", fake_scroll)
 
-    wheel_down = type("Event", (), {"delta": -120, "num": 0})()
+    wheel_down = type("Event", (), {"delta": -120, "num": 0, "widget": app.controls_canvas})()
     assert app._on_workflow_mouse_wheel(wheel_down) == "break"
     assert calls[-1] == (1, "units")
 
-    wheel_up = type("Event", (), {"delta": 0, "num": 4})()
+    wheel_up = type("Event", (), {"delta": 0, "num": 4, "widget": app.controls_canvas})()
     assert app._on_workflow_mouse_wheel(wheel_up) == "break"
     assert calls[-1] == (-1, "units")
+
+    tree_calls = []
+    monkeypatch.setattr(app.group_tree, "yview", lambda: (0.0, 0.5))
+    monkeypatch.setattr(app.group_tree, "yview_scroll", lambda amount, unit: tree_calls.append((amount, unit)))
+    wheel_down.widget = app.group_tree
+    previous_calls = len(calls)
+    assert app._on_workflow_mouse_wheel(wheel_down) == "break"
+    assert tree_calls == [(1, "units")]
+    assert len(calls) == previous_calls
 
     root.withdraw()
 
@@ -668,7 +690,7 @@ def test_gui_primary_interactive_controls_have_scientific_tooltips(gui_app):
 
     for checkbutton in app.export_checkbuttons:
         tooltip = getattr(checkbutton, "_tooltip_text", "").strip()
-        assert len(tooltip) >= 24
+        assert len(tooltip) >= 8
 
     assert "调大" in app.search_radius_entry._tooltip_text
     assert "留空" in app.pixel_size_entry._tooltip_text
@@ -680,7 +702,7 @@ def test_gui_key_settings_use_light_visual_emphasis(gui_app):
 
     assert app.analysis_range_label.cget("style") == "Key.TLabel"
     assert app.strain_mode_label.cget("style") == "Key.TLabel"
-    assert app.export_hint_label.cget("style") == "Warning.TLabel"
+    assert app.export_hint_label.cget("style") == "Hint.TLabel"
     assert app.start_button.cget("style") == "Primary.TButton"
     assert app.select_image_button.cget("style") == "Secondary.TButton"
     assert app.select_output_button.cget("style") == "Secondary.TButton"
@@ -693,17 +715,17 @@ def test_gui_uses_clear_action_button_labels(gui_app):
     _root, app = gui_app
 
     expected_text = {
-        "select_image_button": "选图像文件夹",
-        "select_output_button": "选输出文件夹",
-        "load_images_button": "加载/刷新序列",
-        "show_preview_button": "显示预览帧",
+        "select_image_button": "选择图像",
+        "select_output_button": "选择输出",
+        "load_images_button": "加载序列",
+        "show_preview_button": "显示",
         "set_start_button": "设为起始/参考",
         "set_end_button": "设为结束帧",
-        "start_button": "开始分析并导出结果",
-        "delete_group_button": "删除选中组",
+        "start_button": "开始分析",
+        "delete_group_button": "删除选中",
         "clear_rois_button": "清除当前 ROI",
-        "viewer_export_btn": "导出预览图",
-        "viewer_clear_btn": "清除预览图",
+        "viewer_export_btn": "导出当前图",
+        "viewer_clear_btn": "清除预览",
     }
     for attr, text in expected_text.items():
         assert getattr(app, attr).cget("text") == text
@@ -736,9 +758,9 @@ def test_export_preset_buttons_are_named_and_explained(gui_app):
     _root, app = gui_app
 
     expected = {
-        "export_research_preset_button": ("推荐导出", "核心"),
-        "export_quick_preset_button": ("快速查看导出", "快速检查"),
-        "export_all_preset_button": ("全量复核导出", "文件数量"),
+        "export_research_preset_button": ("推荐", "核心"),
+        "export_quick_preset_button": ("快速查看", "QC"),
+        "export_all_preset_button": ("完整导出", "OriginPro"),
     }
     for attr, (text, tooltip_keyword) in expected.items():
         button = getattr(app, attr, None)
@@ -746,7 +768,7 @@ def test_export_preset_buttons_are_named_and_explained(gui_app):
         assert button.cget("text") == text
         tooltip = getattr(button, "_tooltip_text", "")
         assert tooltip_keyword in tooltip
-        assert len(tooltip.strip()) >= 24
+        assert len(tooltip.strip()) >= 8
 
 
 def test_start_analysis_button_reflects_workflow_readiness(gui_app, tmp_path, monkeypatch):
@@ -763,13 +785,13 @@ def test_start_analysis_button_reflects_workflow_readiness(gui_app, tmp_path, mo
 
     add_basic_roi_group(app)
     assert str(app.start_button.cget("state")) == "normal"
-    assert "开始分析" in app.workflow_hint_var.get()
+    assert app.run_state_var.get().startswith(("可分析", "准备就绪"))
 
     app.is_processing = True
     try:
         app.update_workflow_action_states()
         assert str(app.start_button.cget("state")) == "disabled"
-        assert "正在处理" in app.workflow_hint_var.get()
+        assert app.run_state_var.get() == "分析中"
     finally:
         app.is_processing = False
         app.update_workflow_action_states()
@@ -1063,7 +1085,7 @@ def test_gui_includes_optional_origin_and_publication_exports_disabled_by_defaul
     assert app.export_publication_figures.get() is False
     export_texts = [button.cget("text") for button in app.export_checkbuttons]
     assert "Origin OPJU" in export_texts
-    assert "论文图包" in export_texts
+    assert "论文图表包" in export_texts
 
 
 def test_loading_new_image_folder_clears_previous_roi_state(gui_app, tmp_path, monkeypatch):
@@ -1587,7 +1609,7 @@ def test_pyinstaller_build_files_define_green_folder_release():
 def test_gui_exposes_dual_mode_fullfield_controls_and_field_viewer(gui_app):
     root, app = gui_app
     assert app.analysis_mode.get() == ezdic.ANALYSIS_MODE_EXTENSOMETER
-    assert app.start_button.cget("text") == "开始分析并导出结果"
+    assert app.start_button.cget("text") == "开始分析"
     assert app.roi1_button is not None
     assert app.dic_subset_size_entry is not None
     assert app.dic_step_entry is not None
@@ -1735,7 +1757,7 @@ def test_fullfield_overlay_does_not_accept_roi_drawing(gui_app):
 
 
 def test_clear_viewer_blocks_roi_until_preview_or_1to1_restores_canvas(gui_app, tmp_path, monkeypatch):
-    _root, app = gui_app
+    root, app = gui_app
     reset_gui_app(app)
     monkeypatch.setattr(ezdic.messagebox, "showwarning", lambda *_args, **_kwargs: None)
     folder = tmp_path / "images_overlay_roi"
@@ -1771,6 +1793,13 @@ def test_clear_viewer_blocks_roi_until_preview_or_1to1_restores_canvas(gui_app, 
             self.x = x
             self.y = y
 
+    def image_event(x, y):
+        app.workspace_notebook.select(app.image_page)
+        root.deiconify()
+        root.update()
+        return _Event(round(x * app.display_scale - app.canvas.canvasx(0)),
+                      round(y * app.display_scale - app.canvas.canvasy(0)))
+
     app.dic_last_field = None
     app._viewer_kind = "extensometer"
     app.auto_fit_enabled = True
@@ -1804,9 +1833,9 @@ def test_clear_viewer_blocks_roi_until_preview_or_1to1_restores_canvas(gui_app, 
     np.testing.assert_array_equal(restored, preview_rgb)
 
     app.field_roi = None
-    app.on_mouse_down(_Event(12, 12))
+    app.on_mouse_down(image_event(12, 12))
     assert app.drag_start is not None
-    app.on_mouse_up(_Event(70, 70))
+    app.on_mouse_up(image_event(70, 70))
     assert app.field_roi is not None
     preview_roi = app.field_roi
     del leftover
@@ -1823,9 +1852,9 @@ def test_clear_viewer_blocks_roi_until_preview_or_1to1_restores_canvas(gui_app, 
     app.field_roi = None
     app.load_preview_frame(0)
     assert app._canvas_shows_field_overlay is False
-    app.on_mouse_down(_Event(12, 12))
+    app.on_mouse_down(image_event(12, 12))
     assert app.drag_start is not None
-    app.on_mouse_up(_Event(70, 70))
+    app.on_mouse_up(image_event(70, 70))
     assert app.field_roi is not None
     assert app.field_roi_reference_frame_1based == 1
 
@@ -1841,12 +1870,13 @@ def test_clear_viewer_blocks_roi_until_preview_or_1to1_restores_canvas(gui_app, 
     app.field_roi = None
     app.show_image_1to1()
     assert app._canvas_shows_field_overlay is False
-    app.on_mouse_down(_Event(12, 12))
+    app.on_mouse_down(image_event(12, 12))
     assert app.drag_start is not None
-    app.on_mouse_up(_Event(70, 70))
+    app.on_mouse_up(image_event(70, 70))
     assert app.field_roi is not None
     assert preview_roi[2] >= 15 and preview_roi[3] >= 15
     reset_gui_app(app)
+    root.withdraw()
 
 
 def test_fullfield_preflight_requires_field_roi_not_extensometer_groups(gui_app, tmp_path, monkeypatch):
@@ -2496,7 +2526,7 @@ def test_fullfield_overlay_checkbox_and_workflow_steps_are_visible_and_mode_spec
     root, app = gui_app
     reset_gui_app(app)
     checkbox = app.fullfield_export_overlays_checkbutton
-    assert "overlay" in checkbox.cget("text").lower()
+    assert "Exx 叠加图" in checkbox.cget("text")
     assert app.fullfield_export_info_frame.grid_info() == {}
 
     app.analysis_mode.set(ezdic.ANALYSIS_MODE_FULLFIELD)
@@ -2505,13 +2535,13 @@ def test_fullfield_overlay_checkbox_and_workflow_steps_are_visible_and_mode_spec
     assert app.fullfield_export_info_frame.grid_info()
     fullfield_text = app.workflow_steps_label.cget("text")
     assert "全场 ROI" in fullfield_text
-    assert "u/v" in fullfield_text
+    assert "DIC 分析" in fullfield_text
 
     app.analysis_mode.set(ezdic.ANALYSIS_MODE_EXTENSOMETER)
     app.set_analysis_mode()
     root.update_idletasks()
     assert app.fullfield_export_info_frame.grid_info() == {}
-    assert "ROI1/ROI2" in app.workflow_steps_label.cget("text")
+    assert "ROI 配对" in app.workflow_steps_label.cget("text")
 
 
 def test_processing_rejects_duplicate_start_while_completion_is_pending(gui_app, monkeypatch):

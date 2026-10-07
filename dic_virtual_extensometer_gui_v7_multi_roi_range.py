@@ -2730,7 +2730,7 @@ def write_qc_summary(summary, path):
 # ==========================
 
 UI_FONT_FAMILY = "Microsoft YaHei UI"
-UI_BASE_FONT_SIZE = 11
+UI_BASE_FONT_SIZE = 10
 UI_TITLE_FONT_SIZE = 12
 UI_PRIMARY_FONT_SIZE = 11
 UI_STEP_FONT_SIZE = 11
@@ -2959,10 +2959,10 @@ class MultiROIGUI:
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        width = min(1500, max(1240, screen_w - 100))
-        height = min(940, max(760, screen_h - 80))
+        width = min(1500, screen_w - 80)
+        height = min(940, screen_h - 100)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1120, 740)
+        self.root.minsize(1040, 680)
 
     def configure_tk_scaling(self):
         try:
@@ -3001,9 +3001,9 @@ class MultiROIGUI:
 
     def configure_final_window_limits(self):
         self.root.update_idletasks()
-        # 给一个更宽松的最小尺寸，避免在普通科研笔记本上启动就感觉拥挤
-        min_width = min(1366, max(1180, self.root.winfo_reqwidth()))
-        self.root.minsize(min_width, 740)
+        # Requested widths of hidden tables must not dictate the window size.
+        scale = max(1.0, self.ui_scaling / (120 / 72))
+        self.root.minsize(round(1040 * scale), round(680 * scale))
 
     def add_tooltip(self, widget, text):
         self.tooltips.append(ToolTip(widget, text))
@@ -3020,6 +3020,9 @@ class MultiROIGUI:
         self.root.bind("<Control-f>", lambda _event: self.fit_image_to_view() or "break")
         self.root.bind("<Control-Return>", lambda _event: self.start_processing() or "break")
         self.root.bind("<Escape>", lambda _event: self.clear_current_rois() or "break")
+        self.root.bind("<Control-plus>", lambda _event: self.zoom_image(1.25) or "break")
+        self.root.bind("<Control-equal>", lambda _event: self.zoom_image(1.25) or "break")
+        self.root.bind("<Control-minus>", lambda _event: self.zoom_image(1 / 1.25) or "break")
 
     def default_recent_config_path(self):
         configured = os.environ.get(RECENT_CONFIG_ENV_VAR)
@@ -3408,6 +3411,21 @@ class MultiROIGUI:
         if hasattr(self, "qc_overview_var"):
             self.qc_overview_var.set(self.format_qc_overview(summary))
 
+    def format_fullfield_qc_overview(self, frames):
+        valid_count = sum(frame.get("status") == "scientific_valid" for frame in frames)
+        failed = [str(frame.get("frame_global_1based", "未知")) for frame in frames
+                  if frame.get("status") != "scientific_valid"]
+        def minimum_fraction(key):
+            values = [float(frame[key]) for frame in frames
+                      if isinstance(frame.get(key), (int, float)) and np.isfinite(frame[key])]
+            return f"{min(values):.1%}" if values else "未提供"
+        correlation = minimum_fraction("correlation_valid_fraction")
+        strain = minimum_fraction("strain_valid_fraction")
+        failed_text = "、".join(failed[:12]) + ("…" if len(failed) > 12 else "") if failed else "无"
+        return (f"全场 DIC：{valid_count}/{len(frames)} 个变形帧通过有效性检查。\n"
+                f"已计算帧的最低有效点比例：相关 {correlation}；应变 {strain}。\n"
+                f"未通过的帧：{failed_text}。")
+
     def get_int_setting(self, var, label):
         try:
             return int(var.get())
@@ -3442,8 +3460,8 @@ class MultiROIGUI:
                 pass
 
         self.root.configure(background=self.ui_bg)
-        self.root.option_add("*Font", base_font)
-        self.style.configure(".", font=base_font)
+        self.style.configure(".", font=base_font, background=self.card_bg, foreground=self.text_color,
+                             bordercolor=self.border_color, lightcolor=self.card_bg, darkcolor=self.border_color)
         self.style.configure("App.TFrame", background=self.ui_bg)
         self.style.configure("Panel.TFrame", background=self.panel_bg)
         self.style.configure("Card.TFrame", background=self.card_bg)
@@ -3453,53 +3471,109 @@ class MultiROIGUI:
         self.style.configure("Warning.TLabel", background=self.card_bg, font=step_font, foreground=self.warning_color)
         self.style.configure("StepTitle.TLabel", background=self.card_bg, font=step_font, foreground=self.text_color)
         self.style.configure("TLabelframe", background=self.card_bg, bordercolor=self.border_color, relief="solid")
-        self.style.configure("TLabelframe.Label", background=self.ui_bg, foreground=self.text_color, font=title_font)
-        self.style.configure("TButton", font=base_font, padding=(10, 6))
-        self.style.configure("Compact.TButton", font=base_font, padding=(8, 5))
+        self.style.configure("TLabelframe.Label", background=self.card_bg, foreground=self.text_color, font=step_font)
+        self.style.configure("Brand.TLabel", background=self.ui_bg, foreground=self.text_color,
+                             font=(UI_FONT_FAMILY, 18, "bold"))
+        self.style.configure("AppHint.TLabel", background=self.ui_bg, foreground=self.muted_color, font=base_font)
+        self.style.configure("Badge.TLabel", background=self.panel_bg, foreground=self.key_color,
+                             font=base_font, padding=(10, 4))
+        self.style.configure("Ready.TLabel", background=self.success_bg, foreground=self.success_color,
+                             font=step_font, padding=(10, 4))
+        self.style.configure("Error.TLabel", background=self.card_bg, foreground=self.warning_color,
+                             font=step_font, padding=(10, 4))
+        self.style.configure("TButton", font=base_font, padding=(10, 6), background=self.card_bg, width=0,
+                             foreground=self.text_color, borderwidth=1, focusthickness=2,
+                             focuscolor=self.primary_color)
+        self.style.map("TButton", background=[("disabled", self.panel_bg), ("pressed", self.border_color),
+                                              ("active", self.hover_bg)],
+                       foreground=[("disabled", self.muted_color)],
+                       bordercolor=[("focus", self.primary_color)])
+        self.style.configure("Compact.TButton", font=base_font, padding=(8, 4))
         self.style.configure("Primary.TButton", font=primary_font, padding=(14, 8), foreground="#ffffff", background=self.primary_color)
-        self.style.configure("Secondary.TButton", font=base_font, padding=(9, 5), foreground=self.primary_color, background=self.card_bg)
+        self.style.configure("Secondary.TButton", font=base_font, padding=(9, 5), foreground=self.primary_text, background=self.card_bg)
         self.style.configure("Danger.TButton", font=base_font, padding=(8, 5), foreground=self.warning_color, background=self.card_bg)
         self.style.map(
             "Primary.TButton",
-            foreground=[("disabled", "#d9d9d9"), ("active", "#ffffff")],
-            background=[("disabled", "#8fa8bf"), ("active", self.primary_active), ("pressed", "#074b8a")],
+            foreground=[("disabled", self.muted_color), ("active", "#ffffff")],
+            background=[("disabled", self.panel_bg), ("pressed", self.primary_active), ("active", self.primary_active)],
         )
         self.style.map(
             "Danger.TButton",
-            foreground=[("disabled", self.muted_color), ("active", "#ffffff")],
-            background=[("active", self.warning_color), ("pressed", self.warning_color)],
+            foreground=[("disabled", self.muted_color), ("active", self.warning_color)],
+            background=[("active", self.hover_bg), ("pressed", self.panel_bg)],
         )
-        self.style.configure("TEntry", font=base_font, padding=(4, 4))
-        self.style.configure("TCombobox", font=base_font, padding=(4, 4))
-        self.style.configure("Treeview", font=base_font, rowheight=UI_TREE_ROWHEIGHT, background=self.card_bg, fieldbackground=self.card_bg)
-        self.style.configure("Treeview.Heading", font=step_font)
+        for style_name in ("TEntry", "TCombobox"):
+            self.style.configure(style_name, font=base_font, padding=(6, 4), fieldbackground=self.card_bg,
+                                 foreground=self.text_color, insertcolor=self.text_color,
+                                 selectbackground=self.primary_color, selectforeground="#ffffff")
+            self.style.map(style_name, fieldbackground=[("disabled", self.panel_bg), ("readonly", self.card_bg)],
+                           foreground=[("disabled", self.muted_color), ("readonly", self.text_color)],
+                           bordercolor=[("focus", self.primary_color)])
+        self.root.option_add("*TCombobox*Listbox.background", self.card_bg)
+        self.root.option_add("*TCombobox*Listbox.foreground", self.text_color)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", self.primary_color)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        for style_name in ("TCheckbutton", "TRadiobutton"):
+            self.style.configure(style_name, background=self.card_bg, foreground=self.text_color, padding=(2, 3))
+            self.style.map(style_name, background=[("active", self.card_bg)],
+                           foreground=[("disabled", self.muted_color)],
+                           indicatorbackground=[("selected", self.primary_color), ("!selected", self.card_bg)])
+        self.style.configure("Mode.TRadiobutton", padding=(10, 7), font=step_font, relief="flat")
+        self.style.layout("Mode.TRadiobutton", [("Radiobutton.padding", {"sticky": "nswe", "children": [
+            ("Radiobutton.focus", {"sticky": "nswe", "children": [("Radiobutton.label", {"sticky": "nswe"})]})
+        ]})])
+        self.style.map("Mode.TRadiobutton", background=[("selected", self.primary_color), ("active", self.hover_bg)],
+                       foreground=[("disabled", self.muted_color), ("selected", "#ffffff")])
+        self.style.configure("Treeview", font=base_font, rowheight=UI_TREE_ROWHEIGHT, background=self.card_bg,
+                             fieldbackground=self.card_bg, foreground=self.text_color)
+        self.style.map("Treeview", background=[("selected", self.primary_color)], foreground=[("selected", "#ffffff")])
+        self.style.configure("Treeview.Heading", font=step_font, background=self.panel_bg, foreground=self.text_color,
+                             padding=(6, 5), relief="flat")
+        self.style.map("Treeview.Heading", background=[("active", self.hover_bg)])
+        self.style.configure("TNotebook", background=self.ui_bg, borderwidth=0, tabmargins=(0, 0, 0, 6))
+        self.style.configure("TNotebook.Tab", background=self.ui_bg, foreground=self.muted_color,
+                             padding=(18, 8), font=step_font)
+        self.style.map("TNotebook.Tab", background=[("selected", self.card_bg), ("active", self.hover_bg)],
+                       foreground=[("selected", self.primary_text)])
+        self.style.configure("Horizontal.TProgressbar", background=self.primary_color, troughcolor=self.panel_bg,
+                             borderwidth=0, thickness=5)
+        self.style.configure("TScrollbar", background=self.panel_bg, troughcolor=self.ui_bg,
+                             arrowcolor=self.muted_color, borderwidth=0, arrowsize=12)
+        self.style.map("TScrollbar", background=[("active", self.border_color)])
 
     def _apply_color_palette(self):
         """集中管理浅色/暗色配色，便于后续完整暗色模式切换。"""
         if self.dark_mode.get():
             # 暗色主题（实验室长时间使用更护眼）
-            self.ui_bg = "#1e2937"
-            self.panel_bg = "#334155"
-            self.card_bg = "#475569"
-            self.border_color = "#64748b"
-            self.primary_color = "#3b82f6"
-            self.primary_active = "#2563eb"
+            self.ui_bg = "#101827"
+            self.panel_bg = "#243247"
+            self.card_bg = "#192538"
+            self.border_color = "#3b4c64"
+            self.hover_bg = "#2c3d56"
+            self.primary_color = "#2563eb"
+            self.primary_active = "#1d4ed8"
             self.warning_color = "#f87171"
             self.key_color = "#e0f2fe"
             self.text_color = "#e2e8f0"
-            self.muted_color = "#94a3b8"
+            self.muted_color = "#b0bfd2"
+            self.success_color = "#86efac"
+            self.success_bg = "#163b35"
         else:
             # 浅色主题（默认）
-            self.ui_bg = "#eef2f7"
-            self.panel_bg = "#f8fafc"
+            self.ui_bg = "#f1f4f8"
+            self.panel_bg = "#edf2f8"
             self.card_bg = "#ffffff"
-            self.border_color = "#cbd5e1"
-            self.primary_color = "#0b6fcb"
-            self.primary_active = "#095aa5"
+            self.border_color = "#d5deea"
+            self.hover_bg = "#e8eff9"
+            self.primary_color = "#1d5dcc"
+            self.primary_active = "#164ba8"
             self.warning_color = "#b91c1c"
             self.key_color = "#0f3f6e"
             self.text_color = "#0f172a"
             self.muted_color = "#475569"
+            self.success_color = "#166534"
+            self.success_bg = "#e5f4eb"
+        self.primary_text = "#a8ccff" if self.dark_mode.get() else self.primary_color
 
     def toggle_dark_mode(self):
         """切换暗色/浅色模式，并尝试刷新结果预览图的配色。"""
@@ -3509,8 +3583,15 @@ class MultiROIGUI:
 
         self.configure_ui_style()
 
-        if hasattr(self, "log_text"):
-            self.log_text.configure(bg="#0f172a", fg="#e5e7eb", insertbackground="#e5e7eb")
+        for attr in ("log_text", "preflight_summary_label"):
+            widget = getattr(self, attr, None)
+            if isinstance(widget, tk.Text):
+                widget.configure(bg=self.panel_bg, fg=self.text_color, insertbackground=self.text_color)
+        if hasattr(self, "preflight_summary_label"):
+            self._update_preflight_text()
+        if hasattr(self, "controls_canvas"):
+            self.controls_canvas.configure(bg=self.card_bg, highlightbackground=self.border_color)
+        self._draw_image_empty_state()
 
         # 刷新结果预览器（matplotlib）
         if (hasattr(self, "results_df") and self.results_df is not None) or getattr(self, "dic_last_field", None) is not None:
@@ -3527,40 +3608,50 @@ class MultiROIGUI:
     def _refresh_viewer_for_dark_mode(self):
         """当暗色模式切换时，重新绘制当前结果预览图以匹配新主题。"""
         if getattr(self, "_viewer_kind", "extensometer") == "fullfield" and getattr(self, "dic_last_field", None) is not None:
-            try:
-                self.show_field_viewer(
-                    self.dic_last_field,
-                    image=self.dic_last_image,
-                    frame_1based=self.dic_last_frame_1based,
-                    filename=self.dic_last_filename,
-                    reference_frame_1based=self.dic_last_reference_frame_1based,
-                    reference_filename=self.dic_last_reference_filename,
-                )
-            except Exception:
-                pass
+            self._rebuild_field_viewer_plot()
             return
         if not hasattr(self, "results_df") or self.results_df is None:
             return
         if hasattr(self, "viewer_figure") and self.viewer_figure is not None:
             try:
-                self.show_results_viewer(self.results_df, self.results_groups or [])
+                self._rebuild_viewer_plot()
             except Exception:
                 pass
 
     def build_ui(self):
         self.root.configure(background=self.ui_bg)
-        self.main_frame = ttk.Frame(self.root, style="App.TFrame", padding=(10, 8, 10, 8))
+        self.main_frame = ttk.Frame(self.root, style="App.TFrame", padding=(16, 12, 16, 12))
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         self.main_frame.columnconfigure(0, weight=1)
-        self.main_frame.rowconfigure(1, weight=1)
+        self.main_frame.rowconfigure(2, weight=1)
 
+        self._build_app_header(self.main_frame)
         self._build_project_section(self.main_frame)
         self._build_workspace(self.main_frame)
         self.update_workflow_action_states()
 
+    def _build_app_header(self, parent):
+        header = ttk.Frame(parent, style="App.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(header, text="StrainTrace", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="图像位移与应变分析", style="AppHint.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(16, 8))
+        self.open_recent_output_button = ttk.Button(
+            header, text="打开输出", command=self.open_recent_output_folder, style="Compact.TButton")
+        self.open_recent_output_button.grid(row=0, column=2, padx=(4, 6))
+        self.dark_mode_btn = ttk.Button(header, text="暗色模式", command=self.toggle_dark_mode, style="Compact.TButton")
+        self.dark_mode_btn.grid(row=0, column=3, padx=(0, 6))
+        self.usage_notice_button = ttk.Button(header, text="关于 / 引用", command=self.show_usage_notice, style="Compact.TButton")
+        self.usage_notice_button.grid(row=0, column=4)
+        self.add_tooltip(self.usage_notice_button, f"ezDIC v{APP_VERSION} · {APP_DEVELOPER} · DOI: {APP_DOI}")
+        self.add_tooltip(self.dark_mode_btn, "切换整个工作区和结果图的浅色 / 暗色主题。")
+        self.add_tooltip(self.open_recent_output_button, "打开最近选择或成功分析的输出目录。")
+        self.update_recent_output_button_state()
+
     def _build_project_section(self, parent):
-        self.project_frame = ttk.LabelFrame(parent, text="1. 图像与输出", padding=(8, 4))
-        self.project_frame.grid(row=0, column=0, sticky="ew")
+        self.project_frame = ttk.LabelFrame(parent, text="01  图像序列", padding=(12, 8))
+        self.project_frame.grid(row=1, column=0, sticky="ew")
         self.project_frame.columnconfigure(1, weight=1)
         self.project_frame.columnconfigure(3, weight=0)
 
@@ -3578,7 +3669,7 @@ class MultiROIGUI:
         self.add_tooltip(self.image_folder_entry, image_folder_tip)
         self.select_image_button = ttk.Button(
             self.project_frame,
-            text="选图像文件夹",
+            text="选择图像",
             command=self.select_image_folder,
             style="Secondary.TButton",
         )
@@ -3599,7 +3690,7 @@ class MultiROIGUI:
         self.add_tooltip(self.output_folder_entry, output_folder_tip)
         self.select_output_button = ttk.Button(
             self.project_frame,
-            text="选输出文件夹",
+            text="选择输出",
             command=self.select_output_folder,
             style="Secondary.TButton",
         )
@@ -3608,7 +3699,7 @@ class MultiROIGUI:
 
         self.load_images_button = ttk.Button(
             self.project_frame,
-            text="加载/刷新序列",
+            text="加载序列",
             command=self.load_first_image,
             style="Secondary.TButton",
         )
@@ -3621,22 +3712,36 @@ class MultiROIGUI:
 
     def _build_workspace(self, parent):
         workspace = ttk.Frame(parent, style="App.TFrame")
-        workspace.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        workspace.columnconfigure(0, weight=5)   # 图像区占主要空间，便于精确检查 ROI
-        workspace.columnconfigure(1, weight=3)   # 右侧工作流面板承载测量、ROI、分析导出
+        workspace.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        workspace.columnconfigure(0, weight=1)
+        workspace.columnconfigure(1, weight=0)
         workspace.rowconfigure(0, weight=1)
 
         left = ttk.Frame(workspace, style="App.TFrame")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=1)
 
-        self._build_image_section(left)
+        self.workspace_notebook = ttk.Notebook(left)
+        self.workspace_notebook.grid(row=0, column=0, sticky="nsew")
+        self.image_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
+        self.results_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
+        self.quality_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame", padding=16)
+        for page in (self.image_page, self.results_page, self.quality_page):
+            page.columnconfigure(0, weight=1)
+            page.rowconfigure(0, weight=1)
+        self.workspace_notebook.add(self.image_page, text="图像与 ROI")
+        self.workspace_notebook.add(self.results_page, text="分析结果")
+        self.workspace_notebook.add(self.quality_page, text="质量与日志")
+        self.workspace_notebook.bind("<<NotebookTabChanged>>", self._on_workspace_tab_changed)
+        self._build_image_section(self.image_page)
         self._build_scrollable_controls(workspace)
 
     def _build_scrollable_controls(self, parent):
-        self.controls_frame = ttk.Frame(parent, style="App.TFrame")
+        sidebar_width = round(370 * max(1.0, self.ui_scaling / (96 / 72)))
+        self.controls_frame = ttk.Frame(parent, style="Card.TFrame", width=sidebar_width)
         self.controls_frame.grid(row=0, column=1, sticky="nsew")
+        self.controls_frame.grid_propagate(False)
         self.controls_frame.columnconfigure(0, weight=1)
         self.controls_frame.rowconfigure(1, weight=1)
 
@@ -3644,10 +3749,10 @@ class MultiROIGUI:
 
         self.controls_canvas = tk.Canvas(
             self.controls_frame,
-            width=460,
+            width=sidebar_width,
             height=560,
-            bg=self.ui_bg,
-            highlightthickness=1,
+            bg=self.card_bg,
+            highlightthickness=0,
             highlightbackground=self.border_color,
             borderwidth=0,
         )
@@ -3656,7 +3761,7 @@ class MultiROIGUI:
         self.controls_canvas.grid(row=1, column=0, sticky="nsew")
         controls_scrollbar.grid(row=1, column=1, sticky="ns")
 
-        self.controls_panel = ttk.Frame(self.controls_canvas, style="Panel.TFrame", padding=(0, 0, 4, 0))
+        self.controls_panel = ttk.Frame(self.controls_canvas, style="Card.TFrame", padding=(10, 6, 10, 12))
         self.controls_panel.columnconfigure(0, weight=1)
         self.controls_window = self.controls_canvas.create_window((0, 0), window=self.controls_panel, anchor="nw")
         self.controls_panel.bind(
@@ -3665,7 +3770,7 @@ class MultiROIGUI:
         )
         self.controls_canvas.bind(
             "<Configure>",
-            lambda event: self.controls_canvas.itemconfigure(self.controls_window, width=event.width),
+            self._on_controls_configure,
         )
         self.workflow_canvas = self.controls_canvas
         self.workflow_panel = self.controls_panel
@@ -3674,8 +3779,28 @@ class MultiROIGUI:
         self._build_fullfield_section(self.controls_panel)
         self._build_roi_section(self.controls_panel)
         self._build_analysis_section(self.controls_panel)
+        self._build_run_section(self.controls_frame)
+        self._build_quality_section(self.quality_page)
+        self._build_results_section(self.results_page)
         self._bind_workflow_scroll_handler()
         self.set_analysis_mode()
+
+    def _on_controls_configure(self, event):
+        self.controls_canvas.itemconfigure(self.controls_window, width=event.width)
+        wrap = max(180, event.width - 52)
+        for label_name in ("preset_status_label", "current_roi_summary_label", "dic_field_summary_label",
+                           "export_hint_label", "fullfield_export_info_label", "workflow_hint_label", "status_label"):
+            label = getattr(self, label_name, None)
+            if label is not None:
+                label.configure(wraplength=wrap)
+
+    def _on_workspace_tab_changed(self, _event=None):
+        if self.workspace_notebook.select() == str(self.image_page):
+            self.root.after_idle(self._rescale_display_to_current_size)
+
+    def _show_image_workspace(self):
+        if hasattr(self, "workspace_notebook"):
+            self.workspace_notebook.select(self.image_page)
 
     def _bind_workflow_scroll_handler(self):
         """Enable mouse-wheel scrolling inside the right workflow panel."""
@@ -3713,13 +3838,16 @@ class MultiROIGUI:
         else:
             return "break"
 
-        self.controls_canvas.yview_scroll(amount, "units")
+        if event.widget == getattr(self, "group_tree", None) and self.group_tree.yview() != (0.0, 1.0):
+            self.group_tree.yview_scroll(amount, "units")
+        else:
+            self.controls_canvas.yview_scroll(amount, "units")
         return "break"
 
     def _build_workflow_guide(self, parent):
-        self.workflow_guide_frame = ttk.Frame(parent, style="Card.TFrame", padding=(6, 2))
-        self.workflow_guide_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 2))
-        self.workflow_guide_frame.columnconfigure(1, weight=1)
+        self.workflow_guide_frame = ttk.Frame(parent, style="Card.TFrame", padding=(12, 10))
+        self.workflow_guide_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.workflow_guide_frame.columnconfigure(0, weight=1)
 
         self.workflow_step_texts = [
             "1. 选择图像文件夹和输出文件夹，加载序列",
@@ -3734,29 +3862,16 @@ class MultiROIGUI:
             style="Hint.TLabel",
             font=(UI_FONT_FAMILY, 9),
             justify=tk.LEFT,
-            wraplength=330,
+            wraplength=430,
         )
-        self.workflow_steps_label.grid(row=0, column=0, sticky="nw", padx=(0, 6))
+        self.workflow_steps_label.grid(row=0, column=0, sticky="ew")
         self.workflow_labels.append(self.workflow_steps_label)
         self.add_tooltip(
             self.workflow_steps_label,
             "流程：1.选文件并加载；2.设范围与方向；3.添加 ROI 组；4.开始分析。",
         )
 
-        self.workflow_hint_var = tk.StringVar(value="下一步：选择图像文件夹并点击“加载/刷新序列”。")
-        self.workflow_hint_label = ttk.Label(
-            self.workflow_guide_frame,
-            textvariable=self.workflow_hint_var,
-            style="Key.TLabel",
-            justify=tk.LEFT,
-            wraplength=360,
-        )
-        self.workflow_hint_label.grid(row=0, column=1, sticky="ew")
-        self.workflow_labels.append(self.workflow_hint_label)
-        self.add_tooltip(
-            self.workflow_hint_label,
-            "根据当前准备情况提示下一步。缺少图像序列、ROI 组或导出选项时，“开始分析”保持禁用。",
-        )
+        self.workflow_hint_var = tk.StringVar(value="请选择并加载图像序列。")
         self.workflow_guide_frame.bind(
             "<Configure>",
             lambda event: self._sync_workflow_guide_wraplength(event.width),
@@ -3765,27 +3880,27 @@ class MultiROIGUI:
 
     def _sync_workflow_guide_wraplength(self, width):
         wrap = max(int(width) - 48, 220)
-        if hasattr(self, "workflow_hint_label"):
-            self.workflow_hint_label.configure(wraplength=wrap)
+        self.workflow_steps_label.configure(wraplength=wrap)
 
     def _visible_workflow_steps_text(self):
-        """Compact, genuinely visible four-step summary for the current mode."""
+        """Keep the current workflow visible without repeating the instructions."""
         if str(self.analysis_mode.get()) == ANALYSIS_MODE_FULLFIELD:
-            return "1. 加载图像/输出 · 2. 参考帧与范围\n3. 全场 ROI + DIC 参数 · 4. 分析并查看 u/v/应变"
-        return "1. 加载图像/输出 · 2. 参考帧/范围/方向\n3. 画 ROI1/ROI2 + 分组 · 4. 导出并开始分析"
+            return "参考帧 → 全场 ROI → DIC 分析"
+        return "参考帧 → ROI 配对 → 应变分析"
 
     def _build_measure_section(self, parent):
         mode_bar = ttk.Frame(parent, style="Card.TFrame")
-        mode_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(mode_bar, text="模式", style="Key.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        mode_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        mode_bar.columnconfigure((0, 1), weight=1, uniform="mode")
         self.mode_extensometer_radio = ttk.Radiobutton(
             mode_bar,
             text="虚拟引伸计",
             variable=self.analysis_mode,
             value=ANALYSIS_MODE_EXTENSOMETER,
             command=self.set_analysis_mode,
+            style="Mode.TRadiobutton",
         )
-        self.mode_extensometer_radio.pack(side=tk.LEFT, padx=(0, 8))
+        self.mode_extensometer_radio.grid(row=0, column=0, sticky="ew")
         self.add_tooltip(
             self.mode_extensometer_radio,
             "1D 虚拟引伸计：画 ROI1/ROI2，追踪标距，导出工程应变、真应变和 QC。适合只要拉伸曲线的实验。",
@@ -3796,18 +3911,19 @@ class MultiROIGUI:
             variable=self.analysis_mode,
             value=ANALYSIS_MODE_FULLFIELD,
             command=self.set_analysis_mode,
+            style="Mode.TRadiobutton",
         )
-        self.mode_fullfield_radio.pack(side=tk.LEFT)
+        self.mode_fullfield_radio.grid(row=0, column=1, sticky="ew")
         self.add_tooltip(
             self.mode_fullfield_radio,
             "全场 2D DIC：在矩形 ROI 内布置 subset 网格，用 IC-GN 或 IC-LM 求 u/v，再算 Green-Lagrange 应变图。",
         )
 
-        self.measure_frame = ttk.LabelFrame(parent, text="2. 测量设置", padding=(8, 4))
+        self.measure_frame = ttk.LabelFrame(parent, text="02  测量设置", padding=(10, 8))
         self.measure_frame.grid(row=1, column=0, sticky="ew")
         self.measure_frame.columnconfigure(0, weight=1)
 
-        frame_range = ttk.LabelFrame(self.measure_frame, text="参考帧与分析范围", padding=(6, 4))
+        frame_range = ttk.Frame(self.measure_frame, style="Card.TFrame")
         frame_range.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         frame_range.columnconfigure(0, weight=1)
 
@@ -3827,7 +3943,7 @@ class MultiROIGUI:
         self.add_tooltip(self.preview_frame_entry, preview_tip)
         self.show_preview_button = ttk.Button(
             preview_row,
-            text="显示预览帧",
+            text="显示",
             command=self.go_to_preview_frame,
             style="Compact.TButton",
         )
@@ -3840,7 +3956,7 @@ class MultiROIGUI:
             command=lambda: self.step_preview_frame(-1),
             style="Compact.TButton",
         )
-        self.prev_frame_button.grid(row=1, column=1, padx=(0, 5), pady=(2, 0), sticky="w")
+        self.prev_frame_button.grid(row=0, column=3, padx=(0, 5), sticky="e")
         self.add_tooltip(self.prev_frame_button, "向前预览一帧，不改变已设置的分析范围；用于快速检查 ROI 是否仍在视场内。")
 
         self.next_frame_button = ttk.Button(
@@ -3849,7 +3965,7 @@ class MultiROIGUI:
             command=lambda: self.step_preview_frame(1),
             style="Compact.TButton",
         )
-        self.next_frame_button.grid(row=1, column=2, pady=(2, 0), sticky="w")
+        self.next_frame_button.grid(row=0, column=4, sticky="e")
         self.add_tooltip(self.next_frame_button, "向后预览一帧，不改变已设置的分析范围；用于快速检查 ROI 是否仍在视场内。")
 
         range_row = ttk.Frame(frame_range, style="Card.TFrame")
@@ -3896,7 +4012,7 @@ class MultiROIGUI:
             "把当前预览帧设为批量追踪的最后一帧。常用于避开断裂后、失焦、样品离开视场或夹具遮挡的后段图像；结束帧不能早于起始帧。",
         )
 
-        measure_core = ttk.LabelFrame(self.measure_frame, text="应变与追踪", padding=(6, 4))
+        measure_core = ttk.Frame(self.measure_frame, style="Card.TFrame", padding=(0, 10, 0, 0))
         self.measure_core_frame = measure_core
         measure_core.grid(row=1, column=0, sticky="ew")
         measure_core.columnconfigure(1, weight=1)
@@ -3946,7 +4062,7 @@ class MultiROIGUI:
             "填写图像标定比例，单位 mm/px；留空时只按像素标距计算应变，工程应变本身仍为无量纲。"
             "只有在需要记录物理标距或复核像素尺寸时填写；常见误用是把 px/mm 写成 mm/px。"
         )
-        self.pixel_size_label = ttk.Label(measure_core, text="像素尺寸 mm/px，可空")
+        self.pixel_size_label = ttk.Label(measure_core, text="标定 mm/px，可空")
         self.pixel_size_label.grid(row=3, column=0, sticky="w", padx=(0, 6), pady=1)
         self.add_tooltip(self.pixel_size_label, pixel_size_tip)
         self.pixel_size_entry = ttk.Entry(measure_core, textvariable=self.pixel_size_mm, width=9)
@@ -3978,17 +4094,20 @@ class MultiROIGUI:
         self.advanced_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self._build_advanced_controls()
         self.advanced_frame.grid_remove()
+        self.pixel_size_label.grid_remove()
+        self.pixel_size_entry.grid_remove()
+        self.preset_status_label.grid_remove()
 
     def _build_fullfield_section(self, parent):
-        self.fullfield_frame = ttk.LabelFrame(parent, text="全场 2D DIC", padding=(8, 4))
-        self.fullfield_frame.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.fullfield_frame = ttk.LabelFrame(parent, text="03  全场 ROI 与 DIC 参数", padding=(10, 8))
+        self.fullfield_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self.fullfield_frame.columnconfigure(1, weight=1)
 
         subset_tip = (
             "子集边长，奇数像素。越大越稳、越慢，也越容易平滑掉局部梯度；"
             "太小则纹理不足、相关失败变多。常用 21–41。"
         )
-        ttk.Label(self.fullfield_frame, text="子集尺寸 px", style="Key.TLabel").grid(
+        ttk.Label(self.fullfield_frame, text="子集 px", style="Key.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 6), pady=1
         )
         self.dic_subset_size_entry = ttk.Entry(self.fullfield_frame, textvariable=self.dic_subset_size, width=8)
@@ -4033,7 +4152,7 @@ class MultiROIGUI:
             "位移场求应变时的邻域点数（奇数）。窗口大则应变更平滑，窗口小则保留局部梯度、噪声也更大。",
         )
 
-        ttk.Label(self.fullfield_frame, text="高斯平滑 σ").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=1)
+        ttk.Label(self.fullfield_frame, text="平滑 σ").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=1)
         self.dic_smooth_sigma_entry = ttk.Entry(
             self.fullfield_frame, textvariable=self.dic_smooth_sigma, width=8
         )
@@ -4063,7 +4182,7 @@ class MultiROIGUI:
             "相邻金字塔层缩放比例（0<scale<1）。默认 0.5；只有层数大于 1 时生效。",
         )
 
-        ttk.Label(self.fullfield_frame, text="整数搜索半径 px").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=1)
+        ttk.Label(self.fullfield_frame, text="搜索 px").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=1)
         self.dic_search_radius_entry = ttk.Entry(
             self.fullfield_frame, textvariable=self.dic_search_radius, width=8
         )
@@ -4082,9 +4201,18 @@ class MultiROIGUI:
             self.dic_zncc_min_entry,
             "子集相关的 ZNCC 接受下限，范围 0 到 1。调高更保守，失败点保持 NaN。",
         )
+        self.fullfield_frame.columnconfigure(3, weight=1)
+        for widget in self.fullfield_frame.winfo_children():
+            info = widget.grid_info()
+            row, col = int(info["row"]), int(info["column"])
+            widget.grid_configure(row=row // 2, column=(row % 2) * 2 + col,
+                                  sticky="ew" if col else "w", padx=(0, 8), pady=3)
+            if isinstance(widget, ttk.Entry):
+                widget.configure(width=5)
 
         draw_row = ttk.Frame(self.fullfield_frame, style="Card.TFrame")
-        draw_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        draw_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        draw_row.columnconfigure(1, weight=1)
         self.draw_field_roi_button = ttk.Button(
             draw_row,
             text="画全场 ROI",
@@ -4269,10 +4397,9 @@ class MultiROIGUI:
             ),
         ]
         self.advanced_frame.columnconfigure(1, weight=1)
-        self.advanced_frame.columnconfigure(3, weight=1)
         for idx, (attr_name, label, variable, width, tooltip) in enumerate(advanced_fields):
-            row = idx // 2
-            col = (idx % 2) * 2
+            row = idx
+            col = 0
             label_widget = ttk.Label(
                 self.advanced_frame,
                 text=label,
@@ -4287,7 +4414,7 @@ class MultiROIGUI:
             setattr(self, attr_name, entry)
             self.add_tooltip(entry, tooltip)
 
-        option_row = (len(advanced_fields) + 1) // 2
+        option_row = len(advanced_fields)
         adaptive_tip = (
             "勾选后，严格相关未通过但弱相关、应变连续性和 FB 检查通过的帧可被 adaptive 接受。"
             "不勾选时只接受严格相关帧，更保守但可能产生更多 NaN。"
@@ -4307,7 +4434,7 @@ class MultiROIGUI:
             variable=self.use_prev_frame_template,
         )
         self.use_prev_frame_template_check.grid(
-            row=option_row, column=2, columnspan=2, sticky="w", pady=(6, 0)
+            row=option_row + 1, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
         self.add_tooltip(self.use_prev_frame_template_check, template_follow_tip)
         fb_tip = (
@@ -4316,48 +4443,49 @@ class MultiROIGUI:
         )
         self.enable_fb_check_check = ttk.Checkbutton(self.advanced_frame, text="前后向一致性检查", variable=self.enable_fb_check)
         self.enable_fb_check_check.grid(
-            row=option_row + 1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+            row=option_row + 2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
         self.add_tooltip(self.enable_fb_check_check, fb_tip)
 
     def _build_roi_section(self, parent):
-        group_frame = ttk.LabelFrame(parent, text="3. ROI 设置", padding=(8, 4))
+        group_frame = ttk.LabelFrame(parent, text="03  ROI 配对与分组", padding=(10, 8))
         self.roi_group_frame = group_frame
-        group_frame.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        group_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         group_frame.columnconfigure(0, weight=1)
 
         tool_row = ttk.Frame(group_frame, style="Card.TFrame")
         tool_row.grid(row=0, column=0, sticky="ew")
+        tool_row.columnconfigure((0, 1), weight=1, uniform="roi")
         self.roi1_button = ttk.Button(tool_row, text="画 ROI 1", command=lambda: self.set_roi_mode(1), style="Compact.TButton")
-        self.roi1_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.roi1_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.roi1_button,
             "切换到 ROI 1 绘制模式；在参考帧上按住鼠标左键拖出矩形。"
             "建议覆盖清晰散斑或稳定纹理，避免边界、反光、裂纹尖端或会消失的区域。",
         )
         self.roi2_button = ttk.Button(tool_row, text="画 ROI 2", command=lambda: self.set_roi_mode(2), style="Compact.TButton")
-        self.roi2_button.grid(row=0, column=1, padx=(0, 12), pady=2, sticky="w")
+        self.roi2_button.grid(row=0, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.roi2_button,
             "切换到 ROI 2 绘制模式；ROI 2 与 ROI 1 的中心距就是虚拟引伸计初始标距 L0。"
             "两个 ROI 太近会放大噪声，太远则更容易受视场边界或局部非均匀变形影响。",
         )
-        self.align_x_button = ttk.Button(tool_row, text="水平对齐→横向应变", command=lambda: self.align_current_pair("x", set_mode=True), style="Compact.TButton")
-        self.align_x_button.grid(row=1, column=0, columnspan=2, padx=(0, 6), pady=2, sticky="w")
+        self.align_x_button = ttk.Button(tool_row, text="水平对齐 · x", command=lambda: self.align_current_pair("x", set_mode=True), style="Compact.TButton")
+        self.align_x_button.grid(row=1, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.align_x_button,
             "强制 ROI1/ROI2 中心 y 坐标相同，并把应变方向设为 x。"
             "适合左右分开的标距；如果实际标距不是水平的，强制对齐会改变物理测量方向。",
         )
-        self.align_y_button = ttk.Button(tool_row, text="垂直对齐→纵向应变", command=lambda: self.align_current_pair("y", set_mode=True), style="Compact.TButton")
-        self.align_y_button.grid(row=1, column=2, columnspan=2, padx=(0, 6), pady=2, sticky="w")
+        self.align_y_button = ttk.Button(tool_row, text="垂直对齐 · y", command=lambda: self.align_current_pair("y", set_mode=True), style="Compact.TButton")
+        self.align_y_button.grid(row=1, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.align_y_button,
             "强制 ROI1/ROI2 中心 x 坐标相同，并把应变方向设为 y。"
             "适合上下分开的标距；如果实际标距不是垂直的，强制对齐会改变物理测量方向。",
         )
 
-        roi_summary_frame = ttk.LabelFrame(group_frame, text="当前 ROI 安全摘要", padding=(8, 6))
+        roi_summary_frame = ttk.Frame(group_frame, style="Card.TFrame", padding=(0, 4))
         roi_summary_frame.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         roi_summary_frame.columnconfigure(0, weight=1)
         self.current_roi_summary_label = ttk.Label(
@@ -4375,6 +4503,7 @@ class MultiROIGUI:
 
         form_row = ttk.Frame(group_frame, style="Card.TFrame")
         form_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        form_row.columnconfigure((1, 3), weight=1)
         group_name_tip = (
             "给当前 ROI 组命名，留空会自动使用 G01、G02 等名称。"
             "建议用样品位置或重复编号命名，避免多个 ROI 组导出后难以追溯。"
@@ -4382,8 +4511,8 @@ class MultiROIGUI:
         self.group_name_label = ttk.Label(form_row, text="组名：")
         self.group_name_label.grid(row=0, column=0, padx=(0, 4), pady=2, sticky="w")
         self.add_tooltip(self.group_name_label, group_name_tip)
-        self.group_name_entry = ttk.Entry(form_row, textvariable=self.group_name_var, width=13)
-        self.group_name_entry.grid(row=0, column=1, padx=(0, 12), pady=2, sticky="w")
+        self.group_name_entry = ttk.Entry(form_row, textvariable=self.group_name_var, width=8)
+        self.group_name_entry.grid(row=0, column=1, padx=(0, 8), pady=2, sticky="ew")
         self.add_tooltip(self.group_name_entry, group_name_tip)
         role_tip = (
             "选择该 ROI 组在泊松比导出中的角色。普通组只导出自身应变；拉伸方向和横向方向成对存在时才会导出泊松比。"
@@ -4396,14 +4525,14 @@ class MultiROIGUI:
             form_row,
             textvariable=self.roi_role_display,
             values=list(ROI_ROLE_LABEL_TO_VALUE.keys()),
-            width=10,
+            width=8,
             state="readonly",
         )
-        self.roi_role_box.grid(row=0, column=3, padx=(0, 12), pady=2, sticky="w")
+        self.roi_role_box.grid(row=0, column=3, pady=2, sticky="ew")
         self.roi_role_box.bind("<<ComboboxSelected>>", self.sync_roi_role_from_display)
         self.add_tooltip(self.roi_role_box, role_tip)
-        self.add_group_button = ttk.Button(form_row, text="添加当前 ROI 为一组", command=self.add_current_group, style="Compact.TButton")
-        self.add_group_button.grid(row=1, column=0, columnspan=4, pady=(4, 2), sticky="w")
+        self.add_group_button = ttk.Button(form_row, text="添加 ROI 组", command=self.add_current_group, style="Secondary.TButton")
+        self.add_group_button.grid(row=1, column=0, columnspan=4, pady=(6, 2), sticky="ew")
         self.add_tooltip(
             self.add_group_button,
             "把当前 ROI1/ROI2 保存为一组虚拟引伸计；每组会独立追踪并导出应变曲线。"
@@ -4412,29 +4541,30 @@ class MultiROIGUI:
 
         action_row = ttk.Frame(group_frame, style="Card.TFrame")
         action_row.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        self.update_group_button = ttk.Button(action_row, text="更新选中组", command=self.update_selected_group, style="Compact.TButton")
-        self.update_group_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        action_row.columnconfigure((0, 1), weight=1, uniform="group")
+        self.update_group_button = ttk.Button(action_row, text="更新选中", command=self.update_selected_group, style="Compact.TButton")
+        self.update_group_button.grid(row=0, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.update_group_button,
             "用当前 ROI1/ROI2 覆盖列表中选中的组；适合发现 ROI 位置、方向或角色设置不合适后修正。"
             "误点会改变该组后续分析模板，建议更新前先载入并确认选中组。",
         )
-        self.load_group_button = ttk.Button(action_row, text="载入选中组", command=self.load_selected_group, style="Compact.TButton")
-        self.load_group_button.grid(row=0, column=1, padx=(0, 6), pady=2, sticky="w")
+        self.load_group_button = ttk.Button(action_row, text="载入选中", command=self.load_selected_group, style="Compact.TButton")
+        self.load_group_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.load_group_button,
             "把列表中选中的 ROI 组载回当前编辑状态，便于检查、微调或更新。"
             "载入本身不会改变导出结果，只有随后点击更新选中组才会覆盖原组。",
         )
-        self.delete_group_button = ttk.Button(action_row, text="删除选中组", command=self.delete_selected_group, style="Danger.TButton")
-        self.delete_group_button.grid(row=0, column=2, padx=(0, 6), pady=2, sticky="w")
+        self.delete_group_button = ttk.Button(action_row, text="删除选中", command=self.delete_selected_group, style="Danger.TButton")
+        self.delete_group_button.grid(row=1, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.delete_group_button,
             "从列表中删除选中的 ROI 组；不会删除已经导出的文件，但本次重新分析时该组不再参与计算。"
             "如果用于泊松比，删除轴向或横向组会导致泊松比无法导出。",
         )
         self.clear_rois_button = ttk.Button(action_row, text="清除当前 ROI", command=self.clear_current_rois, style="Danger.TButton")
-        self.clear_rois_button.grid(row=1, column=0, padx=(0, 6), pady=2, sticky="w")
+        self.clear_rois_button.grid(row=1, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.clear_rois_button,
             "只清空当前正在编辑的 ROI1/ROI2；已经添加到列表中的 ROI 组不受影响。"
@@ -4446,21 +4576,26 @@ class MultiROIGUI:
         tree_frame.columnconfigure(0, weight=1)
         columns = ("name", "role", "selected", "actual", "L0", "dx", "dy", "roi1", "roi2")
         # 保留水平滚动，首屏优先显示按钮和图像，不让列表请求宽度撑爆窗口。
-        self.group_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=3)
+        self.group_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=3,
+                                      selectmode="browse", displaycolumns=("name", "role", "actual", "L0", "selected", "dx", "dy", "roi1", "roi2"))
         for col in columns:
             self.group_tree.heading(col, text=GROUP_TREE_HEADING_TEXTS[col])
             self.group_tree.column(
                 col,
-                width=GROUP_TREE_COLUMN_WIDTHS[col],
+                width=80 if col in ("name", "role", "actual", "L0") else GROUP_TREE_COLUMN_WIDTHS[col],
                 minwidth=40,
                 anchor="center",
-                stretch=True,
+                stretch=False,
             )
         self.group_tree.grid(row=0, column=0, sticky="ew")
         tree_scroll_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.group_tree.xview)
         self.group_tree.configure(xscrollcommand=tree_scroll_x.set)
         tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        tree_scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.group_tree.yview)
+        tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.group_tree.configure(yscrollcommand=tree_scroll_y.set)
         self.group_tree.bind("<Double-1>", lambda event: self.load_selected_group())
+        self.group_tree.bind("<<TreeviewSelect>>", lambda _event: self.update_workflow_action_states())
         self.group_tree.bind("<Button-3>", self._show_group_tree_context_menu)  # 右键菜单
         self.add_tooltip(
             self.group_tree,
@@ -4468,406 +4603,250 @@ class MultiROIGUI:
         )
 
     def _build_image_section(self, parent):
-        self.image_frame = ttk.LabelFrame(parent, text="图像区：拖动画当前 ROI；绿色线为已添加的 ROI 组", padding=4)
+        self.image_frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
         self.image_frame.grid(row=0, column=0, sticky="nsew")
         self.image_frame.columnconfigure(0, weight=1)
-        self.image_frame.rowconfigure(1, weight=1)  # row 0 will be toolbar
-
-        # === 图像工具栏（微交互 + 专业感）===
-        img_toolbar = ttk.Frame(self.image_frame, style="Card.TFrame")
-        img_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 3))
-
-        self.btn_zoom_out = ttk.Button(img_toolbar, text="−", command=lambda: self.zoom_image(1/1.25), style="Compact.TButton", width=3)
-        self.btn_zoom_out.pack(side=tk.LEFT, padx=(0, 2))
-        self.add_tooltip(self.btn_zoom_out, "缩小预览（快捷键建议：Ctrl + -）")
-
-        self.btn_zoom_in = ttk.Button(img_toolbar, text="+", command=lambda: self.zoom_image(1.25), style="Compact.TButton", width=3)
-        self.btn_zoom_in.pack(side=tk.LEFT, padx=(0, 4))
-        self.add_tooltip(self.btn_zoom_in, "放大预览（快捷键建议：Ctrl + +）")
-
-        self.btn_fit = ttk.Button(img_toolbar, text="适应", command=self.fit_image_to_view, style="Compact.TButton", width=6)
-        self.btn_fit.pack(side=tk.LEFT, padx=(0, 2))
-        self.add_tooltip(self.btn_fit, "将图像缩放以完整显示在当前图像区内")
-
-        self.btn_1to1 = ttk.Button(img_toolbar, text="1:1", command=self.show_image_1to1, style="Compact.TButton", width=4)
-        self.btn_1to1.pack(side=tk.LEFT, padx=(0, 6))
-        self.add_tooltip(self.btn_1to1, "以原始像素比例显示（100%），最适合精细观察散斑")
-
-        self.zoom_label_var = tk.StringVar(value="100%")
-        self.zoom_label = ttk.Label(img_toolbar, textvariable=self.zoom_label_var, width=7, anchor="center")
-        self.zoom_label.pack(side=tk.LEFT, padx=(4, 8))
-
-        ttk.Label(img_toolbar, text="提示：拖动窗口边缘可自动提升预览清晰度", style="Hint.TLabel").pack(side=tk.LEFT, padx=4)
-
-        self.canvas = tk.Canvas(self.image_frame, bg="#111827", cursor="crosshair", highlightthickness=0, width=560, height=260)
+        self.image_frame.rowconfigure(1, weight=1)
+        toolbar = ttk.Frame(self.image_frame, style="Card.TFrame")
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        toolbar.columnconfigure(5, weight=1)
+        buttons = [
+            ("btn_zoom_out", "−", lambda: self.zoom_image(1 / 1.25), 3, "缩小 · Ctrl + -"),
+            ("btn_zoom_in", "+", lambda: self.zoom_image(1.25), 3, "放大 · Ctrl + +"),
+            ("btn_fit", "适应窗口", self.fit_image_to_view, 8, "完整显示图像 · Ctrl + F"),
+            ("btn_1to1", "1:1", self.show_image_1to1, 4, "按原始像素显示；用滚动条检查图像边缘。"),
+        ]
+        for col, (attr, text, command, width, tip) in enumerate(buttons):
+            button = ttk.Button(toolbar, text=text, command=command, style="Compact.TButton", width=width)
+            button.grid(row=0, column=col, padx=(0, 4))
+            setattr(self, attr, button)
+            self.add_tooltip(button, tip)
+        self.zoom_label_var = tk.StringVar(value="—")
+        self.zoom_label = ttk.Label(toolbar, textvariable=self.zoom_label_var, style="Hint.TLabel", width=7, anchor="center")
+        self.zoom_label.grid(row=0, column=4, padx=(2, 4))
+        self.canvas = tk.Canvas(self.image_frame, bg="#111827", cursor="crosshair", highlightthickness=0,
+                                width=400, height=260, xscrollincrement=1, yscrollincrement=1)
         self.canvas.grid(row=1, column=0, sticky="nsew")
+        scroll_x = ttk.Scrollbar(self.image_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        scroll_y = ttk.Scrollbar(self.image_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        scroll_x.grid(row=2, column=0, sticky="ew")
+        scroll_y.grid(row=1, column=1, sticky="ns")
+        self.canvas.configure(xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-4>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-5>", self._on_mouse_wheel)
+        self.canvas.bind("<Configure>", self._on_image_canvas_configure, add="+")
+        self.image_context_var = tk.StringVar(value="在参考帧上绘制 ROI；滚轮缩放，滚动条移动视图。")
+        self.image_context_label = ttk.Label(self.image_frame, textvariable=self.image_context_var,
+                                             style="Hint.TLabel", wraplength=600, justify=tk.LEFT)
+        self.image_context_label.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.image_frame.bind("<Configure>", lambda event: self.image_context_label.configure(wraplength=max(240, event.width - 24)))
+        self.add_tooltip(self.canvas, "在图像内拖出矩形 ROI；滚轮围绕指针缩放，滚动条可查看原始图像边缘。")
 
-        # 滚轮缩放（跨平台处理）
-        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)       # Windows
-        self.canvas.bind("<Button-4>", self._on_mouse_wheel)         # Linux scroll up
-        self.canvas.bind("<Button-5>", self._on_mouse_wheel)         # Linux scroll down
+    def _draw_image_empty_state(self):
+        if not hasattr(self, "canvas") or self.display_img is not None:
+            return
+        self.canvas.delete("empty_state")
+        cx, cy = self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2
+        self.canvas.create_text(cx, cy - 24, text="加载图像序列", fill="#e2e8f0",
+                                 font=(UI_FONT_FAMILY, 16, "bold"), tags="empty_state")
+        self.canvas.create_text(cx, cy + 24, text="选择图像文件夹，然后点击“加载序列”\n支持 TIFF、PNG、JPEG 和 BMP",
+                                 fill="#b0bfd2", justify=tk.CENTER, font=self.ui_base_font,
+                                 width=max(200, self.canvas.winfo_width() - 50), tags="empty_state")
 
-        self.add_tooltip(
-            self.canvas,
-            "在参考帧上拖动画 ROI。滚轮可缩放，拖动窗口边缘可提升预览清晰度。",
-        )
+    def _on_image_canvas_configure(self, _event=None):
+        if self.display_img is None:
+            self._draw_image_empty_state()
+        else:
+            self._update_image_scrollregion()
+
+    def _update_image_scrollregion(self):
+        dh, dw = self.display_img.shape[:2]
+        pad_x = max(0, (self.canvas.winfo_width() - dw) // 2)
+        pad_y = max(0, (self.canvas.winfo_height() - dh) // 2)
+        self.canvas.config(scrollregion=(-pad_x, -pad_y, dw + pad_x, dh + pad_y))
+        if self.auto_fit_enabled or pad_x:
+            self.canvas.xview_moveto(0)
+        if self.auto_fit_enabled or pad_y:
+            self.canvas.yview_moveto(0)
+
+    def _update_image_context(self):
+        if not hasattr(self, "image_context_var") or not self.image_paths or self.first_img8 is None:
+            return
+        if self._canvas_shows_field_overlay and self.dic_last_image is not None:
+            h, w = self.dic_last_image.shape[:2]
+            text = f"结果叠加 · {self.dic_field_component.get()} · 第 {self.dic_last_frame_1based} 帧 · {self.dic_last_filename} · {w} × {h} px · 参考帧 {self.dic_last_reference_frame_1based}"
+        else:
+            start, _ = self._safe_int_var(self.start_frame_1based)
+            filename = os.path.basename(self.image_paths[self.current_preview_index])
+            h, w = self.first_img8.shape[:2]
+            label = "全场 ROI" if self.is_fullfield_mode() else f"ROI {self.current_roi_index}"
+            text = f"{filename} · 第 {self.current_preview_index + 1}/{len(self.image_paths)} 帧 · {w} × {h} px · 参考帧 {start if start is not None else '待校验'} · 绘制 {label}"
+        self.image_context_var.set(text)
 
     def _build_analysis_section(self, parent):
-        self.analysis_frame = ttk.LabelFrame(parent, text="4. 分析与导出", padding=(8, 8))
-        self.analysis_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.analysis_frame = ttk.LabelFrame(parent, text="04  导出设置", padding=(10, 8))
+        self.analysis_frame.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         self.analysis_frame.columnconfigure(0, weight=1)
-
-        action_frame = ttk.LabelFrame(self.analysis_frame, text="准备好后", padding=(8, 6))
-        action_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        action_frame.columnconfigure(0, weight=1)
-        self.start_button = ttk.Button(
-            action_frame,
-            text="开始分析并导出结果",
-            command=self.start_processing,
-            style="Primary.TButton",
-        )
-        self.start_button.grid(row=0, column=0, sticky="ew")
-        self.add_tooltip(
-            self.start_button,
-            "点击后开始分析：程序会先检查图像、分析范围、ROI 组和导出选项；通过后批量追踪 ROI，并导出勾选的 TXT/PNG/CSV/OPJU 结果。"
-            "开始后请等待完成，若参数错误会先弹窗提示而不改变核心数据。",
-        )
-        self.export_hint_label = ttk.Label(
-            action_frame,
-            text="开始前请确认参考帧、ROI 方向和导出内容；错误方向会导致 L0 或应变解释异常。",
-            style="Warning.TLabel",
-            justify=tk.LEFT,
-            wraplength=340,
-        )
-        self.export_hint_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        self.export_hint_label.configure(text="确认参考帧、ROI 方向和导出内容后再开始。", wraplength=500)
-        self.add_tooltip(
-            self.export_hint_label,
-            "这是开始分析前的重点检查区。若不确定方向或 ROI 质量，先导出 QC 摘要、相关系数曲线或 overlay 图片进行复核。",
-        )
-
-        preflight_frame = ttk.LabelFrame(self.analysis_frame, text="运行前检查", padding=(8, 6))
-        preflight_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        preflight_frame.columnconfigure(0, weight=1)
-        self.preflight_summary_label = ttk.Label(
-            preflight_frame,
-            textvariable=self.preflight_summary_var,
-            style="Hint.TLabel",
-            justify=tk.LEFT,
-            wraplength=430,
-        )
-        self.preflight_summary_label.grid(row=0, column=0, sticky="ew")
-        self.add_tooltip(
-            self.preflight_summary_label,
-            "逐项检查图像序列、分析范围、ROI 组、参考帧、L0、方向、泊松比角色、输出目录和导出选项。阻止项会禁用开始按钮；警告项需要科研判断后再继续。",
-        )
-
-        export_frame = ttk.LabelFrame(self.analysis_frame, text="导出内容", padding=(10, 8))
-        self.export_frame = export_frame
-        export_frame.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        export_frame.columnconfigure(0, weight=1)
-        export_frame.columnconfigure(1, weight=1)
-        export_frame.columnconfigure(2, weight=1)
-
-        # 快速预设按钮（科研常用组合）—— 使用 grid 以避免与下方 checkbutton 冲突
-        preset_bar = ttk.Frame(export_frame, style="Card.TFrame")
-        preset_bar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-        preset_bar.columnconfigure(1, weight=1)
-        preset_bar.columnconfigure(2, weight=1)
-        self.export_preset_label = ttk.Label(preset_bar, text="导出预设：", style="Key.TLabel")
-        self.export_preset_label.grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 3))
-        self.add_tooltip(
-            self.export_preset_label,
-            "这里是导出选项的快捷组合，只改变下方勾选状态，不会立即开始分析或写入文件。",
-        )
-
-        self.export_research_preset_button = ttk.Button(
-            preset_bar,
-            text="推荐导出",
-            command=self._apply_research_preset,
-            style="Secondary.TButton",
-            width=11,
-        )
-        self.export_research_preset_button.grid(row=0, column=1, sticky="ew", padx=(0, 4), pady=(0, 3))
-        self.add_tooltip(
-            self.export_research_preset_button,
-            "勾选核心 TXT、工程应变 PNG、QC 摘要和参数记录；适合作为日常科研分析默认组合，"
-            "不会生成大量 overlay 或完整 CSV 文件。",
-        )
-        self.export_quick_preset_button = ttk.Button(
-            preset_bar,
-            text="快速查看导出",
-            command=self._apply_quick_view_preset,
-            style="Compact.TButton",
-            width=11,
-        )
-        self.export_quick_preset_button.grid(row=0, column=2, sticky="ew", pady=(0, 3))
-        self.add_tooltip(
-            self.export_quick_preset_button,
-            "只保留工程应变 PNG 和 QC 摘要；适合快速检查追踪趋势和异常帧，"
-            "不作为最终归档或论文图表包。",
-        )
-        self.export_all_preset_button = ttk.Button(
-            preset_bar,
-            text="全量复核导出",
-            command=self._apply_all_export_preset,
-            style="Compact.TButton",
-            width=11,
-        )
-        self.export_all_preset_button.grid(row=1, column=1, columnspan=2, sticky="ew")
-        self.add_tooltip(
-            self.export_all_preset_button,
-            "勾选 TXT、OPJU、CSV、QC、相关系数、overlay、参数和论文级图表包；"
-            "适合复核或归档，文件数量会明显增加。",
-        )
-
-        # 使用更宽松的垂直布局 + 更好间距，缓解 cramped 感觉
-        export_options = [
-            ("Origin TXT（三列核心数据）", self.export_origin_txt, "勾选后导出 Frame、EngineeringStrain、TrueStrain 三列文本，适合直接导入 Origin；不勾选则不生成最小核心数据表。"),
-            ("Origin OPJU 项目（直接导入 OriginPro）", self.export_origin_opju, "勾选后启动/连接 OriginPro 并保存 ezDIC_results.opju；需要 OriginPro 2021+ 和 originpro 包，不满足环境时可能失败但不会取消已有 TXT/PNG 导出。"),
-            ("工程应变 PNG", self.export_engineering_png, "勾选后为每组 ROI 输出工程应变-帧数曲线；不勾选可减少文件数量，但少了快速查看趋势的图。"),
-            ("论文级图表包（PNG/TIFF/PDF/SVG/EPS）", self.export_publication_figures, "勾选后额外导出 600 dpi PNG/TIFF 和 PDF/SVG/EPS 矢量图，使用统一论文风格；适合投稿前在 Origin/Illustrator/Inkscape 中继续排版。"),
-            ("QC 摘要 TXT", self.export_qc_summary, "勾选后输出接受帧、拒绝帧、自适应接受和相关系数统计；建议保留，用于判断数据是否可用于科研结论。"),
-            ("完整 CSV", self.export_full_csv, "勾选后输出完整追踪数据和 ROI 坐标历史；文件较大，适合复查、调试或二次分析，不建议只依赖它做快速汇报。"),
-            ("相关系数曲线 PNG", self.export_corr_plot, "勾选后输出相关系数随帧变化曲线；用于发现局部失焦、遮挡或纹理丢失导致的追踪质量下降。"),
-            ("追踪 overlay 图片", self.export_overlays, "勾选后按 overlay 间隔保存叠加图，方便肉眼检查 ROI 漂移；间隔太小会生成大量图片。"),
-            ("参数与接受统计", self.export_parameters, "勾选后记录当前阈值、搜索半径、接受模式和导出设置，便于论文、报告或重复实验时追溯。"),
+        self.export_frame = ttk.Frame(self.analysis_frame, style="Card.TFrame")
+        self.export_frame.grid(row=0, column=0, sticky="ew")
+        self.export_frame.columnconfigure((0, 1), weight=1)
+        preset_bar = ttk.Frame(self.export_frame, style="Card.TFrame")
+        preset_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        preset_bar.columnconfigure((0, 1, 2), weight=1, uniform="export")
+        presets = [
+            ("export_research_preset_button", "推荐", self._apply_research_preset, "核心 TXT、应变 PNG、QC 摘要和参数记录。"),
+            ("export_quick_preset_button", "快速查看", self._apply_quick_view_preset, "应变 PNG 和 QC 摘要。"),
+            ("export_all_preset_button", "完整导出", self._apply_all_export_preset, "包括 Origin OPJU；需要本机 OriginPro 和 originpro 包。"),
+        ]
+        for col, (attr, text, command, tip) in enumerate(presets):
+            button = ttk.Button(preset_bar, text=text, command=command, style="Compact.TButton")
+            button.grid(row=0, column=col, sticky="ew", padx=(0, 4 if col < 2 else 0))
+            setattr(self, attr, button)
+            self.add_tooltip(button, tip)
+        options = [
+            ("Origin TXT", self.export_origin_txt, "Frame、EngineeringStrain、TrueStrain 三列核心数据。"),
+            ("应变 PNG", self.export_engineering_png, "各 ROI 组的工程应变曲线。"),
+            ("QC 摘要", self.export_qc_summary, "接受 / 拒绝帧和相关系数统计。"),
+            ("参数记录", self.export_parameters, "保存参数与接受统计，便于追溯。"),
+            ("完整 CSV", self.export_full_csv, "完整追踪数据和 ROI 坐标历史。"),
+            ("相关系数 PNG", self.export_corr_plot, "相关系数随帧变化的曲线。"),
+            ("叠加图像", self.export_overlays, "按高级设置中的间隔保存追踪叠加图。"),
+            ("论文图表包", self.export_publication_figures, "600 dpi PNG/TIFF 和 PDF/SVG/EPS 矢量图。"),
+            ("Origin OPJU", self.export_origin_opju, "需要 OriginPro 2021+ 和 originpro 包；不满足环境时记录导出失败。"),
         ]
         self.export_checkbuttons = []
-        compact_export_labels = [
-            "Origin TXT",
-            "Origin OPJU",
-            "应变 PNG",
-            "论文图包",
-            "QC 摘要",
-            "完整 CSV",
-            "相关 PNG",
-            "Overlay 图",
-            "参数记录",
-        ]
-        export_options = [
-            (compact_export_labels[idx], variable, tooltip)
-            for idx, (_text, variable, tooltip) in enumerate(export_options)
-        ]
-        for idx, (text, variable, tooltip) in enumerate(export_options):
-            checkbutton = tk.Checkbutton(
-                export_frame,
-                text=text,
-                variable=variable,
-                anchor="w",
-                justify=tk.LEFT,
-                wraplength=160,
-                font=self.ui_base_font,
-                bg=self.card_bg,
-                fg=self.text_color,
-                activebackground=self.card_bg,
-                activeforeground=self.text_color,
-                selectcolor=self.card_bg,
-                relief=tk.FLAT,
-                borderwidth=0,
-                highlightthickness=0,
-            )
-            # 从 row=1 开始，双列排布减少首屏纵向占位。
-            checkbutton.grid(row=idx // 3 + 1, column=idx % 3, sticky="w", padx=3, pady=0)
-            self.add_tooltip(checkbutton, tooltip)
-            self.export_checkbuttons.append(checkbutton)
-
-        self.fullfield_export_info_frame = ttk.LabelFrame(
-            self.analysis_frame, text="全场固定输出", padding=(10, 8)
-        )
-        self.fullfield_export_info_frame.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        for idx, (text, variable, tip) in enumerate(options):
+            check = ttk.Checkbutton(self.export_frame, text=text, variable=variable)
+            check.grid(row=idx // 2 + 1, column=idx % 2, sticky="w", pady=2)
+            self.export_checkbuttons.append(check)
+            self.add_tooltip(check, tip)
+        self.fullfield_export_info_frame = ttk.Frame(self.analysis_frame, style="Card.TFrame")
+        self.fullfield_export_info_frame.grid(row=1, column=0, sticky="ew")
         self.fullfield_export_info_frame.columnconfigure(0, weight=1)
-        ttk.Label(
+        self.fullfield_export_info_label = ttk.Label(
             self.fullfield_export_info_frame,
-            text=(
-                "每个有效变形帧固定输出 TXT/CSV（x、y、u、v、ZNCC、Exx、Eyy、Exy）以及 "
-                "u/v/Exx/Eyy/Exy PNG；可选输出 Exx overlay。无需勾选 1D 导出项。"
-            ),
-            style="Hint.TLabel",
-            justify=tk.LEFT,
-            wraplength=430,
-        ).grid(row=0, column=0, sticky="ew")
-        self.fullfield_export_overlays_checkbutton = tk.Checkbutton(
-            self.fullfield_export_info_frame,
-            text="额外导出 Exx overlay（可选）",
-            variable=self.export_overlays,
-            anchor="w",
-            font=self.ui_base_font,
-            bg=self.card_bg,
-            fg=self.text_color,
-            activebackground=self.card_bg,
-            activeforeground=self.text_color,
-            selectcolor=self.card_bg,
-            relief=tk.FLAT,
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        self.fullfield_export_overlays_checkbutton.grid(row=1, column=0, sticky="w", pady=(5, 0))
-        self.add_tooltip(
-            self.fullfield_export_overlays_checkbutton,
-            "可选输出 Exx 场叠加在实际分析帧上的 overlay 图片，用于视觉 QC；不影响固定 TXT/CSV/PNG 核心输出。",
-        )
+            text="每个有效变形帧导出 TXT / CSV、位移和应变 PNG。\n位移单位 px；应变无量纲；失败点保留 NaN。",
+            style="Hint.TLabel", justify=tk.LEFT, wraplength=360)
+        self.fullfield_export_info_label.grid(row=0, column=0, sticky="ew")
+        self.fullfield_export_overlays_checkbutton = ttk.Checkbutton(
+            self.fullfield_export_info_frame, text="额外导出 Exx 叠加图", variable=self.export_overlays)
+        self.fullfield_export_overlays_checkbutton.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.add_tooltip(self.fullfield_export_overlays_checkbutton, "叠加在实际分析帧上的 Exx，用于视觉复核。")
+        self.export_hint_label = ttk.Label(self.analysis_frame, style="Hint.TLabel", justify=tk.LEFT, wraplength=360)
+        self.export_hint_label.grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
-        status_frame = ttk.LabelFrame(self.analysis_frame, text="运行状态", padding=(8, 4))
-        status_frame.grid(row=4, column=0, sticky="ew", pady=(0, 6))
-        status_frame.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(status_frame, orient=tk.HORIZONTAL, mode="determinate")
-        self.progress.grid(row=0, column=0, sticky="ew", pady=(0, 3))
-
+    def _build_run_section(self, parent):
+        self.run_frame = ttk.Frame(parent, style="Card.TFrame", padding=(12, 10))
+        self.run_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.run_frame.columnconfigure(0, weight=1)
+        self.run_state_var = tk.StringVar(value="待加载")
+        self.run_state_label = ttk.Label(self.run_frame, textvariable=self.run_state_var, style="Badge.TLabel")
+        self.run_state_label.grid(row=0, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Ctrl + Enter", style="Hint.TLabel").grid(row=0, column=1, sticky="e")
+        self.workflow_hint_label = ttk.Label(self.run_frame, textvariable=self.workflow_hint_var,
+                                             style="Hint.TLabel", wraplength=360, justify=tk.LEFT)
+        self.workflow_hint_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 8))
+        self.add_tooltip(self.workflow_hint_label, "显示当前分析条件与下一步操作；如有质量提示，可在“质量与日志”查看完整检查结果和原因。")
+        self.start_button = ttk.Button(self.run_frame, text="开始分析", command=self.start_processing, style="Primary.TButton")
+        self.start_button.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.add_tooltip(self.start_button, "检查通过后开始分析并导出结果；Ctrl + Enter。运行时可在“质量与日志”查看详细信息。")
+        self.progress_value = tk.DoubleVar(value=0)
+        self.progress_percent_var = tk.StringVar(value="0%")
+        self.progress_value.trace_add("write", lambda *_args: self.progress_percent_var.set(f"{self.progress_value.get():.0f}%"))
+        self.progress = ttk.Progressbar(self.run_frame, orient=tk.HORIZONTAL, mode="determinate", variable=self.progress_value)
+        self.progress.grid(row=3, column=0, sticky="ew", pady=(10, 6), padx=(0, 8))
+        ttk.Label(self.run_frame, textvariable=self.progress_percent_var, style="Hint.TLabel").grid(row=3, column=1, sticky="e")
         self.status_var = tk.StringVar(value="未加载图像")
-
-        # 预览缩放信息（动态重采样时更新，让用户知道当前看到的是什么分辨率）
         self.preview_scale_var = tk.StringVar(value="")
-        status_line = ttk.Frame(status_frame, style="Card.TFrame")
-        status_line.grid(row=1, column=0, sticky="ew", pady=(0, 2))
-        status_line.columnconfigure(0, weight=1)
-        self.status_label = ttk.Label(
-            status_line,
-            textvariable=self.status_var,
-            style="Hint.TLabel",
-            wraplength=320,
-            justify=tk.LEFT,
-        )
-        self.status_label.grid(row=0, column=0, sticky="w")
-        ttk.Label(status_line, textvariable=self.preview_scale_var, style="Hint.TLabel", foreground="#64748b").grid(row=0, column=1, sticky="e")
+        self.status_label = ttk.Label(self.run_frame, textvariable=self.status_var, style="Hint.TLabel",
+                                       wraplength=360, justify=tk.LEFT)
+        self.status_label.grid(row=4, column=0, columnspan=2, sticky="ew")
 
-        log_row = ttk.Frame(status_frame, style="Card.TFrame")
-        log_row.grid(row=2, column=0, sticky="ew")
-        log_row.columnconfigure(0, weight=1)
-        self.log_text = tk.Text(
-            log_row,
-            width=38,
-            height=5,
-            wrap=tk.WORD,
-            bg="#0f172a",
-            fg="#e5e7eb",
-            insertbackground="#e5e7eb",
-            font=self.ui_log_font,
-            relief=tk.FLAT,
-            padx=8,
-            pady=6,
-        )
+    def _build_quality_section(self, parent):
+        parent.rowconfigure(0, weight=0)
+        parent.rowconfigure(1, weight=0)
+        parent.rowconfigure(2, weight=1)
+        preflight_frame = ttk.LabelFrame(parent, text="运行前检查", padding=12)
+        preflight_frame.grid(row=0, column=0, sticky="ew")
+        preflight_frame.columnconfigure(0, weight=1)
+        self.preflight_summary_label = tk.Text(preflight_frame, height=8, width=30, wrap=tk.WORD,
+                                               font=self.ui_base_font, relief=tk.FLAT, bg=self.panel_bg,
+                                               fg=self.text_color, padx=10, pady=8, state=tk.DISABLED)
+        self.preflight_summary_label.grid(row=0, column=0, sticky="ew")
+        scrollbar = ttk.Scrollbar(preflight_frame, orient=tk.VERTICAL, command=self.preflight_summary_label.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.preflight_summary_label.configure(yscrollcommand=scrollbar.set)
+        self.preflight_summary_var.trace_add("write", self._update_preflight_text)
+        qc_frame = ttk.LabelFrame(parent, text="质量概览", padding=12)
+        qc_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        qc_frame.columnconfigure(0, weight=1)
+        self.qc_overview_label = ttk.Label(qc_frame, textvariable=self.qc_overview_var,
+                                           style="Hint.TLabel", wraplength=600, justify=tk.LEFT)
+        self.qc_overview_label.grid(row=0, column=0, sticky="ew")
+        log_frame = ttk.LabelFrame(parent, text="运行日志", padding=8)
+        log_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.log_text = tk.Text(log_frame, width=30, height=4, wrap=tk.WORD, bg=self.panel_bg,
+                                fg=self.text_color, font=self.ui_log_font, relief=tk.FLAT,
+                                padx=10, pady=8, state=tk.DISABLED)
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        self.log_scroll = ttk.Scrollbar(log_row, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=self.log_scroll.set)
+        parent.bind("<Configure>", lambda event: self._resize_quality_labels(event.width))
 
-        self.qc_overview_label = ttk.Label(
-            status_frame,
-            textvariable=self.qc_overview_var,
-            style="Hint.TLabel",
-            justify=tk.LEFT,
-            wraplength=430,
-        )
-        self.qc_overview_label.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        self.add_tooltip(
-            self.qc_overview_label,
-            "分析完成后显示总体 QC 等级、拒绝帧比例、自适应接受帧数、最需复核的 ROI 组和建议复核帧；Poor 不应直接作为可靠科研结论使用。",
-        )
+    def _update_progress(self, value):
+        self.progress.config(value=value)
+        if hasattr(self, "progress_value"):
+            self.progress_value.set(value)
 
-        self.analysis_frame.rowconfigure(4, weight=0)
-        self.analysis_frame.rowconfigure(5, weight=0)
+    def _resize_quality_labels(self, width):
+        self.qc_overview_label.configure(wraplength=max(220, width - 70))
 
-        # === Tier 0: In-app results viewer (collapsible) ===
-        self.viewer_frame = ttk.LabelFrame(self.analysis_frame, text="结果曲线预览（分析完成后显示，可交互）", padding=(8, 6))
-        self.viewer_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+    def _update_preflight_text(self, *_args):
+        text = self.preflight_summary_label
+        previous_view = text.yview()[0]
+        text.configure(state=tk.NORMAL)
+        text.delete("1.0", tk.END)
+        text.tag_configure("block", foreground=self.warning_color)
+        text.tag_configure("warn", foreground=self.key_color)
+        for line in self.preflight_summary_var.get().splitlines():
+            tag = "block" if line.startswith("[阻止]") else "warn" if line.startswith("[警告]") else "ok"
+            text.insert(tk.END, line + "\n", (tag,))
+        text.configure(state=tk.DISABLED)
+        text.yview_moveto(previous_view)
+
+    def _build_results_section(self, parent):
+        self.viewer_frame = ttk.Frame(parent, style="Card.TFrame", padding=12)
+        self.viewer_frame.grid(row=0, column=0, sticky="nsew")
         self.viewer_frame.columnconfigure(0, weight=1)
-
+        self.viewer_frame.rowconfigure(2, weight=1)
         self.viewer_placeholder = ttk.Label(
-            self.viewer_frame,
-            text="分析完成后自动显示各 ROI 组的工程应变曲线（可缩放、平移）。\n"
-                 "若定义了 axial + transverse 角色，可切换查看泊松比曲线。",
-            style="Hint.TLabel",
-            justify=tk.LEFT,
-            wraplength=360,
-        )
-        self.viewer_placeholder.grid(row=0, column=0, sticky="ew", pady=8)
-
+            self.viewer_frame, text="尚无分析结果\n\n完成分析后，在此查看应变曲线或全场位移与应变。\n结果图支持缩放、平移和导出。",
+            style="Hint.TLabel", anchor="center", justify=tk.CENTER, wraplength=440)
+        self.viewer_placeholder.grid(row=2, column=0, sticky="nsew")
         viewer_btns = ttk.Frame(self.viewer_frame, style="Card.TFrame")
-        viewer_btns.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self.viewer_export_btn = ttk.Button(
-            viewer_btns,
-            text="导出预览图",
-            command=self.export_viewer_figure,
-            style="Secondary.TButton",
-            state=tk.DISABLED,
-        )
-        self.viewer_export_btn.grid(row=0, column=0, padx=(0, 6))
-        self.add_tooltip(
-            self.viewer_export_btn,
-            "将当前应用内曲线预览导出为图片；只有分析完成并生成预览图后才可用。"
-            "若需要投稿级多格式图，请勾选“论文级图表包”。",
-        )
-        self.viewer_clear_btn = ttk.Button(
-            viewer_btns,
-            text="清除预览图",
-            command=self.clear_viewer,
-            style="Danger.TButton",
-            state=tk.DISABLED,
-        )
-        self.viewer_clear_btn.grid(row=0, column=1)
-        self.add_tooltip(
-            self.viewer_clear_btn,
-            "清除当前窗口中的结果曲线预览，不删除已经导出的 TXT/CSV/PNG 文件；"
-            "分析完成并显示预览后才可用。",
-        )
-
-        # The actual matplotlib canvas will be created on demand inside viewer_content_frame
+        viewer_btns.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        viewer_btns.columnconfigure(0, weight=1)
+        ttk.Label(viewer_btns, text="分析结果", style="StepTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.viewer_export_btn = ttk.Button(viewer_btns, text="导出当前图", command=self.export_viewer_figure,
+                                             style="Secondary.TButton", state=tk.DISABLED)
+        self.viewer_export_btn.grid(row=0, column=1, padx=(0, 6))
+        self.add_tooltip(self.viewer_export_btn, "保存当前结果图，可选择 PNG 或 PDF；导出包含当前分量、坐标轴和色标。")
+        self.viewer_clear_btn = ttk.Button(viewer_btns, text="清除预览", command=self.clear_viewer,
+                                            style="Compact.TButton", state=tk.DISABLED)
+        self.viewer_clear_btn.grid(row=0, column=2)
+        self.add_tooltip(self.viewer_clear_btn, "清除应用内结果预览并恢复原图；已经导出的分析结果文件保持可用。")
         self.viewer_content_frame = ttk.Frame(self.viewer_frame, style="Card.TFrame")
-        self.viewer_content_frame.grid(row=2, column=0, sticky="ew")
+        self.viewer_content_frame.grid(row=2, column=0, sticky="nsew")
         self.viewer_content_frame.columnconfigure(0, weight=1)
-        # 高度由 row weight + Figure 尺寸共同控制（已在 workspace 和 analysis_frame 权重中处理）
-        self.viewer_frame.grid_remove()
-
-        # Move notice down one row
-        notice_frame = ttk.Frame(self.analysis_frame, style="Card.TFrame")
-        notice_frame.grid(row=6, column=0, sticky="ew", pady=(4, 0))
-        notice_frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            notice_frame,
-            text=f"{APP_DEVELOPER} | DOI: {APP_DOI}",
-            foreground="#555555",
-            justify=tk.LEFT,
-            wraplength=460,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.usage_notice_button = ttk.Button(
-            notice_frame,
-            text="About / Citation",
-            command=self.show_usage_notice,
-            style="Compact.TButton",
-        )
-        self.usage_notice_button.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.add_tooltip(
-            self.usage_notice_button,
-            "查看开发者署名、推荐引用格式、DOI 和授权使用说明；写论文、报告或共享结果前建议确认引用信息。",
-        )
-
-        # 暗色模式切换（基础实现，便于长时间实验使用）
-        self.dark_mode_btn = ttk.Button(
-            notice_frame,
-            text="暗色模式",
-            command=self.toggle_dark_mode,
-            style="Compact.TButton",
-            width=8,
-        )
-        self.dark_mode_btn.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(4, 0))
-        self.add_tooltip(self.dark_mode_btn, "切换暗色/浅色界面（实验室长时间使用更护眼）。")
-
-        self.open_recent_output_button = ttk.Button(
-            notice_frame,
-            text="打开最近输出",
-            command=self.open_recent_output_folder,
-            style="Compact.TButton",
-            state=tk.NORMAL if self.recent_output_dir else tk.DISABLED,
-        )
-        self.open_recent_output_button.grid(row=2, column=0, sticky="w", pady=(4, 0))
-        self.add_tooltip(
-            self.open_recent_output_button,
-            "打开上一次成功分析或手动选择过的输出目录，方便回看 core、qc 和 optional 结果文件；没有最近目录时不可用。",
-        )
+        self.viewer_content_frame.rowconfigure(0, weight=1)
+        self.viewer_content_frame.grid_remove()
 
     def sync_strain_mode_from_display(self, event=None):
         label = self.strain_mode_display.get()
@@ -4920,10 +4899,16 @@ class MultiROIGUI:
             self.advanced_frame.grid_remove()
             self.advanced_visible.set(False)
             self.advanced_toggle_btn.config(text="显示高级设置")
+            self.pixel_size_label.grid_remove()
+            self.pixel_size_entry.grid_remove()
+            self.preset_status_label.grid_remove()
         else:
             self.advanced_frame.grid()
             self.advanced_visible.set(True)
             self.advanced_toggle_btn.config(text="隐藏高级设置")
+            self.pixel_size_label.grid()
+            self.pixel_size_entry.grid()
+            self.preset_status_label.grid()
 
     def show_usage_notice(self):
         messagebox.showinfo("About / Citation / Usage Notice", USAGE_NOTICE)
@@ -4931,8 +4916,10 @@ class MultiROIGUI:
     # ---------- 日志和文件 ----------
 
     def log(self, msg):
+        self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, str(msg) + "\n")
         self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
         self.root.update_idletasks()
 
     def log_user_error(self, context, exc, details=None):
@@ -4980,9 +4967,7 @@ class MultiROIGUI:
         if hasattr(self, "qc_overview_var"):
             self.qc_overview_var.set("分析完成后显示 QC 总览。")
         if hasattr(self, "clear_viewer"):
-            self.clear_viewer(keep_placeholder=False)
-            if hasattr(self, "viewer_frame"):
-                self.viewer_frame.grid_remove()
+            self.clear_viewer(keep_placeholder=True)
 
     def select_image_folder(self):
         folder = filedialog.askdirectory(title="选择图像序列文件夹")
@@ -5115,6 +5100,7 @@ class MultiROIGUI:
         index0 = int(max(0, min(index0, n - 1)))
 
         self.current_preview_index = index0
+        self._show_image_workspace()
         self.preview_frame_1based.set(index0 + 1)
 
         path = self.image_paths[index0]
@@ -5249,6 +5235,7 @@ class MultiROIGUI:
 
     def show_image(self):
         if self.display_img is None:
+            self._draw_image_empty_state()
             return
 
         pil_img = Image.fromarray(self.display_img)
@@ -5256,7 +5243,10 @@ class MultiROIGUI:
 
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
-        self.canvas.config(scrollregion=(0, 0, self.display_img.shape[1], self.display_img.shape[0]))
+        # Extending the scroll region centers small images while canvasx/y
+        # continue to return image coordinates for ROI drawing and zoom.
+        self._update_image_scrollregion()
+        self._update_image_context()
 
         self.redraw_rois_and_groups()
         if (
@@ -5406,6 +5396,7 @@ class MultiROIGUI:
             return
         self.auto_fit_enabled = True
         self._canvas_shows_field_overlay = False
+        self.display_img = None
         self._rescale_display_to_current_size()
         self._update_preview_scale_label()
         self._update_zoom_label()
@@ -5457,6 +5448,8 @@ class MultiROIGUI:
         preflight_items = self.refresh_preflight_panel() if hasattr(self, "preflight_summary_var") else []
         blocking_items = [item for item in preflight_items if item["level"] == "block"]
         warning_items = [item for item in preflight_items if item["level"] == "warn"]
+        busy = is_processing or completion_pending
+        self._set_run_controls_locked(busy)
         self.refresh_current_roi_summary()
         if hasattr(self, "dic_field_summary_var"):
             roi = self.field_roi
@@ -5475,35 +5468,99 @@ class MultiROIGUI:
             ready = has_field_roi if is_ff else has_groups
             can_start = has_sequence and ready and not blocking_items and not is_processing and not completion_pending
             self.start_button.config(state=tk.NORMAL if can_start else tk.DISABLED)
+            self.start_button.configure(text="正在分析…" if is_processing else "正在收尾…" if completion_pending else "开始分析")
+
+        has_pair = self.roi1 is not None and self.roi2 is not None
+        selected_group = bool(self.group_tree.selection()) if hasattr(self, "group_tree") else has_groups
+        for attr in ("roi1_button", "roi2_button", "draw_field_roi_button", "show_preview_button", "set_start_button", "set_end_button"):
+            if hasattr(self, attr):
+                getattr(self, attr).configure(state=tk.NORMAL if has_sequence and not busy else tk.DISABLED)
+        for attr in ("align_x_button", "align_y_button", "add_group_button"):
+            if hasattr(self, attr):
+                getattr(self, attr).configure(state=tk.NORMAL if has_sequence and has_pair and not busy else tk.DISABLED)
+        for attr, idx in (("roi1_button", 1), ("roi2_button", 2)):
+            if hasattr(self, attr):
+                getattr(self, attr).configure(style="Secondary.TButton" if self.current_roi_index == idx else "Compact.TButton")
+        if hasattr(self, "prev_frame_button"):
+            self.prev_frame_button.configure(state=tk.NORMAL if has_sequence and self.current_preview_index > 0 and not busy else tk.DISABLED)
+            self.next_frame_button.configure(state=tk.NORMAL if has_sequence and self.current_preview_index < len(self.image_paths) - 1 and not busy else tk.DISABLED)
 
         if hasattr(self, "clear_rois_button"):
-            can_clear = has_current_roi and not is_processing
+            can_clear = has_current_roi and not busy
             self.clear_rois_button.config(state=tk.NORMAL if can_clear else tk.DISABLED)
 
-        can_manage_groups = has_groups and not is_processing
+        can_manage_groups = has_groups and selected_group and not busy
         for attr in ("load_group_button", "update_group_button", "delete_group_button"):
             if hasattr(self, attr):
-                getattr(self, attr).config(state=tk.NORMAL if can_manage_groups else tk.DISABLED)
+                can_use = can_manage_groups and (has_pair if attr == "update_group_button" else True)
+                getattr(self, attr).config(state=tk.NORMAL if can_use else tk.DISABLED)
 
         if hasattr(self, "workflow_hint_var"):
             if is_processing:
-                hint = "正在处理：请等待当前分析完成；进度条和日志会显示追踪情况。"
+                hint = "正在计算；可在“质量与日志”查看详情。"
+            elif completion_pending:
+                hint = "正在保存结果并更新预览，请稍候。"
             elif blocking_items:
                 first = blocking_items[0]
-                hint = f"下一步：{first['label']}未就绪。{first['message']}"
+                hint = f"{first['label']}：{first['message']}"
             elif not has_sequence:
-                hint = "下一步：选择图像文件夹并点击“加载/刷新序列”。"
+                hint = "请选择图像文件夹并加载序列。"
             elif is_ff and not has_field_roi:
-                hint = "下一步：在参考帧拖出全场 ROI，并确认子集、步长和 IC-GN / IC-LM。"
+                hint = "请在参考帧绘制全场 ROI。"
             elif not is_ff and not has_groups:
-                hint = "下一步：在参考帧画 ROI1/ROI2，并添加为 ROI 组。"
+                hint = "请绘制 ROI 1 和 ROI 2，并添加 ROI 组。"
             elif warning_items:
-                hint = f"可以开始分析；但建议先复核警告项：{warning_items[0]['label']} - {warning_items[0]['message']}"
+                hint = f"可分析；请复核{warning_items[0]['label']}。详情见“质量与日志”。"
             else:
-                hint = "可以开始分析：点击“开始分析并导出结果”。开始前请确认参考帧、ROI 方向和导出内容。"
+                hint = "准备就绪，分析后自动显示结果。"
             self.workflow_hint_var.set(hint)
 
+        if hasattr(self, "run_state_var"):
+            failed = self.status_var.get().startswith("分析失败")
+            if is_processing:
+                state = "分析中"
+            elif completion_pending:
+                state = "正在收尾"
+            elif not has_sequence:
+                state = "待加载"
+            elif failed:
+                state = "分析失败 · 可重试"
+            elif blocking_items:
+                state = "待设置"
+            elif warning_items:
+                state = "可分析 · 有提示"
+            else:
+                state = "准备就绪"
+            self.run_state_var.set(state)
+            style = "Error.TLabel" if failed and not busy else "Ready.TLabel" if not busy and has_sequence and not blocking_items else "Badge.TLabel"
+            self.run_state_label.configure(style=style)
+        self._update_image_context()
+
         self._update_image_toolbar_state()
+
+    def _set_run_controls_locked(self, locked):
+        """Freeze editable inputs while an immutable run snapshot is executing."""
+        if not hasattr(self, "controls_panel"):
+            return
+        previous = getattr(self, "_run_controls_locked", False)
+        if previous == locked:
+            return
+        self._run_controls_locked = locked
+        if locked:
+            self._run_control_states = []
+            def freeze(widget):
+                if isinstance(widget, (ttk.Entry, ttk.Combobox, ttk.Button, ttk.Checkbutton, ttk.Radiobutton, ttk.Treeview)):
+                    self._run_control_states.append((widget, widget.instate(["disabled"])))
+                    widget.state(["disabled"])
+                for child in widget.winfo_children():
+                    freeze(child)
+            freeze(self.project_frame)
+            freeze(self.controls_panel)
+        else:
+            for widget, was_disabled in self._run_control_states:
+                if widget.winfo_exists():
+                    widget.state(["disabled"] if was_disabled else ["!disabled"])
+            self._run_control_states = []
 
     def _restore_sequence_preview(self):
         """Rebuild the image canvas from the loaded frame, dropping a stale overlay."""
@@ -5586,12 +5643,19 @@ class MultiROIGUI:
             pass
 
     def set_roi_mode(self, idx):
+        if self.is_processing or self._completion_pending:
+            return
+        self._show_image_workspace()
+        if self._canvas_shows_field_overlay:
+            self._restore_sequence_preview()
         self.current_roi_index = idx
-        self.status_var.set(f"当前绘制：ROI {idx}。请在图中拖出矩形。")
+        label = "全场 ROI" if self.is_fullfield_mode() else f"ROI {idx}"
+        self.status_var.set(f"当前绘制：{label}。请在参考帧上拖出矩形。")
+        self.update_workflow_action_states()
         self.log(f"切换到绘制 ROI {idx}")
 
     def clear_current_rois(self):
-        if getattr(self, "is_processing", False):
+        if getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False):
             self.status_var.set("正在处理：请等待当前任务完成后再清除 ROI。")
             self.log("正在处理，已忽略清除当前 ROI 请求。")
             return
@@ -5636,7 +5700,11 @@ class MultiROIGUI:
             self.log("已忽略在结果叠加图上的 ROI 绘制；请先恢复预览帧。")
             return
 
-        self.drag_start = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        dh, dw = self.display_img.shape[:2]
+        if not (0 <= x < dw and 0 <= y < dh):
+            return
+        self.drag_start = (x, y)
         if self.temp_rect_id is not None:
             self.canvas.delete(self.temp_rect_id)
             self.temp_rect_id = None
@@ -5729,14 +5797,7 @@ class MultiROIGUI:
             self.canvas.create_rectangle(
                 x * s, y * s, (x + w) * s, (y + h) * s, outline="#38bdf8", width=2
             )
-            self.canvas.create_text(
-                x * s + 5,
-                y * s + 5,
-                text="DIC ROI",
-                anchor="nw",
-                fill="#38bdf8",
-                font=self.canvas_current_roi_font,
-            )
+            self._draw_roi_label(x * s + 4, y * s - 24, "DIC ROI", "#38bdf8")
 
         # 1-D groups are intentionally invisible in full-field mode.
         if not self.is_fullfield_mode():
@@ -5746,14 +5807,7 @@ class MultiROIGUI:
                 c1 = rect_center(r1)
                 c2 = rect_center(r2)
                 self.canvas.create_line(c1[0]*s, c1[1]*s, c2[0]*s, c2[1]*s, fill="lime", width=2)
-                self.canvas.create_text(
-                    c1[0]*s + 4,
-                    c1[1]*s + 4,
-                    text=group["name"],
-                    anchor="nw",
-                    fill="lime",
-                    font=self.canvas_group_font,
-                )
+                self._draw_roi_label(c1[0] * s + 4, c1[1] * s + 4, group["name"], "#4ade80")
 
         def draw(rect, color, label):
             if rect is None:
@@ -5766,18 +5820,19 @@ class MultiROIGUI:
             y2 = (y + h) * s
 
             self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2)
-            self.canvas.create_text(
-                x1 + 5,
-                y1 + 5,
-                text=label,
-                anchor="nw",
-                fill=color,
-                font=self.canvas_current_roi_font,
-            )
+            self._draw_roi_label(x1 + 4, y1 - 24, label, color)
 
         if not self.is_fullfield_mode():
-            draw(self.roi1, "red", "current ROI 1")
-            draw(self.roi2, "cyan", "current ROI 2")
+            draw(self.roi1, "#ff6b6b", "ROI 1")
+            draw(self.roi2, "#38bdf8", "ROI 2")
+
+    def _draw_roi_label(self, x, y, text, color):
+        label = self.canvas.create_text(x, max(0, y), text=text, anchor="nw", fill="#ffffff",
+                                        font=self.canvas_group_font)
+        x0, y0, x1, y1 = self.canvas.bbox(label)
+        background = self.canvas.create_rectangle(x0 - 3, y0 - 2, x1 + 3, y1 + 2,
+                                                   fill="#111827", outline=color, width=1)
+        self.canvas.tag_lower(background, label)
 
     # ---------- 对齐与组管理 ----------
 
@@ -6434,7 +6489,7 @@ class MultiROIGUI:
         self._active_run_token = run_token
         self._completion_pending = False
         self.is_processing = True
-        self.progress["value"] = 0
+        self._update_progress(0)
         if settings.get("analysis_mode") == ANALYSIS_MODE_FULLFIELD:
             self.status_var.set("正在分析：全场 2D DIC。")
             self.log("开始全场 2D DIC：IC-GN/IC-LM 匹配 subset 网格。")
@@ -6457,6 +6512,7 @@ class MultiROIGUI:
             message = str(exc)
             details = traceback.format_exc()
             self.post_to_ui(lambda m=message: messagebox.showerror("处理失败", m))
+            self.post_to_ui(lambda: self.status_var.set("分析失败，详情见“质量与日志”。"))
             self.post_to_ui(lambda e=exc, d=details: self.log_user_error("全场 DIC", e, d))
         finally:
             if run_token is not None:
@@ -6538,7 +6594,7 @@ class MultiROIGUI:
                     value = 100.0 * float(event)
                     frame = None
                     state = ""
-                self.post_to_ui(lambda v=value: self.progress.config(value=v))
+                self.post_to_ui(lambda v=value: self._update_progress(v))
                 if frame is not None:
                     self.post_to_ui(lambda f=frame, s=state: self.status_var.set(f"正在处理全场 DIC：第 {f} 帧 {s}"))
 
@@ -6584,8 +6640,10 @@ class MultiROIGUI:
                     reference_frame_1based=self.dic_last_reference_frame_1based,
                     reference_filename=self.dic_last_reference_filename,
                 )
-                self.progress.config(value=100)
+                self._update_progress(100)
                 self.status_var.set(f"处理完成，全场 DIC：{valid_count}/{total_count} 帧科学有效。")
+                if hasattr(self, "qc_overview_var"):
+                    self.qc_overview_var.set(self.format_fullfield_qc_overview(frames))
                 self.log(f"全场 DIC manifest 已验证：{result['manifest_path']}")
                 self.show_completion_and_open_output_folder(
                     f"全场 2D DIC 完成：{valid_count}/{total_count} 个变形帧有效。结果已写入 {settings['output_dir']}",
@@ -6694,7 +6752,7 @@ class MultiROIGUI:
                 field = run_2d_dic(ref8, img8, roi, **kwargs)
                 if not fullfield_field_has_finite_strain(field):
                     msg = f"全场 DIC {k}/{n_def}：{Path(paths[frame_i]).name} 无有效/有限应变，已跳过导出。"
-                    self.post_to_ui(lambda v=100.0 * k / max(n_def, 1): self.progress.config(value=v))
+                    self.post_to_ui(lambda v=100.0 * k / max(n_def, 1): self._update_progress(v))
                     self.post_to_ui(lambda m=msg: self.status_var.set(m))
                     self.post_to_ui(lambda m=msg: self.log(m))
                     continue
@@ -6729,7 +6787,7 @@ class MultiROIGUI:
                     f"全场 DIC {k}/{n_def}：{Path(paths[frame_i]).name}  "
                     f"有效点={n_valid}  mean u={mean_u:.4f} v={mean_v:.4f}  {settings['dic_solver']}"
                 )
-                self.post_to_ui(lambda v=progress_val: self.progress.config(value=v))
+                self.post_to_ui(lambda v=progress_val: self._update_progress(v))
                 self.post_to_ui(lambda m=msg: self.status_var.set(m))
                 self.post_to_ui(lambda m=msg: self.log(m))
 
@@ -6774,6 +6832,7 @@ class MultiROIGUI:
             message = str(exc)
             details = traceback.format_exc()
             self.post_to_ui(lambda m=message: messagebox.showerror("处理失败", m))
+            self.post_to_ui(lambda: self.status_var.set("分析失败，详情见“质量与日志”。"))
             self.post_to_ui(lambda e=exc, d=details: self.log_user_error("批量处理", e, d))
         finally:
             if run_token is not None:
@@ -6848,7 +6907,7 @@ class MultiROIGUI:
                 else:
                     value = 100.0 * float(event)
                     frame = None
-                self.post_to_ui(lambda v=value: self.progress.config(value=v))
+                self.post_to_ui(lambda v=value: self._update_progress(v))
                 if frame is not None:
                     self.post_to_ui(lambda f=frame: self.status_var.set(f"正在批量追踪：第 {f} 帧"))
 
@@ -6875,7 +6934,7 @@ class MultiROIGUI:
             )
             if settings.get("export_origin_txt") and (output_dir / "core" / "strain_mean_groups.txt").is_file():
                 done_msg += "\n平均应变文件: core\\strain_mean_groups.txt\n平均应变列也已写入: core\\strain_all_groups.txt"
-            self.post_to_ui(lambda: self.progress.config(value=100))
+            self.post_to_ui(lambda: self._update_progress(100))
             self.post_to_ui(lambda: self.status_var.set(f"处理完成，QC 状态：{qc_level}"))
             self.post_to_ui(lambda s=summary: self.update_qc_overview(s))
             self.post_to_ui(lambda m=done_msg + "\n" + path_log: self.log(m))
@@ -7038,7 +7097,7 @@ class MultiROIGUI:
                         overlay_info["score1"],
                         overlay_info["score2"],
                     )
-                    self.post_to_ui(lambda v=progress_val: self.progress.config(value=v))
+                    self.post_to_ui(lambda v=progress_val: self._update_progress(v))
                     self.post_to_ui(lambda m=msg: self.status_var.set(m))
                     self.post_to_ui(lambda m=msg: self.log(m))
 
@@ -7230,7 +7289,7 @@ class MultiROIGUI:
             f"{mean_export_note}"
         )
 
-        self.post_to_ui(lambda: self.progress.config(value=100))
+        self.post_to_ui(lambda: self._update_progress(100))
         self.post_to_ui(lambda: self.status_var.set(f"处理完成，QC 状态：{qc_level}"))
         self.post_to_ui(lambda s=summary: self.update_qc_overview(s))
         self.post_to_ui(lambda: self.log(done_msg + "\n" + path_log))
@@ -7269,6 +7328,7 @@ class MultiROIGUI:
         previous_reference_filename = self.dic_last_reference_filename
         self.clear_viewer(keep_placeholder=False)
         self.viewer_frame.grid()
+        self.viewer_content_frame.grid()
         self.dic_last_field = field
         provenance = dict(field.get("provenance") or {})
         if image is not None:
@@ -7306,6 +7366,7 @@ class MultiROIGUI:
         self.viewer_export_btn.config(state=tk.NORMAL)
         self.viewer_clear_btn.config(state=tk.NORMAL)
         self._update_field_viewer_overlay()
+        self.workspace_notebook.select(self.results_page)
         self.log("已更新全场 DIC 色图预览（可切换 u/v/Exx/Eyy/Exy）。")
 
     def _update_field_viewer_context(self):
@@ -7344,44 +7405,40 @@ class MultiROIGUI:
     def _rebuild_field_viewer_plot(self):
         if self.dic_last_field is None:
             return
-        for child in list(self.viewer_content_frame.children.values()):
-            if child not in (getattr(self, "_viewer_controls", None),):
-                try:
-                    child.destroy()
-                except Exception:
-                    pass
+        self._dispose_viewer_plot()
 
-        fig = Figure(figsize=(4.2, 2.8), dpi=100)
+        fig = Figure(figsize=(7.0, 4.6), dpi=100, constrained_layout=True)
         ax = fig.add_subplot(111)
         component = str(self.dic_field_component.get() or "u")
         if component not in DIC_FIELD_COMPONENTS:
             component = "u"
-        mesh = render_dic_field_on_axes(ax, self.dic_last_field, component)
-        cbar = add_dic_colorbar(fig, ax, mesh, DIC_COMPONENT_LABELS.get(component, component), preset_name="raw_inspection")
-        context = self.field_viewer_context_var.get() if hasattr(self, "field_viewer_context_var") else ""
-        title_suffix = f"\n{context}" if context else ""
-        ax.set_title(f"全场 {DIC_COMPONENT_LABELS.get(component, component)}{title_suffix}")
+        cmap = matplotlib.colormaps["viridis" if component == "zncc" else "RdBu_r"].copy()
+        cmap.set_bad(self.panel_bg)
+        mesh = render_dic_field_on_axes(ax, self.dic_last_field, component, cmap=cmap)
+        values = np.asarray(self.dic_last_field[component], dtype=float)
+        finite = values[np.isfinite(values)]
+        if component == "zncc":
+            mesh.set_clim(0.0, 1.0)
+        elif finite.size:
+            limit = max(float(np.max(np.abs(finite))), 1e-12)
+            mesh.set_clim(-limit, limit)
+        unit = "px" if component in ("u", "v") else "-"
+        cbar = add_dic_colorbar(fig, ax, mesh, f"{component} ({unit})", preset_name="raw_inspection")
+        ax.set_title(f"全场 {DIC_COMPONENT_LABELS.get(component, component)}")
         self._style_viewer_plot_fonts(ax)
-        if getattr(self, "dark_mode", None) and self.dark_mode.get():
-            self._style_viewer_axes_dark(ax)
-            try:
-                cbar.ax.yaxis.label.set_color("#e2e8f0")
-                cbar.ax.tick_params(colors="#cbd5e1")
-            except Exception:
-                pass
-        fig.tight_layout()
-        self.viewer_figure = fig
-        self.viewer_canvas = FigureCanvasTkAgg(fig, master=self.viewer_content_frame)
-        self.viewer_canvas.draw()
-        self.viewer_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._style_viewer_axes_dark(ax)
+        cbar.ax.yaxis.label.set_color(self.text_color)
+        cbar.ax.tick_params(colors=self.muted_color)
+        self._attach_viewer_canvas(fig)
 
     def _add_field_viewer_controls(self):
         if hasattr(self, "_viewer_controls") and self._viewer_controls:
             self._viewer_controls.destroy()
         ctrl = ttk.Frame(self.viewer_frame, style="Card.TFrame")
-        ctrl.grid(row=3, column=0, sticky="ew", pady=(6, 2))
+        ctrl.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ctrl.columnconfigure(1, weight=1)
         self._viewer_controls = ctrl
-        ttk.Label(ctrl, text="场图：", style="Hint.TLabel").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(ctrl, text="场分量", style="Hint.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.dic_component_box = ttk.Combobox(
             ctrl,
             textvariable=self.dic_field_component,
@@ -7389,13 +7446,19 @@ class MultiROIGUI:
             width=8,
             state="readonly",
         )
-        self.dic_component_box.pack(side=tk.LEFT, padx=4)
+        self.dic_component_box.grid(row=0, column=1, sticky="w")
         ttk.Label(
             ctrl,
             textvariable=self.field_viewer_context_var,
             style="Hint.TLabel",
             wraplength=360,
-        ).pack(side=tk.LEFT, padx=(10, 4))
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        valid = np.asarray(self.dic_last_field.get("valid", []), dtype=bool)
+        strain_valid = np.asarray(self.dic_last_field.get("strain_valid", []), dtype=bool)
+        summary = f"相关有效点 {np.count_nonzero(valid)}/{valid.size} · 应变有效点 {np.count_nonzero(strain_valid)}/{strain_valid.size} · 空白区域为 NaN"
+        ttk.Label(ctrl, text=summary, style="Hint.TLabel", wraplength=580).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
         self.dic_component_box.bind("<<ComboboxSelected>>", self._on_field_component_change)
         self.add_tooltip(
             self.dic_component_box,
@@ -7414,6 +7477,7 @@ class MultiROIGUI:
         # Destroy previous canvas if any
         self.clear_viewer(keep_placeholder=False)
         self.viewer_frame.grid()
+        self.viewer_content_frame.grid()
 
         self.results_df = df.copy()
         self.results_groups = groups
@@ -7435,6 +7499,7 @@ class MultiROIGUI:
         self.viewer_placeholder.grid_remove()
         self.viewer_export_btn.config(state=tk.NORMAL)
         self.viewer_clear_btn.config(state=tk.NORMAL)
+        self.workspace_notebook.select(self.results_page)
 
         self.log("已更新应用内结果曲线预览（支持缩放、平移、泊松比切换）。")
 
@@ -7488,121 +7553,117 @@ class MultiROIGUI:
         return "AxialEngineeringStrain" in df.columns or "PoissonRatio" in df.columns
 
     def _rebuild_viewer_plot(self):
-        """根据 self._viewer_mode 重绘嵌入的 matplotlib 图"""
         if getattr(self, "_viewer_kind", "extensometer") == "fullfield":
             self._rebuild_field_viewer_plot()
             return
         if self.results_df is None or self.results_df.empty:
             return
-
-        # 清理旧的 canvas（保留 controls）
-        for child in list(self.viewer_content_frame.children.values()):
-            if child not in (getattr(self, "_viewer_controls", None),):
-                try:
-                    child.destroy()
-                except Exception:
-                    pass
-
+        self._dispose_viewer_plot()
         df = self.results_df
         groups = self.results_groups or []
-
-        # 根据窄右栏优化尺寸（约 4.2 英寸宽，高度适中避免遮挡）
-        fig = Figure(figsize=(4.2, 2.8), dpi=100)
+        fig = Figure(figsize=(7.0, 4.6), dpi=100, constrained_layout=True)
         ax = fig.add_subplot(111)
-
-        # 暗色模式支持：让内嵌曲线图也跟随主题
-        if getattr(self, "dark_mode", None) and self.dark_mode.get():
-            fig.patch.set_facecolor("#334155")
-            ax.set_facecolor("#334155")
-            ax.tick_params(colors="#e2e8f0")
-            for spine in ax.spines.values():
-                spine.set_color("#64748b")
-            ax.yaxis.label.set_color("#e2e8f0")
-            ax.xaxis.label.set_color("#e2e8f0")
-            ax.title.set_color("#e2e8f0")
-            if ax.get_legend():
-                for text in ax.get_legend().get_texts():
-                    text.set_color("#e2e8f0")
-
+        colors = ["#56b4e9", "#e69f00", "#63d2ab", "#df9bd0", "#cbd5e1"] if self.dark_mode.get() else PLOT_COLOR_CYCLE
         if self._viewer_mode == "poisson" and self._has_poisson:
             table = build_poisson_ratio_table(df, groups)
             frame = table["Frame"].astype(float)
             ratio = table["PoissonRatio"].astype(float)
-            valid = ratio.notna() & np.isfinite(ratio)
-
-            ax.plot(frame, ratio, color="#2ca02c", linewidth=1.2, alpha=0.75, label="Poisson Ratio")
-            if valid.any():
-                ax.scatter(frame[valid], ratio[valid], color="#2ca02c", s=16, zorder=3)
-            invalid = ~valid
+            ax.plot(frame, ratio, color=colors[2], linewidth=1.7, label="泊松比")
+            invalid = ~np.isfinite(ratio)
             if invalid.any():
-                finite = ratio[valid]
-                if len(finite) > 0:
-                    y_off = float(finite.min()) - 0.08 * (float(finite.max()) - float(finite.min()) or 0.01)
-                else:
-                    y_off = 0.0
-                ax.scatter(frame[invalid], [y_off] * int(invalid.sum()), color="#d62728", marker="x", s=28, label="NaN")
-
-            ax.set_ylabel("Poisson ratio")
-            ax.set_title("泊松比曲线（应用内预览）")
+                ax.scatter(frame[invalid], np.full(int(invalid.sum()), 0.04), transform=ax.get_xaxis_transform(),
+                           marker="x", color=self.warning_color, s=24, label="无效帧 (NaN)")
+            ax.set_ylabel("泊松比 (无量纲)")
+            ax.set_title("泊松比")
         else:
-            # 默认：工程应变多组曲线
-            has_any = False
-            for g in groups:
-                gname = g["name"]
-                gdf = df[df["group"] == gname]
+            for idx, group in enumerate(groups):
+                gdf = df[df["group"] == group["name"]]
                 if gdf.empty:
                     continue
-                has_any = True
-                ax.plot(
-                    gdf["frame_global_1based"],
-                    gdf["engineering_strain"],
-                    linewidth=1.1,
-                    alpha=0.72,
-                    label=gname,
-                )
-            if not has_any:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "无可显示的有效应变数据",
-                    ha="center",
-                    va="center",
-                    transform=ax.transAxes,
-                    fontsize=self.viewer_label_font_size,
-                )
-            else:
-                ax.set_ylabel("工程应变 (Engineering strain)")
-
-            ax.set_title("各 ROI 组工程应变曲线（应用内预览）")
-
-        ax.set_xlabel("帧 (Frame)")
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=self.viewer_legend_font_size)
-
-        # 再次确保暗色模式下的文字颜色
-        if getattr(self, "dark_mode", None) and self.dark_mode.get():
-            ax.tick_params(colors="#e2e8f0")
-            ax.yaxis.label.set_color("#e2e8f0")
-            ax.xaxis.label.set_color("#e2e8f0")
-            ax.title.set_color("#e2e8f0")
-
+                frame = gdf["frame_global_1based"].astype(float)
+                strain = gdf["engineering_strain"].astype(float)
+                color = colors[idx % len(colors)]
+                # Keep NaN gaps; the x marks use axes coordinates, never a
+                # measured zero, so rejected frames remain visually distinct.
+                ax.plot(frame, strain, color=color, linewidth=1.7, label=group["name"])
+                invalid = ~np.isfinite(strain)
+                if invalid.any():
+                    ax.scatter(frame[invalid], np.full(int(invalid.sum()), 0.04), transform=ax.get_xaxis_transform(),
+                               marker="x", color=color, s=24, label=f"{group['name']} 无效帧")
+            ax.set_ylabel("工程应变 (无量纲)")
+            ax.set_title("工程应变")
+        ax.set_xlabel("帧号")
+        if ax.lines:
+            ax.legend(loc="best", fontsize=self.viewer_legend_font_size)
+        else:
+            ax.text(0.5, 0.5, "无可显示的有效应变数据", ha="center", va="center", transform=ax.transAxes)
         self._style_viewer_plot_fonts(ax)
-        fig.tight_layout()
+        self._style_viewer_axes_dark(ax)
+        self._attach_viewer_canvas(fig)
 
+    def _attach_viewer_canvas(self, fig):
         self.viewer_figure = fig
         self.viewer_canvas = FigureCanvasTkAgg(fig, master=self.viewer_content_frame)
-        self.viewer_canvas.draw()
+        # Establish DPI before grid allocates the widget.  A later Map event
+        # can otherwise enlarge the backing figure without a Configure event
+        # when grid keeps the widget at its existing size (cropping colorbars).
+        self.viewer_canvas._update_device_pixel_ratio()
         self.viewer_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+        self.viewer_toolbar = NavigationToolbar2Tk(self.viewer_canvas, self.viewer_content_frame, pack_toolbar=False)
+        self.viewer_toolbar.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self._style_viewer_toolbar()
+        self.viewer_canvas.draw()
 
-        try:
-            from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
-            self.viewer_toolbar = NavigationToolbar2Tk(self.viewer_canvas, self.viewer_content_frame)
-            self.viewer_toolbar.grid(row=1, column=0, sticky="ew")
-        except Exception:
-            self.viewer_toolbar = None
+    def _dispose_viewer_plot(self):
+        """Release Tk images and variables on the UI thread, before new work."""
+        canvas = self.viewer_canvas
+        toolbar = self.viewer_toolbar
+        figure = self.viewer_figure
+        if canvas is not None:
+            for attr in ("_idle_draw_id", "_event_loop_id"):
+                job = getattr(canvas, attr, None)
+                if job is not None:
+                    self.root.after_cancel(job)
+                    setattr(canvas, attr, None)
+        if toolbar is not None:
+            toolbar.destroy()
+            toolbar._buttons.clear()
+            # The cached message label points back to its toolbar through
+            # master; break that cycle and release native resources now.
+            toolbar._message_label = None
+            toolbar.message = None
+            toolbar._label_font = None
+            toolbar.canvas = None
+        if canvas is not None:
+            canvas.get_tk_widget().destroy()
+            canvas.toolbar = None
+        if figure is not None:
+            figure.set_canvas(None)
+        self.viewer_toolbar = None
+        self.viewer_canvas = None
+        self.viewer_figure = None
 
-        # 应用高质量暗色样式（如果开启）
-        self._style_viewer_axes_dark(ax)
+    def _style_viewer_toolbar(self):
+        def recolor(widget):
+            if isinstance(widget, (tk.Frame, tk.Label, tk.Button, tk.Checkbutton)):
+                widget.configure(background=self.card_bg)
+                if isinstance(widget, (tk.Label, tk.Button, tk.Checkbutton)):
+                    widget.configure(foreground=self.text_color)
+                if isinstance(widget, (tk.Button, tk.Checkbutton)):
+                    widget.configure(activebackground=self.hover_bg, activeforeground=self.text_color)
+                if isinstance(widget, tk.Checkbutton):
+                    widget.configure(selectcolor=self.panel_bg)
+                if isinstance(widget, (tk.Button, tk.Checkbutton)) and getattr(widget, "_image_file", None):
+                    self.viewer_toolbar._set_image_for_button(widget)
+            for child in widget.winfo_children():
+                recolor(child)
+        recolor(self.viewer_toolbar)
+
+    def _wrap_result_labels(self, frame, width):
+        for child in frame.winfo_children():
+            if isinstance(child, ttk.Label) and child.cget("wraplength"):
+                child.configure(wraplength=max(200, width - 20))
 
     def _style_viewer_plot_fonts(self, ax):
         ax.tick_params(labelsize=self.viewer_tick_font_size)
@@ -7617,38 +7678,24 @@ class MultiROIGUI:
                 text.set_fontsize(self.viewer_legend_font_size)
 
     def _style_viewer_axes_dark(self, ax):
-        """为内嵌结果预览图提供高质量的暗色主题支持。"""
-        if not (hasattr(self, "dark_mode") and self.dark_mode.get()):
-            return
-
-        try:
-            fig = ax.figure
-            fig.patch.set_facecolor("#1e2937")
-            ax.set_facecolor("#1e2937")
-
-            # 坐标轴和刻度
-            ax.tick_params(colors="#cbd5e1", labelsize=self.viewer_tick_font_size)
-            for spine in ax.spines.values():
-                spine.set_color("#64748b")
-                spine.set_linewidth(0.8)
-
-            # 标签和标题
-            ax.xaxis.label.set_color("#e2e8f0")
-            ax.yaxis.label.set_color("#e2e8f0")
-            ax.title.set_color("#f1f5f9")
-
-            # 网格
-            ax.grid(True, alpha=0.25, color="#64748b")
-
-            # 图例
-            legend = ax.get_legend()
-            if legend:
-                legend.get_frame().set_facecolor("#334155")
-                legend.get_frame().set_edgecolor("#64748b")
-                for text in legend.get_texts():
-                    text.set_color("#e2e8f0")
-        except Exception:
-            pass  # 容错，不影响主流程
+        """Use the same surface and typography tokens in either theme."""
+        ax.figure.patch.set_facecolor(self.card_bg)
+        ax.set_facecolor(self.card_bg)
+        ax.tick_params(colors=self.muted_color, labelsize=self.viewer_tick_font_size)
+        for spine in ax.spines.values():
+            spine.set_color(self.border_color)
+            spine.set_linewidth(0.8)
+        ax.xaxis.label.set_color(self.text_color)
+        ax.yaxis.label.set_color(self.text_color)
+        ax.title.set_color(self.text_color)
+        ax.grid(True, alpha=0.3, color=self.border_color, linewidth=0.7)
+        ax.set_axisbelow(True)
+        legend = ax.get_legend()
+        if legend:
+            legend.get_frame().set_facecolor(self.card_bg)
+            legend.get_frame().set_edgecolor(self.border_color)
+            for text in legend.get_texts():
+                text.set_color(self.text_color)
 
     def _add_viewer_controls(self):
         """在 viewer 内部添加模式切换控件（工程应变 / 泊松比）"""
@@ -7656,10 +7703,11 @@ class MultiROIGUI:
             self._viewer_controls.destroy()
 
         ctrl = ttk.Frame(self.viewer_frame, style="Card.TFrame")
-        ctrl.grid(row=3, column=0, sticky="ew", pady=(6, 2))
+        ctrl.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ctrl.columnconfigure(1, weight=1)
         self._viewer_controls = ctrl
 
-        ttk.Label(ctrl, text="显示模式：", style="Hint.TLabel").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Label(ctrl, text="显示", style="Hint.TLabel").grid(row=0, column=0, padx=(0, 8))
 
         self.viewer_mode_var = tk.StringVar(value=self._viewer_mode)
 
@@ -7672,17 +7720,19 @@ class MultiROIGUI:
         ttk.Radiobutton(
             ctrl, text="工程应变", variable=self.viewer_mode_var, value="strain",
             command=switch_mode
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=1, sticky="w", padx=4)
 
         poisson_rb = ttk.Radiobutton(
             ctrl, text="泊松比", variable=self.viewer_mode_var, value="poisson",
             command=switch_mode,
             state=tk.NORMAL if self._has_poisson else tk.DISABLED
         )
-        poisson_rb.pack(side=tk.LEFT, padx=4)
+        poisson_rb.grid(row=0, column=2, sticky="w", padx=4)
 
         if not self._has_poisson:
-            ttk.Label(ctrl, text="（需同时定义 axial + transverse 角色）", style="Hint.TLabel").pack(side=tk.LEFT, padx=6)
+            ttk.Label(ctrl, text="泊松比需要同时定义轴向和横向 ROI 组。", style="Hint.TLabel", wraplength=560).grid(
+                row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
 
     def export_viewer_figure(self):
         if self.viewer_figure is None:
@@ -7705,22 +7755,7 @@ class MultiROIGUI:
 
     def clear_viewer(self, keep_placeholder=True):
         """Remove embedded matplotlib widgets and reset state."""
-        # 清理 matplotlib 相关
-        if self.viewer_toolbar is not None:
-            try:
-                self.viewer_toolbar.destroy()
-            except Exception:
-                pass
-            self.viewer_toolbar = None
-
-        if self.viewer_canvas is not None:
-            try:
-                self.viewer_canvas.get_tk_widget().destroy()
-            except Exception:
-                pass
-            self.viewer_canvas = None
-
-        self.viewer_figure = None
+        self._dispose_viewer_plot()
 
         # 清理新增的模式切换控件
         if hasattr(self, "_viewer_controls") and self._viewer_controls:
@@ -7749,6 +7784,7 @@ class MultiROIGUI:
         if keep_placeholder:
             try:
                 self.viewer_frame.grid()
+                self.viewer_content_frame.grid_remove()
                 self.viewer_placeholder.grid()
             except Exception:
                 pass

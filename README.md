@@ -136,6 +136,25 @@ PoissonRatio       = - ε_transverse / ε_axial   (engineering)
 
 Failed tracking frames stay `NaN`. Poisson uses role-averaged groups; tiny axial magnitude also gives `NaN`.
 
+## Desktop workbench
+
+The native desktop UI separates **Image & ROI**, **Analysis results**, and
+**Quality & logs**. Measurement settings stay beside the active workspace;
+the readiness indicator, analysis action, progress, and completion status
+remain visible while the settings scroll. Advanced tracking and export
+options remain available without crowding the primary workflow.
+
+The workbench supports light/dark themes, DPI scaling, centered image
+previews, scrollable zoom, and resizable plots with a navigation toolbar.
+Field maps identify the analyzed and reference frames, show separate
+correlation-valid and strain-valid counts, and retain blank `NaN` regions.
+
+See the [desktop workflow guide](docs/UI_WORKBENCH.md) for interactions,
+shortcuts, screenshots, and the UI validation scope. The screenshots use
+synthetic speckle images and illustrate software behavior.
+
+![Desktop workbench with a synthetic image sequence and virtual-extensometer ROIs](assets/ui/workbench-light.png)
+
 ## Windows quick start
 
 1. Open the [Releases page](https://github.com/D-sudoasd/StrainTrace/releases). The latest published portable ZIP is currently **v0.1.3** (1D virtual extensometer). This `main` source tree is unreleased **v0.2.0-dev** with **v0.1.4** citation metadata; it is not a GitHub Release asset. An unverified local ZIP is not a release asset.
