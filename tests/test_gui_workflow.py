@@ -360,6 +360,40 @@ def test_windows_resize_independently_and_keep_roi_coordinates(workbench, tmp_pa
     assert app.roi2 == (120, 60, 31, 31)
 
 
+@pytest.mark.parametrize("workbench", [1.333333, 1.666667, 2.5], indirect=True)
+def test_short_console_returns_space_to_settings_without_shrinking_text(workbench):
+    app = workbench
+    root = app.root
+    scale = max(1., app.ui_scaling / (120 / 72))
+    root.maxsize(max(1600, root.minsize()[0]), round(1100 * scale))
+    root.geometry(f"1366x{round(920 * scale)}+0+0")
+    root.update()
+    assert not app._compact_control_layout
+    normal_padding = tuple(map(int, app.main_frame.cget("padding")))
+    normal_font = app.style.lookup("TButton", "font")
+    visual_geometry = app.visual_window.geometry()
+    root.geometry(f"1366x{round(740 * scale)}+0+0")
+    root.update()
+    assert app._compact_control_layout
+    compact_height = app.controls_canvas.winfo_height()
+    assert tuple(map(int, app.main_frame.cget("padding")))[1] < normal_padding[1]
+    assert app.style.lookup("TButton", "font") == normal_font
+    assert app.visual_window.geometry() == visual_geometry
+    # Compare the same client size with ordinary spacing; text and controls
+    # retain their dimensions while the viewport gains usable height.
+    app.main_frame.configure(padding=(16, 12, 16, 12))
+    app.app_header.grid_configure(pady=(0, 12))
+    app.project_frame.configure(padding=(12, 8))
+    app.control_workspace.grid_configure(pady=(12, 0))
+    app.workflow_guide_frame.configure(padding=(12, 10))
+    app.run_frame.configure(padding=(12, 6))
+    app.run_frame.grid_configure(pady=(10, 0))
+    root.update()
+    assert compact_height >= app.controls_canvas.winfo_height() + 24
+    assert app.start_button.winfo_rooty() >= root.winfo_rooty()
+    assert app.start_button.winfo_rooty() + app.start_button.winfo_height() <= root.winfo_rooty() + root.winfo_height()
+
+
 def test_visual_window_close_reopens_without_losing_roi_or_result(workbench, tmp_path):
     app = workbench
     load_sequence(app, tmp_path)

@@ -3199,6 +3199,9 @@ class MultiROIGUI:
         self.build_ui()
         self.bind_common_shortcuts()
         self.configure_final_window_limits()
+        self._compact_control_layout = None
+        self.root.bind("<Configure>", self._on_control_window_configure, add="+")
+        self._on_control_window_configure()
         self.start_ui_queue_polling()
 
     # ---------- UI ----------
@@ -3257,6 +3260,24 @@ class MultiROIGUI:
         self.root.minsize(round(620 * control_scale), round(680 * scale))
         self.visual_window.minsize(round(740 * scale), round(580 * scale))
         self.arrange_windows()
+
+    def _on_control_window_configure(self, event=None):
+        """Return space to scrollable settings in short or high-DPI windows."""
+        if event is not None and event.widget is not self.root:
+            return
+        height = event.height if event is not None else self.root.winfo_height()
+        scale = max(1.0, self.ui_scaling / (120 / 72))
+        compact = height < round(800 * scale)
+        if compact == self._compact_control_layout:
+            return
+        self._compact_control_layout = compact
+        self.main_frame.configure(padding=(16, 8 if compact else 12, 16, 8 if compact else 12))
+        self.app_header.grid_configure(pady=(0, 8 if compact else 12))
+        self.project_frame.configure(padding=(12, 6 if compact else 8))
+        self.control_workspace.grid_configure(pady=(6 if compact else 12, 0))
+        self.workflow_guide_frame.configure(padding=(12, 6 if compact else 10))
+        self.run_frame.configure(padding=(12, 4 if compact else 6))
+        self.run_frame.grid_configure(pady=(6 if compact else 10, 0))
 
     def add_tooltip(self, widget, text, choices=None):
         provider = lambda event: self._control_help(widget, text, event)
@@ -3999,6 +4020,7 @@ class MultiROIGUI:
 
     def _build_app_header(self, parent):
         header = ttk.Frame(parent, style="App.TFrame")
+        self.app_header = header
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="StrainTrace", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
@@ -4080,6 +4102,7 @@ class MultiROIGUI:
 
     def _build_workspace(self, parent):
         workspace = ttk.Frame(parent, style="App.TFrame")
+        self.control_workspace = workspace
         workspace.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(0, weight=1)
