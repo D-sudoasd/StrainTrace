@@ -369,15 +369,17 @@ def test_short_console_returns_space_to_settings_without_shrinking_text(workbenc
     root.geometry(f"1366x{round(920 * scale)}+0+0")
     root.update()
     assert not app._compact_control_layout
-    normal_padding = tuple(map(int, app.main_frame.cget("padding")))
-    normal_font = app.style.lookup("TButton", "font")
+    # Python 3.11 can return Tcl_Obj values; Python 3.13 also supports direct
+    # integer conversion. Compare their string representations consistently.
+    normal_padding = tuple(int(str(value)) for value in app.main_frame.cget("padding"))
+    normal_font = str(app.style.lookup("TButton", "font"))
     visual_geometry = app.visual_window.geometry()
     root.geometry(f"1366x{round(740 * scale)}+0+0")
     root.update()
     assert app._compact_control_layout
     compact_height = app.controls_canvas.winfo_height()
-    assert tuple(map(int, app.main_frame.cget("padding")))[1] < normal_padding[1]
-    assert app.style.lookup("TButton", "font") == normal_font
+    assert tuple(int(str(value)) for value in app.main_frame.cget("padding"))[1] < normal_padding[1]
+    assert str(app.style.lookup("TButton", "font")) == normal_font
     assert app.visual_window.geometry() == visual_geometry
     # Compare the same client size with ordinary spacing; text and controls
     # retain their dimensions while the viewport gains usable height.
