@@ -1,14 +1,26 @@
-<p align="center">
-  <img src="assets/readme/hero.png" width="100%" alt="StrainTrace: Image-based displacement and strain. AI-generated conceptual illustration.">
-</p>
-
 # StrainTrace
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465)
+**从图像序列得到两点引伸计应变，或固定参考帧下的平面二维 DIC 位移与应变场。**
 
-**虚拟引伸计与全场应变分析工具**
+A dual-mode desktop and headless workstation for image-based strain analysis. Choose a two-ROI gauge for strain histories, or a rectangular field ROI and specimen mask for local-subset in-plane digital image correlation.
 
-**A lightweight dual-mode strain workstation for image sequences.**
+[Windows / 源码启动](#windows-quick-start) · [桌面工作流](docs/UI_WORKBENCH.md) · [二维验证与参数](docs/2D_DIC_VALIDATION.md) · [输出约定](#full-field-output-contract) · [引用](#cite)
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465) [![MIT](https://img.shields.io/badge/License-MIT-455A64)](LICENSE.txt)
+
+![真实双窗口工作台：图像/结果窗口显示公开板孔图像的应变场；数据和验证范围见二维DIC指南](assets/ui/two-window-results.png)
+
+| 你需要的结果 | 分析方式 | 主要输出 |
+| --- | --- | --- |
+| 选定标距的应变历程 | 两个 ROI 的虚拟引伸计 | `core/`、`qc/` 与可选导出 |
+| 平面位移和应变分布 | 固定参考帧、POI 网格、IC-GN / IC-LM | `dic/` 表格、数组、场图与参数 |
+
+相关失败点保持 `NaN`，无支持区域保持空白。二维场是 POI 网格上的平面估计；数值回归与公开图像检查的范围见验证指南。
+
+**版本选择：** 最新发布便携版为 `v0.1.3`（一维引伸计）。当前 `main` 含未发布的二维 DIC 开发实现；使用二维功能请按源码启动步骤运行。现有可执行文件名和兼容命令保留 `ezDIC`。
+
+<details>
+<summary>项目名称、开发状态与详细能力记录</summary>
 
 This repository uses **StrainTrace** as its project name. Existing Windows
 executables, CLI commands, and Zenodo citation/DOI metadata retain the name
@@ -70,6 +82,8 @@ Developed by **Dr. Delun Gong** · [DOI 10.5281/zenodo.20222465](https://doi.org
 Virtual extensometer:  Load images → draw ROI 1 + ROI 2 → track → core/ + qc/
 Full-field 2D DIC:    Load images → draw field ROI → IC-GN/IC-LM → dic/
 ```
+
+</details>
 
 ## Full-field output contract
 
