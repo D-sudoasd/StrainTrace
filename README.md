@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/readme/hero.png" width="100%" alt="StrainTrace: Image-based displacement and strain. AI-generated conceptual illustration.">
+</p>
+
 # StrainTrace
 
 **从图像序列得到两点引伸计应变，或固定参考帧下的平面二维 DIC 位移与应变场。**
