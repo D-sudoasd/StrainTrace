@@ -89,6 +89,18 @@ Full-field 2D DIC:    Load images → draw field ROI → IC-GN/IC-LM → dic/
 
 </details>
 
+## 原理示意 / Principle schematic
+
+<p align="center">
+  <img src="assets/readme/principle.png" width="100%" alt="Two-ROI gauge and fixed-reference local-subset 2D DIC — conceptual schematic / 概念示意图">
+</p>
+
+*两个ROI的间距变化构成虚拟引伸计；二维DIC在固定参考帧的POI网格上估计平面位移，应变无支持区域保持空白。概念示意，非实验应变场。*
+
+*Two ROI separations define a virtual gauge; fixed-reference local-subset DIC estimates in-plane displacement on a POI grid, leaving unsupported strain regions blank. Conceptual schematic, not an experimental strain field.*
+
+[查看完整示意图 / View full-size schematic](assets/readme/principle.png)
+
 ## Full-field output contract
 
 <p align="center"><img src="paper/figures/workflow.png" width="100%" alt="Virtual-extensometer and fixed-reference 2D DIC workflows and output records."></p>
