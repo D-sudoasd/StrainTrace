@@ -21,7 +21,7 @@ def test_facade_delegates_to_migrated_case_and_report_contract() -> None:
     first = facade.locked_cases_hash()
     assert first == facade.locked_cases_hash()
     document = facade.locked_cases_document()
-    assert document["version"] == "ezdic-benchmark-cases-v3"
+    assert document["version"] == "ezdic-benchmark-cases-v4"
     assert [case["case_id"] for case in document["cases"]] == [
         "small_translation",
         "large_translation",
@@ -30,30 +30,30 @@ def test_facade_delegates_to_migrated_case_and_report_contract() -> None:
     ]
     assert document["cases"][0]["translation"] == [2.3, -1.2]
     assert document["cases"][1]["translation"] == [28.0, -18.0]
-    assert document["thresholds"]["small_translation"]["rmse_px_max"] == 0.05
+    assert document["thresholds"]["small_translation"]["rmse_px_max"] == 0.001
     assert document["quality_contract"]["corruption_panel"]["version"] == "image_corruption_panel_v1"
 
 
 def test_natural_panel_report_has_strict_baseline_gates_and_mixed_labels(tmp_path: Path) -> None:
     report = facade.run_benchmark(tmp_path)
-    assert report["report_version"] == "ezdic-benchmark-report-v5"
+    assert report["report_version"] == "ezdic-benchmark-report-v6"
     assert report["overall_pass"] is True
     assert report["exit_code"] == 0
     quality = report["quality_error"]
     assert quality["point_count"] > 0
     assert quality["good_label_count"] > 0
-    assert quality["bad_label_count"] >= 2
+    assert quality["ranking_bad_label_count"] >= 2
     assert quality["roc_auc"] >= 0.90
     assert quality["threshold_status"] == "NOT_CALIBRATED"
     assert quality["quality_threshold_evaluated"] is False
     assert quality["quality_threshold_pass"] is None
-    assert quality["false_accept_count"] == 2
-    assert quality["bad_label_count"] == 2
-    assert quality["false_accept_rate"] == pytest.approx(1.0)
+    assert quality["false_accept_count"] == 0
+    assert quality["bad_label_count"] == 0
+    assert quality["false_accept_rate"] is None
     assert quality["false_reject_count"] == 0
     assert quality["false_reject_rate"] == pytest.approx(0.0)
-    assert quality["ranking_bad_label_count"] == 4
-    assert quality["ranking_rejected_bad_count"] == 2
+    assert quality["ranking_bad_label_count"] == 16
+    assert quality["ranking_rejected_bad_count"] == 16
     assert quality["corruption_row_count"] == 4
     cases = {case["case_id"]: case for case in report["cases"]}
     assert cases["near_1d_periodic"]["status"] == "REJECTED"

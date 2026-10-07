@@ -259,3 +259,37 @@ def test_code_tamper_isolated_to_code_fingerprint_mismatch(tmp_path: Path) -> No
         assert payload["code_files"]
     finally:
         schema_path.write_bytes(original)
+
+
+def test_masked_fullfield_exports_and_mask_content_verification(tmp_path: Path) -> None:
+    paths = _sequence(tmp_path, count=2, translation_per_frame=(0., 0.))
+    config = _base_config(paths, tmp_path / "masked-output", "fullfield")
+    mask_path = tmp_path / "specimen.png"
+    mask = np.full((128, 128), 255, np.uint8)
+    mask[50:70, 50:70] = 0
+    _write_png(mask_path, mask)
+    config["mask"] = {"mode": "file", "path": str(mask_path)}
+    config["display"] = {"background": "deformed", "percent": True, "cmap": "viridis"}
+    config_path = tmp_path / "masked.json"
+    _write_json(config_path, config)
+    result = _run_cli("run", "--config", str(config_path))
+    assert result.returncode == ezdic_cli.EXIT_SUCCESS, result.stdout + result.stderr
+    summary = json.loads(result.stdout)
+    output = tmp_path / "masked-output" / "dic"
+    assert (output / "specimen_mask.png").is_file()
+    for component in core.DIC_FIELD_COMPONENTS:
+        assert (output / f"frame_0002_{core.DIC_COMPONENT_FILE_SUFFIXES[component]}.png").is_file()
+    with np.load(output / "frame_0002.npz", allow_pickle=False) as arrays:
+        assert not arrays['eligible'].all()
+        assert np.isnan(arrays['u'][~arrays['eligible']]).all()
+        metadata = json.loads(arrays['metadata_json'].item())
+        assert metadata['mask']['mode'] == 'file'
+        assert metadata['display']['percent'] is True
+    manifest = summary['manifest_path']
+    assert core.verify_run_manifest(manifest)['ok']
+    mask[0, 0] = 0
+    _write_png(mask_path, mask)
+    changed = core.verify_run_manifest(manifest)
+    assert not changed['ok']
+    assert any(error.get('section') == 'inputs' and error.get('field') == 'sha256'
+               and Path(error['path']) == mask_path for error in changed['errors'])

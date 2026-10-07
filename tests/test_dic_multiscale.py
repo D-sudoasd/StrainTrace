@@ -68,6 +68,7 @@ def test_one_level_does_not_fake_pass_large_translation():
         step=20,
         search_radius=10,
         pyramid_levels=1,
+        initialization="local",
     )
     valid = np.asarray(field["valid"], dtype=bool)
     error = np.hypot(

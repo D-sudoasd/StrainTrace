@@ -11,6 +11,14 @@ The schema is in `schemas/run_config_v1.json` in source and `straintrace_data` i
 wheel. The README contains complete extensometer and full-field configuration examples.
 Unknown fields and non-finite configuration numbers are rejected.
 
+Full-field configurations additionally accept `mask` (none/auto/file plus
+reference-image exclusion rectangles) and `display` (contour/points, explicit
+color range, percent units, colormap and reference/deformed background).
+Solver options include `initialization` (auto/local), `strain_degree` (1/2),
+`robust_strain`, and `outlier_threshold_px` (zero disables spatial rejection).
+The legacy `strain_window_px` counts POIs, not image pixels. See
+[the 2D workflow](2D_DIC_VALIDATION.md) for scientific interpretation.
+
 Python interfaces: `ezdic_cli.normalize_config(mapping, base_dir=path)` returns the
 canonical configuration; `ezdic_cli.main(argv)` returns a process exit status;
 `ezdic_benchmark.run_benchmark(output_dir=path)` returns a machine-readable report.

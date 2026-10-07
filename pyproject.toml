@@ -11,7 +11,7 @@ requires-python = ">=3.11,<3.14"
 license = "MIT"
 license-files = ["LICENSE.txt"]
 authors = [{name = "Delun Gong", email = "dlgong17s@imr.ac.cn"}]
-dependencies = ["opencv-python>=4.8", "numpy>=1.26", "pandas>=2", "matplotlib>=3.8", "pillow>=10"]
+dependencies = ["opencv-python>=4.8", "numpy>=1.26", "pandas>=2", "matplotlib>=3.8", "pillow>=10", "scipy>=1.11"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "build>=1.2", "cffconvert>=2", "PyYAML>=6"]

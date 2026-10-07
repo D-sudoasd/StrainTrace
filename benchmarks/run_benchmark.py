@@ -36,7 +36,7 @@ from .synthetic_cases import (
 )
 
 
-REPORT_VERSION = "ezdic-benchmark-report-v5"
+REPORT_VERSION = "ezdic-benchmark-report-v6"
 EXIT_SUCCESS = 0
 EXIT_RUNTIME_ERROR = 3
 EXIT_GATE_ERROR = 4
@@ -1086,9 +1086,9 @@ def run_benchmark(
         "report_version": REPORT_VERSION,
         "cases_version": CASE_DOCUMENT_VERSION,
         "migration": {
-            "previous_report_version": "ezdic-benchmark-report-v4",
-            "previous_cases_version": "ezdic-benchmark-cases-v2",
-            "reason": "quality threshold was reclassified as NOT_CALIBRATED and rejected outcomes entered the ranking population",
+            "previous_report_version": "ezdic-benchmark-report-v5",
+            "previous_cases_version": "ezdic-benchmark-cases-v3",
+            "reason": "independent continuous image oracle; stricter numerical accuracy gates; per-run CSV integrity rather than a platform-dependent CSV byte baseline",
         },
         "locked_cases_hash": locked_case_hash(),
         "app": {"name": "ezDIC", "benchmark": "quality_to_known_error", "version": "v0.2.0-dev"},

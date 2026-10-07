@@ -97,14 +97,14 @@ def test_build_script_is_fail_closed_and_contains_real_release_gates():
         "Test-BundleInventory",
         "py_compile",
         "pytest",
-        "locked v5 synthetic benchmark",
+        "locked v6 synthetic benchmark",
         "PyInstaller",
         "--clean",
         "--noconfirm",
         "EZDIC_FROZEN_SMOKE_MARKER",
         "--smoke-test",
         "ezDIC-cli.exe",
-        "frozen CLI locked v5 benchmark",
+        "frozen CLI locked v6 benchmark",
         "Compress-Archive",
         "Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru",
         "Assert-NoReparsePath",
@@ -118,9 +118,9 @@ def test_build_script_is_fail_closed_and_contains_real_release_gates():
         "_internal\\sources\\dic_virtual_extensometer_gui_v7_multi_roi_range.py",
         "Get-Sha256",
         "Assert-JsonProperties",
-        "Assert-BenchmarkV5Report",
-        "ezdic-benchmark-report-v5",
-        "ezdic-benchmark-cases-v3",
+        "Assert-BenchmarkV6Report",
+        "ezdic-benchmark-report-v6",
+        "ezdic-benchmark-cases-v4",
         "quality_score_v1",
         "quality_auc",
         "benchmark_report_csv_sha256",
@@ -136,19 +136,18 @@ def test_build_script_is_fail_closed_and_contains_real_release_gates():
         "AMBIGUOUS_TEXTURE",
         "solver_calls",
         "successful_export_artifacts",
-        "3dbe0dae3fdf8f30ec32c9fd8f036f0a53b4a705380626e7860773f62f31cb20",
-        "39d4e52f35cd3161a1e877b6edcd5187568bf275c6c8d552422605b73b4c0bfb",
-        "0.0199390744704955",
-        "0.0292620272322426",
-        "0.0325828355049195",
-        "0.0115297238459114",
-        "0.0239808947702811",
-        "0.0269901966835571",
-        "0.00363440394904515",
-        "0.00651264913461063",
-        "0.0103736747535708",
-        "0.000273878639940106",
-        "0.000270907694747982",
+        "0fb244586def285fe0ca6b816eac588ddae8d4a0de0ce1a313b183bf369db138",
+        "0.000242870585615446",
+        "0.000471525609103834",
+        "0.000541210285865718",
+        "0.000142756487216106",
+        "0.000199604933633678",
+        "0.000649429296399418",
+        "0.000144908819464799",
+        "0.000356810906530228",
+        "0.000639258340868429",
+        "0.000012809688012261",
+        "0.000012733433353507",
     ):
         assert token in text, token
     # A recursive cleanup must not target a user-provided path or an unresolved
@@ -393,8 +392,8 @@ def test_requirements_and_ci_pin_python_delivery_contract():
     assert "py_compile" in ci
     assert "ezdic_cli.py benchmark" in ci
     assert "benchmarks/cases_v1.json" in ci
-    assert "ezdic-benchmark-report-v5" in ci
-    assert "ezdic-benchmark-cases-v3" in ci
+    assert "ezdic-benchmark-report-v6" in ci
+    assert "ezdic-benchmark-cases-v4" in ci
     assert "benchmark_report_csv_sha256" in ci
     assert "quality_false_accept_count" in ci
     assert "synthetic_cases_source_sha256" in ci
@@ -409,8 +408,8 @@ def test_requirements_and_ci_pin_python_delivery_contract():
     assert "point_count" in ci
     assert "AMBIGUOUS_TEXTURE" in ci
     assert "solver_calls" in ci
-    assert "3dbe0dae3fdf8f30ec32c9fd8f036f0a53b4a705380626e7860773f62f31cb20" in ci
-    assert "39d4e52f35cd3161a1e877b6edcd5187568bf275c6c8d552422605b73b4c0bfb" in ci
+    assert "0fb244586def285fe0ca6b816eac588ddae8d4a0de0ce1a313b183bf369db138" in ci
+    assert "Benchmark CSV hash mismatch" in ci
     assert "_internal\\sources\\dic_virtual_extensometer_gui_v7_multi_roi_range.py" in ci
     assert "Get-FileHash" in ci
     assert "PyInstaller" in ci

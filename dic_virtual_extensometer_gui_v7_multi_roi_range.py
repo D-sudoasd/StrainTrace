@@ -173,7 +173,8 @@ PLOT_EXPORT_PRESETS = {
 }
 
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font as tkfont
@@ -322,6 +323,17 @@ DIC_COMPONENT_LABELS = {
     "eyy": "eyy (infinitesimal)",
     "exy": "exy (infinitesimal)",
 }
+DIC_COMPONENT_HELP = {
+    "u": "左右移动了多少个像素；正值向右，负值向左。选择后立即更新图。",
+    "v": "上下移动了多少个像素；正值向下，负值向上。选择后立即更新图。",
+    "zncc": "两个图片块的纹理相似程度，越接近 1 越相似；用于核对追踪质量。选择后立即更新图。",
+    "Exx": "左右方向相对参考图片的伸缩，包含较大变形时的修正；正值伸长、负值缩短。选择后立即更新图。",
+    "Eyy": "上下方向相对参考图片的伸缩，包含较大变形时的修正；正值伸长、负值缩短。选择后立即更新图。",
+    "Exy": "剪切变形，即原本垂直的两个方向变斜的程度，包含较大变形时的修正；工程剪切值是此值的两倍。选择后立即更新图。",
+    "exx": "按小变形近似计算的左右伸缩；与大写 Exx 使用不同计算方式。选择后立即更新图。",
+    "eyy": "按小变形近似计算的上下伸缩；与大写 Eyy 使用不同计算方式。选择后立即更新图。",
+    "exy": "按小变形近似计算的剪切变化，即两个垂直方向变斜的程度；工程剪切值是此值的两倍。选择后立即更新图。",
+}
 
 
 def format_tracking_status_line(frame_i, n, group_name, accept_mode, strain_text, score1, score2):
@@ -363,76 +375,285 @@ def write_image_checked(path, image):
 class ToolTip:
     def __init__(self, widget, text, wraplength=360, delay_ms=450):
         self.widget = widget
+        self.owner = widget.winfo_toplevel()
         self.text = text
         self.wraplength = wraplength
         self.delay_ms = delay_ms
         self.after_id = None
         self.tip_window = None
+        self.event = None
+        self.pending_text = None
+        self.shown_text = None
 
-        self.widget._tooltip_text = text
+        self.widget._tooltip_text = text if isinstance(text, str) else ""
+        self.widget._tooltip = self
         self.widget.bind("<Enter>", self.schedule, add="+")
+        self.widget.bind("<Motion>", self.schedule, add="+")
         self.widget.bind("<Leave>", self.hide, add="+")
         self.widget.bind("<ButtonPress>", self.hide, add="+")
+        self.widget.bind("<FocusOut>", self.hide, add="+")
+        self.widget.bind("<Unmap>", self.hide, add="+")
+        self.widget.bind("<Destroy>", self.dispose, add="+")
+        self.widget.bind("<F1>", self.show_help, add="+")
+        self.widget.bind("<Escape>", self.dismiss, add="+")
+
+    def resolve_text(self, event=None):
+        text = self.text(event) if callable(self.text) else self.text
+        self.widget._tooltip_text = text
+        return text
 
     def schedule(self, event=None):
-        self.unschedule()
-        self.after_id = self.widget.after(self.delay_ms, self.show)
+        text = self.resolve_text(event)
+        self.event = event
+        if not text:
+            self.hide()
+            return
+        if text == self.shown_text or (self.after_id is not None and text == self.pending_text):
+            return
+        self.hide()
+        self.event = event
+        self.pending_text = text
+        self.after_id = self.owner.after(self.delay_ms, self.show)
+
+    def show_help(self, event=None):
+        self.hide()
+        self.event = event
+        self.show()
+        return "break"
+
+    def dismiss(self, event=None):
+        visible = self.tip_window is not None
+        self.hide()
+        if visible:
+            return "break"
 
     def unschedule(self):
         if self.after_id is not None:
             try:
-                self.widget.after_cancel(self.after_id)
+                self.owner.after_cancel(self.after_id)
             except tk.TclError:
                 pass
             self.after_id = None
 
+    def screen_bounds(self, x, y):
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class MonitorInfo(ctypes.Structure):
+                _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                            ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+
+            user32 = ctypes.windll.user32
+            user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+            user32.MonitorFromPoint.restype = wintypes.HANDLE
+            user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+            info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
+            monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                rect = info.work
+                return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+        return 0, 0, self.widget.winfo_screenwidth(), self.widget.winfo_screenheight()
+
     def show(self):
         self.after_id = None
-        if self.tip_window is not None or not self.text:
+        text = self.resolve_text(self.event)
+        if self.tip_window is not None or not text:
             return
 
         try:
+            if not self.widget.winfo_ismapped():
+                return
             wx = self.widget.winfo_rootx()
             wy = self.widget.winfo_rooty()
-            ww = self.widget.winfo_width()
             wh = self.widget.winfo_height()
-            screen_w = self.widget.winfo_screenwidth()
-            screen_h = self.widget.winfo_screenheight()
+            pointer = self.event is not None and getattr(self.event, "keysym", "??") in ("??", "")
+            if pointer and getattr(self.event, "type", None) == tk.EventType.VirtualEvent:
+                anchor_x, anchor_y = self.widget.winfo_pointerxy()
+            else:
+                anchor_x = self.event.x_root if pointer else wx
+                anchor_y = self.event.y_root if pointer else wy + wh
+            screen_x, screen_y, screen_w, screen_h = self.screen_bounds(anchor_x, anchor_y)
 
-            x = wx + 18
-            y = wy + wh + 8
-
-            # 防止提示跑到屏幕外（右下角裁切是科研笔记本常见问题）
-            est_width = min(self.wraplength + 40, 520)
-            est_height = 120   # 粗略估计多行提示高度
-
-            if x + est_width > screen_w - 20:
-                x = max(20, screen_w - est_width - 20)
-            if y + est_height > screen_h - 40:
-                y = max(20, wy - est_height - 10)   # 放上面
+            self.tip_window = tk.Toplevel(self.widget)
+            self.tip_window.withdraw()
+            self.tip_window.wm_overrideredirect(True)
+            self.tip_window.wm_attributes("-topmost", True)
+            label = ttk.Label(
+                self.tip_window, text=text, justify=tk.LEFT,
+                wraplength=min(self.wraplength, screen_w - 40),
+                background="#fff8dc", foreground="#1f2937",
+                relief=tk.SOLID, borderwidth=1, padding=(8, 5),
+            )
+            label.pack()
+            self.tip_window.update_idletasks()
+            width = self.tip_window.winfo_reqwidth()
+            height = self.tip_window.winfo_reqheight()
+            region = getattr(self.event, "help_region", None)
+            if region is not None:
+                region_x, region_width = region
+                x = region_x + region_width + 8
+                if x + width > screen_x + screen_w - 8:
+                    x = region_x - width - 8
+                y = anchor_y
+            else:
+                x, y = anchor_x + 16, anchor_y + 20
+            x = min(max(screen_x + 8, x), screen_x + screen_w - width - 8)
+            if y + height > screen_y + screen_h - 8:
+                y = anchor_y - height - 12
+            y = min(max(screen_y + 8, y), screen_y + screen_h - height - 8)
+            self.tip_window.wm_geometry(f"+{x}+{y}")
+            self.tip_window.deiconify()
+            self.shown_text = text
         except tk.TclError:
+            self.hide()
             return
-
-        self.tip_window = tk.Toplevel(self.widget)
-        self.tip_window.wm_overrideredirect(True)
-        self.tip_window.wm_geometry(f"+{x}+{y}")
-        label = ttk.Label(
-            self.tip_window,
-            text=self.text,
-            justify=tk.LEFT,
-            wraplength=self.wraplength,
-            background="#fff8dc",
-            relief=tk.SOLID,
-            borderwidth=1,
-            padding=(8, 5),
-        )
-        label.pack()
 
     def hide(self, event=None):
         self.unschedule()
+        self.pending_text = None
+        self.shown_text = None
         if self.tip_window is not None:
-            self.tip_window.destroy()
+            try:
+                self.tip_window.destroy()
+            except tk.TclError:
+                pass
             self.tip_window = None
+
+    def dispose(self, event=None):
+        self.hide()
+        # Do not retain destroyed controls or their app through event objects
+        # and dynamic text closures until a later worker-thread collection.
+        self.event = None
+        self.text = ""
+        self.widget._tooltip_text = ""
+
+
+class ChoiceToolTip(ToolTip):
+    """Explain both the selected value and each native combobox list item."""
+
+    def __init__(self, widget, text, choices):
+        self.summary = text
+        self.choices = {str(value): explanation for value, explanation in choices.items()}
+        self.popup_choice = None
+        self.listbox = None
+        super().__init__(widget, self.choice_text)
+        widget._tooltip_choices = self.choices
+        self.previous_postcommand = widget.cget("postcommand")
+        widget.configure(postcommand=self.prepare_choices)
+        self.motion_command = widget.register(self.on_choice_motion)
+        self.selection_command = widget.register(self.on_choice_selection)
+        self.hide_command = widget.register(self.hide_choices)
+
+    def choice_text(self, event=None):
+        if self.popup_choice is not None:
+            return f"{self.popup_choice}：{self.choices[self.popup_choice]}\n点击或按回车选择。"
+        summary = self.summary(event) if callable(self.summary) else self.summary
+        value = str(self.widget.get())
+        return f"{summary}\n当前 {value}：{self.choices[value]}" if value in self.choices else summary
+
+    def prepare_choices(self):
+        if self.previous_postcommand:
+            self.widget.tk.call(self.previous_postcommand)
+        popup = self.widget.tk.call("ttk::combobox::PopdownWindow", str(self.widget))
+        listbox = f"{popup}.f.l"
+        if self.listbox == listbox:
+            return
+        self.listbox = listbox
+        for sequence, script in (
+            ("<Motion>", f"{self.motion_command} %y %X %Y"),
+            ("<Map>", self.selection_command),
+            ("<KeyRelease>", self.selection_command),
+            ("<<ListboxSelect>>", self.selection_command),
+            ("<Leave>", self.hide_command),
+            ("<Unmap>", self.hide_command),
+            ("<ButtonPress>", self.hide_command),
+            ("<FocusOut>", self.hide_command),
+        ):
+            self.widget.tk.call("bind", listbox, sequence, "+" + script)
+
+    def on_choice_motion(self, y, x_root, y_root):
+        index = int(self.widget.tk.call(self.listbox, "nearest", int(y)))
+        box = self.widget.tk.call(self.listbox, "bbox", index)
+        if not box or not int(box[1]) <= int(y) < int(box[1]) + int(box[3]):
+            self.hide_choices()
+            return
+        self.schedule_choice(index, x_root, y_root)
+
+    def on_choice_selection(self):
+        selected = self.widget.tk.call(self.listbox, "curselection")
+        if selected:
+            index = int(selected[0])
+            box = self.widget.tk.call(self.listbox, "bbox", index)
+            if box:
+                x = int(self.widget.tk.call("winfo", "rootx", self.listbox))
+                y = int(self.widget.tk.call("winfo", "rooty", self.listbox)) + int(box[1])
+                self.schedule_choice(index, x, y)
+
+    def schedule_choice(self, index, x_root, y_root):
+        values = self.widget.cget("values")
+        value = str(values[index])
+        if value not in self.choices:
+            self.hide_choices()
+            return
+        self.popup_choice = value
+        event = tk.Event()
+        event.x_root, event.y_root = int(x_root), int(y_root)
+        event.help_region = (int(self.widget.tk.call("winfo", "rootx", self.listbox)),
+                             int(self.widget.tk.call("winfo", "width", self.listbox)))
+        self.schedule(event)
+
+    def hide_choices(self):
+        self.popup_choice = None
+        self.hide()
+
+    def dispose(self, event=None):
+        super().dispose(event)
+        self.summary = ""
+        self.previous_postcommand = ""
+
+
+class HelpNavigationToolbar(NavigationToolbar2Tk):
+    # Use the same delayed help as the rest of the app, without duplicate
+    # immediate English tooltips from Matplotlib's default toolbar.
+    toolitems = tuple((name, None, icon, action)
+                      for name, _tip, icon, action in NavigationToolbar2Tk.toolitems)
+
+    def configure_subplots(self, *args):
+        if hasattr(self, "subplot_tool"):
+            self._subplot_window.deiconify()
+            self._subplot_window.lift()
+            return
+        from matplotlib.widgets import SubplotTool
+
+        # Keep the embedded app and this dialog in one Tcl interpreter.
+        # Matplotlib's standalone manager would create another Tk root.
+        window = tk.Toplevel(self)
+        self._subplot_window = window
+        figure = Figure(figsize=(6, 3), dpi=100)
+        figure.subplots_adjust(top=0.9)
+        canvas = FigureCanvasTkAgg(figure, master=window)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.subplot_tool = SubplotTool(self.canvas.figure, figure)
+        window.protocol("WM_DELETE_WINDOW", self.close_subplots)
+        self.subplot_help(self.subplot_tool, window)
+        canvas.draw()
+        return self.subplot_tool
+
+    def close_subplots(self):
+        if not hasattr(self, "subplot_tool"):
+            return
+        canvas = self.subplot_tool.figure.canvas
+        for attr in ("_idle_draw_id", "_event_loop_id"):
+            job = getattr(canvas, attr, None)
+            if job is not None:
+                canvas.get_tk_widget().after_cancel(job)
+                setattr(canvas, attr, None)
+        self._subplot_window.destroy()
+        canvas._tkphoto = None
+        canvas.figure.set_canvas(None)
+        del self.subplot_tool
+        self._subplot_window = None
 
 
 # ==========================
@@ -1453,6 +1674,17 @@ def validate_fullfield_snapshot(settings):
     X, Y = build_poi_grid(roi, subset, step, image_shape)
     if not poi_grid_is_usable(X, Y, min_rows=3, min_cols=3):
         raise RuntimeError("当前 ROI / 子集 / 步长至少需要 3×3 个可分析的 2D POI，请增大 ROI 或减小步长。")
+    if int(settings.get("strain_degree", 2)) not in (1, 2):
+        raise RuntimeError("拟合最高阶次必须为 1 或 2。")
+    outlier = float(settings.get("outlier_threshold_px", 1.0))
+    if not np.isfinite(outlier) or outlier < 0:
+        raise RuntimeError("异常位移阈值必须为非负有限数值。")
+    mask, _, _ = _core._resolve_specimen_mask(reference8, roi, settings)
+    if mask is not None:
+        from scipy import ndimage
+        supported = ndimage.minimum_filter(mask.astype(np.uint8), size=subset, mode="constant", cval=0)
+        if np.count_nonzero(supported[Y.astype(int), X.astype(int)]) < 9:
+            raise RuntimeError("遮罩内至少需要 9 个能容纳完整子集的测量点。请检查遮罩或减小子集。")
 
 
 def fullfield_field_has_finite_strain(field):
@@ -2770,7 +3002,7 @@ def enable_windows_dpi_awareness():
 class MultiROIGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title(APP_TITLE)
+        self.root.title("分析控制台 · " + APP_TITLE)
         self.configure_initial_window()
 
         self.image_folder = tk.StringVar()
@@ -2837,7 +3069,7 @@ class MultiROIGUI:
         self.dic_subset_size = tk.IntVar(value=21)
         self.dic_step = tk.IntVar(value=5)
         self.dic_solver = tk.StringVar(value=DIC_SOLVER_ICGN)
-        self.dic_strain_window = tk.IntVar(value=5)
+        self.dic_strain_window = tk.IntVar(value=7)
         self.dic_smooth_sigma = tk.DoubleVar(value=0.0)
         self.dic_search_radius = tk.IntVar(value=20)
         self.dic_zncc_min = tk.DoubleVar(value=0.75)
@@ -2847,6 +3079,21 @@ class MultiROIGUI:
         self.dic_pyramid_levels = tk.IntVar(value=1)
         self.dic_pyramid_scale = tk.DoubleVar(value=0.5)
         self.dic_field_component = tk.StringVar(value="u")
+        self.dic_strain_degree = tk.IntVar(value=2)
+        self.dic_robust_strain = tk.BooleanVar(value=True)
+        self.dic_reject_nonconverged = tk.BooleanVar(value=True)
+        self.dic_outlier_threshold = tk.DoubleVar(value=1.0)
+        self.dic_mask_mode = tk.StringVar(value="矩形 ROI")
+        self.dic_mask_path = tk.StringVar(value="")
+        self.dic_mask_exclusions = []
+        self._drawing_mask_exclusion = False
+        self.dic_view_background = tk.StringVar(value="无底图")
+        self.dic_color_mode = tk.StringVar(value="数据范围")
+        self.dic_color_min = tk.StringVar(value="")
+        self.dic_color_max = tk.StringVar(value="")
+        self.dic_percent = tk.BooleanVar(value=False)
+        self.dic_display_style = tk.StringVar(value="连续云图")
+        self.dic_colormap = tk.StringVar(value="RdBu_r")
         self.field_roi = None
         self.roi1_reference_frame_1based = None
         self.roi2_reference_frame_1based = None
@@ -2942,6 +3189,9 @@ class MultiROIGUI:
             self.dic_zncc_min,
             self.dic_pyramid_levels,
             self.dic_pyramid_scale,
+            self.dic_strain_degree, self.dic_robust_strain, self.dic_outlier_threshold,
+            self.dic_reject_nonconverged,
+            self.dic_mask_mode, self.dic_mask_path,
         ]:
             var.trace_add("write", self._on_gui_state_change)
 
@@ -2959,10 +3209,10 @@ class MultiROIGUI:
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        width = min(1500, screen_w - 80)
+        width = min(650, screen_w - 80)
         height = min(940, screen_h - 100)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1040, 680)
+        self.root.minsize(620, 680)
 
     def configure_tk_scaling(self):
         try:
@@ -3003,11 +3253,124 @@ class MultiROIGUI:
         self.root.update_idletasks()
         # Requested widths of hidden tables must not dictate the window size.
         scale = max(1.0, self.ui_scaling / (120 / 72))
-        self.root.minsize(round(1040 * scale), round(680 * scale))
+        control_scale = max(1.0, self.ui_scaling / (96 / 72))
+        self.root.minsize(round(620 * control_scale), round(680 * scale))
+        self.visual_window.minsize(round(740 * scale), round(580 * scale))
+        self.arrange_windows()
 
-    def add_tooltip(self, widget, text):
-        self.tooltips.append(ToolTip(widget, text))
+    def add_tooltip(self, widget, text, choices=None):
+        provider = lambda event: self._control_help(widget, text, event)
+        tip = ChoiceToolTip(widget, provider, choices) if choices is not None else ToolTip(widget, provider)
+        tip.owner = self.root
+        widget._tooltip_text = tip.resolve_text()
+        self.tooltips.append(tip)
+        widget.bind("<Destroy>", lambda _event: self.tooltips.remove(tip) if tip in self.tooltips else None, add="+")
         return widget
+
+    def _control_help(self, widget, text, event=None):
+        explanation = text(event) if callable(text) else text
+        if not explanation or not isinstance(widget, ttk.Widget) or not widget.instate(["disabled"]):
+            return explanation
+        if self.is_processing or self._completion_pending:
+            reason = "正在计算或保存结果，请等本次分析完成后再操作。"
+        elif widget == getattr(self, "start_button", None):
+            reason = self._start_prerequisite_help()
+        elif widget == getattr(self, "prev_frame_button", None) and self.image_paths:
+            reason = "当前已是第一张图片。"
+        elif widget == getattr(self, "next_frame_button", None) and self.image_paths:
+            reason = "当前已是最后一张图片。"
+        else:
+            requirements = {
+                "open_recent_output_button": "先选择输出文件夹，或完成一次分析。",
+                "roi1_button": "先加载图像序列。", "roi2_button": "先加载图像序列。",
+                "draw_field_roi_button": "先加载图像序列。",
+                "show_preview_button": "先加载图像序列。",
+                "prev_frame_button": "先加载图像序列。", "next_frame_button": "先加载图像序列。",
+                "set_start_button": "先加载图像序列。", "set_end_button": "先加载图像序列。",
+                "btn_zoom_in": "先加载图像序列。", "btn_zoom_out": "先加载图像序列。",
+                "btn_fit": "先加载图像序列。", "btn_1to1": "先加载图像序列。",
+                "align_x_button": "先画好两个测量框。", "align_y_button": "先画好两个测量框。",
+                "add_group_button": "先在同一参考图片上画好两个测量框。",
+                "load_group_button": "先在列表中单击选中一组。",
+                "update_group_button": "先选中一组，并画好两个测量框。",
+                "delete_group_button": "先在列表中单击选中一组。",
+                "clear_rois_button": "先在图片上画出测量框。",
+                "viewer_export_btn": "先完成分析，让这里显示结果图。",
+                "viewer_clear_btn": "当前没有结果预览；完成分析后可使用。",
+            }
+            reason = next((message for name, message in requirements.items()
+                           if widget == getattr(self, name, None)), "")
+        return explanation + (f"\n暂不可用：{reason}" if reason else "")
+
+    def _start_prerequisite_help(self):
+        hint = self.workflow_hint_var.get()
+        label, _, message = hint.partition("：")
+        reasons = {
+            "图像序列": "先选择存放图片的文件夹，再点“加载序列”。",
+            "分析范围": "填写两张不同图片的起止序号：从 1 开始，终点要大于起点，并且不能超过已加载的图片总数。",
+            "全场 ROI": "先在第一张要分析的图片上拖出矩形分析区域；整个矩形都要落在图片内。",
+            "参考帧": (
+                "先显示第一张要分析的图片，再重新画分析区域。"
+                if self.is_fullfield_mode() else
+                "测量框必须画在第一张要分析的图片上；请载入需要修改的分组，重画后点“更新选中”保存。"
+            ),
+            "纹理": "测量区域的明暗纹理无法同时确定左右和上下位置。请换一块纹理更清楚的区域，或画大一些再检查。",
+            "子集尺寸": "每个测量点使用的正方形图片块，边长必须是至少 9 的奇数，如 21 个像素。",
+            "步长": "相邻测量点的间距必须是大于 0 的整数，单位是像素。",
+            "应变窗口": "计算局部伸缩所用的邻近测量点范围必须是至少 3 的奇数，如 7 行、7 列。",
+            "高斯平滑": "平均附近移动量的范围不能为负。填 0 关闭平滑，或填写正数。",
+            "求解器": "请从计算方法下拉列表选择一种方法。默认的 IC-GN 会逐步修正图片块的位置和形状。",
+            "POI 网格": "区域内的测量点不足。请扩大分析区域、减小图片块边长或减小测量点间距，至少要有 3 行、3 列测量点。",
+            "DIC 参数": "请给“子集尺寸”（图片块边长）、“步长”（测量点间距）、“应变窗口”（邻近点数）和“高斯平滑”（平均范围）填写有效数字。",
+            "ROI 组": "先在第一张要分析的图片上画两个测量框，再点“添加 ROI 组”保存这一对。",
+            "L0": "两个测量框的初始间距必须大于零且能读出数值。请检查测量方向，重新画框并更新该组。",
+            "输出目录": (
+                "当前输出路径指向已有文件。请换成文件夹路径，或点击“选择输出”。"
+                if "不是文件夹" in message else
+                "先填写结果文件夹路径，或点击“选择输出”设置保存位置。"
+            ),
+            "导出选项": "先勾选至少一种要保存的结果，例如数值表格或曲线图片。",
+        }
+        return reasons.get(label, hint.replace("ROI", "测量框").replace("参考帧", "参考图片"))
+
+    def _workspace_help(self, event=None):
+        if event is not None and getattr(event, "keysym", "") != "F1":
+            try:
+                index = self.workspace_notebook.index(f"@{event.x},{event.y}")
+            except tk.TclError:
+                return ""
+        else:
+            index = self.workspace_notebook.index("current")
+        return (
+            "点击查看图片并画测量框。ROI 就是要追踪或计算的图片区域；先选参考图片，再按住左键拖出矩形。",
+            "点击查看分析得到的曲线或彩色结果图。完成分析后，可在这里放大、移动或保存图表。",
+            "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。",
+        )[index]
+
+    def _group_table_help(self, event=None):
+        action = "单击选中一组，双击载入编辑；右键可载入、更新或删除。"
+        if event is None or getattr(event, "keysym", "") == "F1":
+            return "每行是一对已保存的测量框，会单独计算距离变化。" + action
+        region = self.group_tree.identify_region(event.x, event.y)
+        if region == "separator":
+            return "按住列标题之间的分隔线左右拖动，可调整这一列的宽度。"
+        column = self.group_tree.identify_column(event.x)
+        if not column or column == "#0":
+            return action
+        displayed = self.group_tree.cget("displaycolumns")
+        key = displayed[int(column[1:]) - 1]
+        explanation = {
+            "name": "这对测量框的名称，也会用于结果文件名。",
+            "role": "这组测量沿拉伸方向还是垂直于拉伸方向；两种角色一起用于计算泊松比，即横向收缩与纵向伸长的比值。",
+            "selected": "添加这组时选择的距离计算方向；自动判断会根据两个框的位置确定方向。",
+            "actual": "实际采用的距离方向：横向是左右，纵向是上下，两点距离是直线距离。",
+            "L0": "L0 是两个测量框在参考图片上的初始间距，单位是像素。应变表示间距相对这个初始值变化了多少。",
+            "dx": "Δx 是两个测量框中心在左右方向的初始间距，单位是像素。",
+            "dy": "Δy 是两个测量框中心在上下方向的初始间距，单位是像素。",
+            "roi1": "第一个测量框的位置和尺寸：左上角的左右坐标、上下坐标、宽、高，均为像素。",
+            "roi2": "第二个测量框的位置和尺寸：左上角的左右坐标、上下坐标、宽、高，均为像素。",
+        }[key]
+        return explanation if region == "heading" else explanation + "\n" + action
 
     def _on_gui_state_change(self, *args):
         try:
@@ -3016,13 +3379,15 @@ class MultiROIGUI:
             pass
 
     def bind_common_shortcuts(self):
-        self.root.bind("<Control-l>", lambda _event: self.load_first_image() or "break")
-        self.root.bind("<Control-f>", lambda _event: self.fit_image_to_view() or "break")
-        self.root.bind("<Control-Return>", lambda _event: self.start_processing() or "break")
-        self.root.bind("<Escape>", lambda _event: self.clear_current_rois() or "break")
-        self.root.bind("<Control-plus>", lambda _event: self.zoom_image(1.25) or "break")
-        self.root.bind("<Control-equal>", lambda _event: self.zoom_image(1.25) or "break")
-        self.root.bind("<Control-minus>", lambda _event: self.zoom_image(1 / 1.25) or "break")
+        for window in (self.root, self.visual_window):
+            window.bind("<Control-l>", lambda _event: self.load_first_image() or "break")
+            window.bind("<Control-f>", lambda _event: self.fit_image_to_view() or "break")
+            window.bind("<Control-Return>", lambda _event: self.start_processing() or "break")
+            window.bind("<Escape>", lambda _event: self.clear_current_rois() or "break")
+            window.bind("<Control-plus>", lambda _event: self.zoom_image(1.25) or "break")
+            window.bind("<Control-equal>", lambda _event: self.zoom_image(1.25) or "break")
+            window.bind("<Control-minus>", lambda _event: self.zoom_image(1 / 1.25) or "break")
+            window.bind("<Control-i>", lambda _event: self.show_visual_window() or "break")
 
     def default_recent_config_path(self):
         configured = os.environ.get(RECENT_CONFIG_ENV_VAR)
@@ -3315,7 +3680,7 @@ class MultiROIGUI:
                 items.append(self._preflight_item("ok", "输出目录", str(output_path)))
 
         if is_ff:
-            items.append(self._preflight_item("ok", "全场输出", "固定输出 TXT/CSV 与 u/v/Exx/Eyy/Exy PNG；overlay 可选。"))
+            items.append(self._preflight_item("ok", "全场输出", "固定保存数值表、完整数值文件与九个分量图；可选叠加图。"))
         elif self.has_any_export_option():
             items.append(self._preflight_item("ok", "导出选项", "至少已选择一种导出内容。"))
         else:
@@ -3582,6 +3947,8 @@ class MultiROIGUI:
         self._apply_color_palette()
 
         self.configure_ui_style()
+        self.root.configure(background=self.ui_bg)
+        self.visual_window.configure(background=self.ui_bg)
 
         for attr in ("log_text", "preflight_summary_label"):
             widget = getattr(self, attr, None)
@@ -3635,18 +4002,22 @@ class MultiROIGUI:
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="StrainTrace", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="图像位移与应变分析", style="AppHint.TLabel").grid(
-            row=0, column=1, sticky="w", padx=(16, 8))
+        ttk.Label(header, text="分析控制台 · 序列、参数与质量", style="AppHint.TLabel").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.open_visual_button = ttk.Button(
+            header, text="图像与结果 ↗", command=self.show_visual_window, style="Secondary.TButton")
+        self.open_visual_button.grid(row=0, column=1, sticky="e", padx=(8, 6))
+        self.add_tooltip(self.open_visual_button, "点击打开独立的图像与结果窗口（Ctrl + I），查看图片、绘制 ROI 或检查结果。关闭该窗口不会清空数据或停止分析。")
         self.open_recent_output_button = ttk.Button(
             header, text="打开输出", command=self.open_recent_output_folder, style="Compact.TButton")
-        self.open_recent_output_button.grid(row=0, column=2, padx=(4, 6))
+        self.open_recent_output_button.grid(row=0, column=3, padx=(0, 6))
         self.dark_mode_btn = ttk.Button(header, text="暗色模式", command=self.toggle_dark_mode, style="Compact.TButton")
-        self.dark_mode_btn.grid(row=0, column=3, padx=(0, 6))
+        self.dark_mode_btn.grid(row=0, column=2, padx=(0, 6))
         self.usage_notice_button = ttk.Button(header, text="关于 / 引用", command=self.show_usage_notice, style="Compact.TButton")
         self.usage_notice_button.grid(row=0, column=4)
-        self.add_tooltip(self.usage_notice_button, f"ezDIC v{APP_VERSION} · {APP_DEVELOPER} · DOI: {APP_DOI}")
-        self.add_tooltip(self.dark_mode_btn, "切换整个工作区和结果图的浅色 / 暗色主题。")
-        self.add_tooltip(self.open_recent_output_button, "打开最近选择或成功分析的输出目录。")
+        self.add_tooltip(self.usage_notice_button, "点击查看版本、作者和使用说明，以及论文中引用本软件时可用的信息。")
+        self.add_tooltip(self.dark_mode_btn, "点击切换浅色或深色界面，结果图也会换色。")
+        self.add_tooltip(self.open_recent_output_button, "点击在文件管理器中打开最近选择的结果文件夹，查看已保存的表格和图片。")
         self.update_recent_output_button_state()
 
     def _build_project_section(self, parent):
@@ -3656,8 +4027,7 @@ class MultiROIGUI:
         self.project_frame.columnconfigure(3, weight=0)
 
         image_folder_tip = (
-            "选择同一实验、同一视场、按时间顺序命名的图像序列文件夹。"
-            "程序会自然排序 tif/tiff/png/jpg/bmp 文件；常见误用是混入不同倍率、不同样品或无关图片。"
+            "填写连续拍摄同一样品、同一位置的图片文件夹路径。加载时会按文件名中的数字排序，如 1、2、10。"
         )
         self.image_folder_label = ttk.Label(self.project_frame, text="图像文件夹：", style="Key.TLabel")
         self.image_folder_label.grid(row=0, column=0, sticky="w", pady=1)
@@ -3674,11 +4044,10 @@ class MultiROIGUI:
             style="Secondary.TButton",
         )
         self.select_image_button.grid(row=0, column=2, sticky="ew", pady=1)
-        self.add_tooltip(self.select_image_button, image_folder_tip)
+        self.add_tooltip(self.select_image_button, "点击选择存放连续拍摄图片的文件夹，再点“加载序列”显示图片。")
 
         output_folder_tip = (
-            "选择结果保存位置；留空或使用默认值时会在图像文件夹下创建输出目录。"
-            "建议每个实验单独一个目录，避免覆盖或混淆不同批次的 TXT/PNG/CSV 结果。"
+            "填写结果文件夹路径，分析后的表格和图片会保存在这里。开始分析前必须设置；也可点击“选择输出”设置保存位置。"
         )
         self.output_folder_label = ttk.Label(self.project_frame, text="输出文件夹：")
         self.output_folder_label.grid(row=1, column=0, sticky="w", pady=1)
@@ -3695,7 +4064,7 @@ class MultiROIGUI:
             style="Secondary.TButton",
         )
         self.select_output_button.grid(row=1, column=2, sticky="ew", pady=1)
-        self.add_tooltip(self.select_output_button, output_folder_tip)
+        self.add_tooltip(self.select_output_button, "点击选择分析结果的保存位置。选好后，顶部“打开输出”可打开这个文件夹。")
 
         self.load_images_button = ttk.Button(
             self.project_frame,
@@ -3706,41 +4075,107 @@ class MultiROIGUI:
         self.load_images_button.grid(row=0, column=3, rowspan=2, padx=(8, 0), pady=1, sticky="nsew")
         self.add_tooltip(
             self.load_images_button,
-            "读取图像文件夹并显示预览帧；首次加载会把分析范围默认设为第 1 帧到最后一帧。"
-            "如果换了文件夹，已有 ROI 组会被清空，避免把旧模板误用于新序列。",
+            "点击加载所选文件夹的图片并显示预览（Ctrl + L）。首次加载会选中全部图片；更换图片序列会清空原有测量框和分组。",
         )
 
     def _build_workspace(self, parent):
         workspace = ttk.Frame(parent, style="App.TFrame")
         workspace.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         workspace.columnconfigure(0, weight=1)
-        workspace.columnconfigure(1, weight=0)
         workspace.rowconfigure(0, weight=1)
+        self.control_notebook = ttk.Notebook(workspace)
+        self.control_notebook.grid(row=0, column=0, sticky="nsew")
+        self.settings_page = ttk.Frame(self.control_notebook, style="Card.TFrame")
+        self.quality_page = ttk.Frame(self.control_notebook, style="Card.TFrame", padding=12)
+        for page in (self.settings_page, self.quality_page):
+            page.columnconfigure(0, weight=1)
+            page.rowconfigure(0, weight=1)
+        self.control_notebook.add(self.settings_page, text="分析设置")
+        self.control_notebook.add(self.quality_page, text="质量与日志")
+        self.add_tooltip(self.control_notebook, self._control_workspace_help)
 
-        left = ttk.Frame(workspace, style="App.TFrame")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-
-        self.workspace_notebook = ttk.Notebook(left)
-        self.workspace_notebook.grid(row=0, column=0, sticky="nsew")
+        self.visual_window = tk.Toplevel(self.root)
+        self.visual_window.title("StrainTrace · 图像与结果")
+        self.visual_window.configure(background=self.ui_bg)
+        self.visual_window.protocol("WM_DELETE_WINDOW", self.hide_visual_window)
+        visual_frame = ttk.Frame(self.visual_window, style="App.TFrame", padding=(16, 12))
+        visual_frame.pack(fill=tk.BOTH, expand=True)
+        visual_frame.columnconfigure(0, weight=1)
+        visual_frame.rowconfigure(1, weight=1)
+        header = ttk.Frame(visual_frame, style="App.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(header, text="图像与结果", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="ROI · 遮罩 · 位移 · 应变", style="AppHint.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(16, 8))
+        self.arrange_windows_button = ttk.Button(
+            header, text="排列窗口", command=self.arrange_windows, style="Compact.TButton")
+        self.arrange_windows_button.grid(row=0, column=2, padx=(0, 6))
+        self.add_tooltip(self.arrange_windows_button, "点击把控制台和图像窗口排列到当前屏幕内；屏幕足够宽时并排显示。之后仍可独立移动、缩放或放到另一块屏幕。")
+        self.return_control_button = ttk.Button(
+            header, text="分析控制台 ↗", command=self.show_control_window, style="Secondary.TButton")
+        self.return_control_button.grid(row=0, column=3)
+        self.add_tooltip(self.return_control_button, "点击回到分析控制台，调整图片范围、计算参数或查看质量与日志。图像窗口的位置和内容保留。")
+        self.workspace_notebook = ttk.Notebook(visual_frame)
+        self.workspace_notebook.grid(row=1, column=0, sticky="nsew")
         self.image_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
         self.results_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
-        self.quality_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame", padding=16)
-        for page in (self.image_page, self.results_page, self.quality_page):
+        for page in (self.image_page, self.results_page):
             page.columnconfigure(0, weight=1)
             page.rowconfigure(0, weight=1)
         self.workspace_notebook.add(self.image_page, text="图像与 ROI")
         self.workspace_notebook.add(self.results_page, text="分析结果")
-        self.workspace_notebook.add(self.quality_page, text="质量与日志")
         self.workspace_notebook.bind("<<NotebookTabChanged>>", self._on_workspace_tab_changed)
+        self.add_tooltip(self.workspace_notebook, self._workspace_help)
         self._build_image_section(self.image_page)
-        self._build_scrollable_controls(workspace)
+        self._build_scrollable_controls(self.settings_page)
+        ttk.Label(visual_frame, textvariable=self.status_var, style="AppHint.TLabel",
+                  wraplength=700, justify=tk.LEFT).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+
+    def _control_workspace_help(self, event=None):
+        try:
+            index = (self.control_notebook.index(f"@{event.x},{event.y}")
+                     if event is not None and getattr(event, "keysym", "") != "F1"
+                     else self.control_notebook.index("current"))
+        except tk.TclError:
+            return ""
+        return ("点击设置分析模式、参考图片、ROI 和计算参数；绘图操作在独立的图像窗口中进行。",
+                "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。")[index]
+
+    def show_control_window(self):
+        self.root.deiconify()
+        self.root.lift()
+
+    def show_visual_window(self):
+        self.visual_window.deiconify()
+        self.visual_window.lift()
+        self.root.after_idle(self._rescale_display_to_current_size)
+
+    def hide_visual_window(self):
+        self.visual_window.withdraw()
+
+    def arrange_windows(self):
+        """Place both independently resizable windows inside the primary screen."""
+        screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        control_min_w, control_min_h = self.root.minsize()
+        visual_min_w, visual_min_h = self.visual_window.minsize()
+        control_w = max(control_min_w, min(650, screen_w - 80))
+        height = max(control_min_h, visual_min_h, min(900, screen_h - 100))
+        if screen_w >= control_w + visual_min_w + 60:
+            visual_w = min(1360, screen_w - control_w - 60)
+            visual_x = control_w + 40
+        else:
+            visual_w = max(visual_min_w, min(1120, screen_w - 80))
+            visual_x = max(20, screen_w - visual_w - 20)
+        self.root.geometry(f"{control_w}x{height}+20+30")
+        self.visual_window.geometry(f"{visual_w}x{height}+{visual_x}+30")
+        self.root.deiconify()
+        self.visual_window.deiconify()
 
     def _build_scrollable_controls(self, parent):
         sidebar_width = round(370 * max(1.0, self.ui_scaling / (96 / 72)))
         self.controls_frame = ttk.Frame(parent, style="Card.TFrame", width=sidebar_width)
-        self.controls_frame.grid(row=0, column=1, sticky="nsew")
+        self.controls_frame.grid(row=0, column=0, sticky="nsew")
         self.controls_frame.grid_propagate(False)
         self.controls_frame.columnconfigure(0, weight=1)
         self.controls_frame.rowconfigure(1, weight=1)
@@ -3760,6 +4195,8 @@ class MultiROIGUI:
         self.controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
         self.controls_canvas.grid(row=1, column=0, sticky="nsew")
         controls_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.add_tooltip(controls_scrollbar, "上下拖动查看被隐藏的设置。在控制台的设置区滚动鼠标滚轮，也可上下移动。")
+        self.add_tooltip(self.controls_canvas, "在这里滚动鼠标滚轮，查看下方的测量和导出设置。")
 
         self.controls_panel = ttk.Frame(self.controls_canvas, style="Card.TFrame", padding=(10, 6, 10, 12))
         self.controls_panel.columnconfigure(0, weight=1)
@@ -3779,7 +4216,7 @@ class MultiROIGUI:
         self._build_fullfield_section(self.controls_panel)
         self._build_roi_section(self.controls_panel)
         self._build_analysis_section(self.controls_panel)
-        self._build_run_section(self.controls_frame)
+        self._build_run_section(self.main_frame, row=3)
         self._build_quality_section(self.quality_page)
         self._build_results_section(self.results_page)
         self._bind_workflow_scroll_handler()
@@ -3800,6 +4237,7 @@ class MultiROIGUI:
 
     def _show_image_workspace(self):
         if hasattr(self, "workspace_notebook"):
+            self.show_visual_window()
             self.workspace_notebook.select(self.image_page)
 
     def _bind_workflow_scroll_handler(self):
@@ -3868,7 +4306,9 @@ class MultiROIGUI:
         self.workflow_labels.append(self.workflow_steps_label)
         self.add_tooltip(
             self.workflow_steps_label,
-            "流程：1.选文件并加载；2.设范围与方向；3.添加 ROI 组；4.开始分析。",
+            lambda _event: ("先加载图片，选一张作为比较基准，再画要分析的矩形区域，最后开始计算整片区域的移动和伸缩。"
+                            if self.is_fullfield_mode() else
+                            "先加载图片，选一张作为比较基准，再画两个测量框并添加为一组，最后计算它们之间的距离变化。"),
         )
 
         self.workflow_hint_var = tk.StringVar(value="请选择并加载图像序列。")
@@ -3885,8 +4325,8 @@ class MultiROIGUI:
     def _visible_workflow_steps_text(self):
         """Keep the current workflow visible without repeating the instructions."""
         if str(self.analysis_mode.get()) == ANALYSIS_MODE_FULLFIELD:
-            return "参考帧 → 全场 ROI → DIC 分析"
-        return "参考帧 → ROI 配对 → 应变分析"
+            return "选参考图片 → 在图像窗口画分析区域 → 开始分析 · 悬停或按 F1 查看说明"
+        return "选参考图片 → 在图像窗口画两个测量框 → 开始分析 · 悬停或按 F1 查看说明"
 
     def _build_measure_section(self, parent):
         mode_bar = ttk.Frame(parent, style="Card.TFrame")
@@ -3903,7 +4343,7 @@ class MultiROIGUI:
         self.mode_extensometer_radio.grid(row=0, column=0, sticky="ew")
         self.add_tooltip(
             self.mode_extensometer_radio,
-            "1D 虚拟引伸计：画 ROI1/ROI2，追踪标距，导出工程应变、真应变和 QC。适合只要拉伸曲线的实验。",
+            "选择后，在参考图片上画两个测量框（ROI），再添加为一组。程序追踪这两个框，画出它们之间的距离随时间伸长或缩短的曲线。",
         )
         self.mode_fullfield_radio = ttk.Radiobutton(
             mode_bar,
@@ -3916,7 +4356,7 @@ class MultiROIGUI:
         self.mode_fullfield_radio.grid(row=0, column=1, sticky="ew")
         self.add_tooltip(
             self.mode_fullfield_radio,
-            "全场 2D DIC：在矩形 ROI 内布置 subset 网格，用 IC-GN 或 IC-LM 求 u/v，再算 Green-Lagrange 应变图。",
+            "选择后，在参考图片上画一片矩形区域（ROI）。DIC 是比较图片纹理来测量变形的方法；程序会画出这片区域各处的移动和伸缩。",
         )
 
         self.measure_frame = ttk.LabelFrame(parent, text="02  测量设置", padding=(10, 8))
@@ -3932,8 +4372,7 @@ class MultiROIGUI:
         preview_row.columnconfigure(3, weight=1)
 
         preview_tip = (
-            "输入要查看的 1-based 帧号，只影响当前显示和设置起止帧，不会直接改变分析结果。"
-            "推荐检查参考帧、变形中段和结束帧，避免把模糊或离开视场的帧纳入分析。"
+            "输入要查看的图片序号，再点“显示”。帧就是序列中的一张图片，编号从 1 开始；这里只切换预览图片。"
         )
         self.preview_frame_label = ttk.Label(preview_row, text="预览帧：")
         self.preview_frame_label.grid(row=0, column=0, padx=(0, 4), sticky="w")
@@ -3948,7 +4387,7 @@ class MultiROIGUI:
             style="Compact.TButton",
         )
         self.show_preview_button.grid(row=0, column=2, padx=(0, 5), sticky="w")
-        self.add_tooltip(self.show_preview_button, preview_tip)
+        self.add_tooltip(self.show_preview_button, "点击显示左侧序号对应的图片；编号从 1 开始。只切换预览，不会开始分析。")
 
         self.prev_frame_button = ttk.Button(
             preview_row,
@@ -3957,7 +4396,7 @@ class MultiROIGUI:
             style="Compact.TButton",
         )
         self.prev_frame_button.grid(row=0, column=3, padx=(0, 5), sticky="e")
-        self.add_tooltip(self.prev_frame_button, "向前预览一帧，不改变已设置的分析范围；用于快速检查 ROI 是否仍在视场内。")
+        self.add_tooltip(self.prev_frame_button, "点击查看上一张图片，检查画框的位置是否合适；分析范围保持原来的设置。")
 
         self.next_frame_button = ttk.Button(
             preview_row,
@@ -3966,26 +4405,25 @@ class MultiROIGUI:
             style="Compact.TButton",
         )
         self.next_frame_button.grid(row=0, column=4, sticky="e")
-        self.add_tooltip(self.next_frame_button, "向后预览一帧，不改变已设置的分析范围；用于快速检查 ROI 是否仍在视场内。")
+        self.add_tooltip(self.next_frame_button, "点击查看下一张图片，检查测量部位是否仍然清晰可见；分析范围保持原来的设置。")
 
         range_row = ttk.Frame(frame_range, style="Card.TFrame")
         range_row.grid(row=1, column=0, sticky="ew")
         range_row.columnconfigure(6, weight=1)
 
         analysis_range_tip = (
-            "设置参与批量追踪的起始帧和结束帧，均为 1-based 帧号。"
-            "起始帧也是 ROI 模板参考帧；改变起始帧后应在新参考帧重画 ROI，常见误用是先画 ROI 再改参考帧。"
+            "填写要分析的第一张和最后一张图片序号，包含两端，编号从 1 开始。起始图片也是比较变形的基准；测量框要在它上面绘制。"
         )
         self.analysis_range_label = ttk.Label(range_row, text="分析范围：", style="Key.TLabel")
         self.analysis_range_label.grid(row=0, column=0, padx=(0, 4), sticky="w")
         self.add_tooltip(self.analysis_range_label, analysis_range_tip)
         self.start_frame_entry = ttk.Entry(range_row, textvariable=self.start_frame_1based, width=6)
         self.start_frame_entry.grid(row=0, column=1, padx=(0, 4), sticky="w")
-        self.add_tooltip(self.start_frame_entry, analysis_range_tip)
+        self.add_tooltip(self.start_frame_entry, "填写第一张要分析的图片序号（从 1 开始）。它同时作为比较基准；改动后，请在新的参考图片上重新画测量框。")
         ttk.Label(range_row, text="到").grid(row=0, column=2, padx=(0, 4), sticky="w")
         self.end_frame_entry = ttk.Entry(range_row, textvariable=self.end_frame_1based, width=6)
         self.end_frame_entry.grid(row=0, column=3, padx=(0, 8), sticky="w")
-        self.add_tooltip(self.end_frame_entry, analysis_range_tip)
+        self.add_tooltip(self.end_frame_entry, "填写最后一张要分析的图片序号，计算会包含这张图片。序号不能小于起始值，也不能超过图片总数。")
 
         self.set_start_button = ttk.Button(
             range_row,
@@ -3996,8 +4434,7 @@ class MultiROIGUI:
         self.set_start_button.grid(row=1, column=1, columnspan=2, padx=(0, 5), pady=(2, 0), sticky="w")
         self.add_tooltip(
             self.set_start_button,
-            "把当前预览帧设为起始/参考帧；ROI 模板必须在这张图上绘制。"
-            "如果已经添加 ROI 组，修改参考帧通常需要清空并重画，否则模板和图像可能不对应。",
+            "点击把正在预览的图片设为分析起点和比较基准。已有测量框时会询问是否清空；确认后，请在这张参考图片上重新画框。",
         )
 
         self.set_end_button = ttk.Button(
@@ -4009,7 +4446,7 @@ class MultiROIGUI:
         self.set_end_button.grid(row=1, column=3, columnspan=2, pady=(2, 0), sticky="w")
         self.add_tooltip(
             self.set_end_button,
-            "把当前预览帧设为批量追踪的最后一帧。常用于避开断裂后、失焦、样品离开视场或夹具遮挡的后段图像；结束帧不能早于起始帧。",
+            "点击把正在预览的图片设为分析终点，计算会包含这张图片。可用来跳过后面模糊、断裂或样品离开画面的图片。",
         )
 
         measure_core = ttk.Frame(self.measure_frame, style="Card.TFrame", padding=(0, 10, 0, 0))
@@ -4018,8 +4455,7 @@ class MultiROIGUI:
         measure_core.columnconfigure(1, weight=1)
 
         strain_mode_tip = (
-            "选择两组 ROI 中心距离用于计算应变的方向。自动判断会根据 ROI1/ROI2 的相对位置选择 x、y 或两点距离；"
-            "横向/纵向适合严格水平或垂直标距，两点距离适合倾斜标距。误选方向会改变 L0、应变符号和泊松比解释。"
+            "选择两个测量框之间要比较的距离方向，添加或更新分组后生效。应变就是这段距离相对初始值伸长或缩短的比例。"
         )
         self.strain_mode_label = ttk.Label(measure_core, text="应变方向", style="Key.TLabel")
         self.strain_mode_label.grid(row=0, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4033,11 +4469,15 @@ class MultiROIGUI:
         )
         self.strain_mode_box.grid(row=0, column=1, columnspan=3, sticky="ew", pady=1)
         self.strain_mode_box.bind("<<ComboboxSelected>>", self.sync_strain_mode_from_display)
-        self.add_tooltip(self.strain_mode_box, strain_mode_tip)
+        self.add_tooltip(self.strain_mode_box, strain_mode_tip, choices={
+            "自动判断": "按两个框的位置自动选左右、上下或直线距离，首次使用可选此项。",
+            "横向应变": "只比较两个框在图片左右方向的距离变化，适用于左右排列的测量部位。",
+            "纵向应变": "只比较两个框在图片上下方向的距离变化，适用于上下排列的测量部位。",
+            "两点距离应变": "比较两个框中心之间的直线距离，适用于倾斜排列的测量部位。",
+        })
 
         tracking_preset_tip = (
-            "选择一组追踪阈值预设。标准适合多数清晰散斑序列；低质量图像会放宽相关阈值；快速变形会扩大搜索和应变跳变容许。"
-            "这些是软件启发式设置，不等同于材料学置信度；修改高级参数后会变为自定义。"
+            "选择后自动填写一组追踪参数，用于在后续图片中寻找两个测量框。首次使用选“标准”，再根据检查结果调整。"
         )
         self.tracking_preset_label = ttk.Label(measure_core, text="追踪模式", style="Key.TLabel")
         self.tracking_preset_label.grid(row=1, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4051,7 +4491,12 @@ class MultiROIGUI:
         )
         self.tracking_preset_box.grid(row=1, column=1, columnspan=3, sticky="ew", pady=1)
         self.tracking_preset_box.bind("<<ComboboxSelected>>", self.apply_tracking_preset)
-        self.add_tooltip(self.tracking_preset_box, tracking_preset_tip)
+        self.add_tooltip(self.tracking_preset_box, tracking_preset_tip, choices={
+            "标准": "使用常规搜索范围和检查要求，适合纹理清晰、变化较缓慢的图片。",
+            "低质量图像": "放宽纹理相似程度的要求，让较难识别的图片有机会算出结果；需核对追踪位置。",
+            "快速变形": "扩大寻找范围，并允许相邻图片的伸缩变化更大；计算可能更慢。",
+            "自定义": "保留当前参数。展开“高级设置”可逐项修改，修改后这里也会自动显示自定义。",
+        })
         self.preset_status_label = ttk.Label(measure_core, textvariable=self.preset_status_var, style="Hint.TLabel", wraplength=430)
         self.preset_status_label.grid(
             row=2, column=0, columnspan=4, sticky="ew", pady=(0, 2)
@@ -4059,8 +4504,7 @@ class MultiROIGUI:
         self.add_tooltip(self.preset_status_label, tracking_preset_tip)
 
         pixel_size_tip = (
-            "填写图像标定比例，单位 mm/px；留空时只按像素标距计算应变，工程应变本身仍为无量纲。"
-            "只有在需要记录物理标距或复核像素尺寸时填写；常见误用是把 px/mm 写成 mm/px。"
+            "填写一个像素对应多少毫米。例如 100 个像素等于 1 毫米，就填 0.01。用于记录实际初始间距；不清楚时可留空，仍能计算伸缩比例。"
         )
         self.pixel_size_label = ttk.Label(measure_core, text="标定 mm/px，可空")
         self.pixel_size_label.grid(row=3, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4069,8 +4513,7 @@ class MultiROIGUI:
         self.pixel_size_entry.grid(row=3, column=1, sticky="w", pady=1)
         self.add_tooltip(self.pixel_size_entry, pixel_size_tip)
         auto_align_tip = (
-            "勾选后，绘制 ROI2 结束时会按当前/自动方向把两个 ROI 中心线水平或垂直对齐，适合拉伸标距应严格沿 x 或 y 的实验。"
-            "不勾选则保留手动画出的 ROI 位置，适合倾斜标距或确实不应强制对齐的图像。"
+            "勾选后，画完第二个测量框时会按测量方向把两个框对齐，便于测左右或上下间距。要保留倾斜位置时取消勾选。"
         )
         self.auto_align_roi2_check = ttk.Checkbutton(measure_core, text="绘制 ROI2 后自动对齐", variable=self.auto_align_roi2)
         self.auto_align_roi2_check.grid(
@@ -4087,7 +4530,7 @@ class MultiROIGUI:
         self.advanced_toggle_btn.grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.add_tooltip(
             self.advanced_toggle_btn,
-            "展开或收起追踪阈值、纹理质量和导出 overlay 等高级参数。首次使用建议先用预设；只有在 QC 或 overlay 显示追踪不稳定时再调整。",
+            "点击展开或收起搜索范围、图像相似程度和纹理检查等设置。首次使用可保留默认值；每项都有具体说明。",
         )
 
         self.advanced_frame = ttk.LabelFrame(self.measure_frame, text="高级设置", padding=(10, 8))
@@ -4104,8 +4547,7 @@ class MultiROIGUI:
         self.fullfield_frame.columnconfigure(1, weight=1)
 
         subset_tip = (
-            "子集边长，奇数像素。越大越稳、越慢，也越容易平滑掉局部梯度；"
-            "太小则纹理不足、相关失败变多。常用 21–41。"
+            "每个测量点用多大的正方形图片块来寻找移动位置，边长以像素计。填至少 9 的奇数，如 21；调大通常更容易识别，但细小变化会被平均。"
         )
         ttk.Label(self.fullfield_frame, text="子集 px", style="Key.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 6), pady=1
@@ -4115,8 +4557,7 @@ class MultiROIGUI:
         self.add_tooltip(self.dic_subset_size_entry, subset_tip)
 
         step_tip = (
-            "相邻 POI 间距，单位 px。步长小于子集时网格重叠、应变更密但更慢；"
-            "步长过大则应变图变稀、窗口拟合变差。"
+            "相邻测量点之间隔多少个像素。填大于 0 的整数；调小会测更多位置、计算更慢，调大会让结果图中的测量点更稀。"
         )
         ttk.Label(self.fullfield_frame, text="步长 px", style="Key.TLabel").grid(
             row=1, column=0, sticky="w", padx=(0, 6), pady=1
@@ -4126,8 +4567,7 @@ class MultiROIGUI:
         self.add_tooltip(self.dic_step_entry, step_tip)
 
         solver_tip = (
-            "IC-GN：逆合成高斯-牛顿，速度快。IC-LM：在 Hessian 上加阻尼，大变形或初值较差时更稳。"
-            "两者都是一阶仿射形状函数，相关准则为 ZNSSD/ZNCC。"
+            "选择逐步修正图片块位置和形状的计算方法，下一次分析时生效。通常先用 IC-GN；难以找到位置时可尝试 IC-LM。"
         )
         ttk.Label(self.fullfield_frame, text="求解器", style="Key.TLabel").grid(
             row=2, column=0, sticky="w", padx=(0, 6), pady=1
@@ -4140,16 +4580,19 @@ class MultiROIGUI:
             state="readonly",
         )
         self.dic_solver_box.grid(row=2, column=1, sticky="w", pady=1)
-        self.add_tooltip(self.dic_solver_box, solver_tip)
+        self.add_tooltip(self.dic_solver_box, solver_tip, choices={
+            DIC_SOLVER_ICGN: "高斯–牛顿方法：逐步修正图片块的位置和形状，通常计算较快。",
+            DIC_SOLVER_ICLM: "带阻尼的修正方法：限制每一步的改动，初始位置不够准确时可尝试，通常较慢。",
+        })
 
-        ttk.Label(self.fullfield_frame, text="应变窗口").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=1)
+        ttk.Label(self.fullfield_frame, text="应变窗口（点）").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=1)
         self.dic_strain_window_entry = ttk.Entry(
             self.fullfield_frame, textvariable=self.dic_strain_window, width=8
         )
         self.dic_strain_window_entry.grid(row=3, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_strain_window_entry,
-            "位移场求应变时的邻域点数（奇数）。窗口大则应变更平滑，窗口小则保留局部梯度、噪声也更大。",
+            "计算一处伸缩时，使用周围多少行、多少列的测量点。填至少 3 的奇数，如 7；调大会减少杂乱起伏，也会减弱细小的局部变化。",
         )
 
         ttk.Label(self.fullfield_frame, text="平滑 σ").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4159,7 +4602,7 @@ class MultiROIGUI:
         self.dic_smooth_sigma_entry.grid(row=4, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_smooth_sigma_entry,
-            "求导前对 u/v 做高斯平滑的 σ（像素网格单位）。0 表示不平滑。过大会低估应变峰值。",
+            "计算伸缩前，先把邻近位置的移动量做加权平均。σ 表示平均范围，以测量点间距为单位；填 0 关闭，调大会减少起伏，也会压低尖峰。",
         )
 
         ttk.Label(self.fullfield_frame, text="金字塔层数").grid(row=5, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4169,7 +4612,7 @@ class MultiROIGUI:
         self.dic_pyramid_levels_entry.grid(row=5, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_pyramid_levels_entry,
-            "多尺度图像金字塔层数。1 表示兼容的单尺度求解；较大位移可尝试 2–4，但需检查每层 ROI 支持。",
+            "先在缩小的图片上找位置，再回到大图细算的层数。填 1 只用原图；移动较大时可试 2 到 4 层，所画区域需能容纳缩小后的图片块。",
         )
 
         ttk.Label(self.fullfield_frame, text="金字塔缩放").grid(row=6, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4179,7 +4622,7 @@ class MultiROIGUI:
         self.dic_pyramid_scale_entry.grid(row=6, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_pyramid_scale_entry,
-            "相邻金字塔层缩放比例（0<scale<1）。默认 0.5；只有层数大于 1 时生效。",
+            "每层图片边长缩为上一层的多少倍，填 0 到 1 之间的数，不能等于两端。0.5 表示宽和高各减半；只有层数大于 1 时生效。",
         )
 
         ttk.Label(self.fullfield_frame, text="搜索 px").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4189,7 +4632,7 @@ class MultiROIGUI:
         self.dic_search_radius_entry.grid(row=7, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_search_radius_entry,
-            "整数相关初值的搜索半径，单位 px。真实位移超过该半径时容易失败；调大更慢但更能跟上大位移。",
+            "在预计位置周围最多寻找多少个像素，填大于 0 的整数。图片中的移动较大时可调大，计算会更慢；太小可能找不到对应纹理。",
         )
 
         ttk.Label(self.fullfield_frame, text="ZNCC 下限").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=1)
@@ -4199,12 +4642,15 @@ class MultiROIGUI:
         self.dic_zncc_min_entry.grid(row=8, column=1, sticky="w", pady=1)
         self.add_tooltip(
             self.dic_zncc_min_entry,
-            "子集相关的 ZNCC 接受下限，范围 0 到 1。调高更保守，失败点保持 NaN。",
+            "ZNCC 表示两个图片块的纹理相似程度，越接近 1 越相似。填 0 到 1；提高下限会拒绝更多不相似的位置，这些位置留空，不当作零。",
         )
         self.fullfield_frame.columnconfigure(3, weight=1)
         for widget in self.fullfield_frame.winfo_children():
             info = widget.grid_info()
             row, col = int(info["row"]), int(info["column"])
+            if isinstance(widget, ttk.Label):
+                entry = self.fullfield_frame.grid_slaves(row=row, column=1)[0]
+                self.add_tooltip(widget, entry._tooltip.resolve_text)
             widget.grid_configure(row=row // 2, column=(row % 2) * 2 + col,
                                   sticky="ew" if col else "w", padx=(0, 8), pady=3)
             if isinstance(widget, ttk.Entry):
@@ -4222,7 +4668,7 @@ class MultiROIGUI:
         self.draw_field_roi_button.grid(row=0, column=0, sticky="w")
         self.add_tooltip(
             self.draw_field_roi_button,
-            "在参考帧上拖出一个矩形，作为 2D DIC 分析区域。子集必须完整落在图像内；边缘附近不会布点。",
+            "点击后，在参考图片上按住左键拖出要分析的矩形区域（ROI）。程序将在框内逐点测量移动和伸缩；太靠近边缘、放不下完整图片块的位置会跳过。",
         )
         self.dic_field_summary_var = tk.StringVar(value="尚未绘制全场 ROI。")
         self.dic_field_summary_label = ttk.Label(
@@ -4232,7 +4678,124 @@ class MultiROIGUI:
             wraplength=280,
         )
         self.dic_field_summary_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.add_tooltip(self.dic_field_summary_label, "显示所画分析区域的宽、高和左上角位置，单位都是像素。要更换区域，可再次点击“画全场 ROI”后重新拖框。")
+        options = ttk.Frame(self.fullfield_frame, style="Card.TFrame")
+        options.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        options.columnconfigure(1, weight=1)
+        ttk.Label(options, text="拟合最高阶次").grid(row=0, column=0, sticky="w")
+        self.dic_degree_box = ttk.Combobox(options, textvariable=self.dic_strain_degree, values=(1,2), width=4, state="readonly")
+        self.dic_degree_box.grid(row=0, column=1, sticky="w")
+        self.add_tooltip(self.dic_degree_box, "选择如何用周围测量点的移动量计算局部伸缩，下一次分析时生效。", choices={
+            1: "用直线变化近似周围的移动量，适合较均匀的变形。",
+            2: "优先考虑弯曲变化，适合局部变形不均匀的区域；可用点不足时会尝试一阶计算。",
+        })
+        robust_check = ttk.Checkbutton(options, text="稳健拟合", variable=self.dic_robust_strain)
+        robust_check.grid(row=0, column=2, sticky="w")
+        self.add_tooltip(robust_check, "勾选后，计算局部伸缩时会减小少数偏离较大的测量点的影响。取消后，周围各点按普通方式参与计算。")
+        ttk.Label(options, text="异常位移下限 px").grid(row=1, column=0, sticky="w", pady=4)
+        self.dic_outlier_entry = ttk.Entry(options, textvariable=self.dic_outlier_threshold, width=6)
+        self.dic_outlier_entry.grid(row=1, column=1, sticky="w")
+        self.add_tooltip(self.dic_outlier_entry, "检查某点是否比周围位置预计的移动量偏离过多，数值以像素计，并结合周围点的起伏判断。填 0 关闭；被排除点的原始移动量仍会保存。")
+        ttk.Label(options, text="试样遮罩").grid(row=2, column=0, sticky="w")
+        self.dic_mask_box = ttk.Combobox(options, textvariable=self.dic_mask_mode, values=("矩形 ROI", "自动纹理", "导入遮罩"), width=10, state="readonly")
+        self.dic_mask_box.grid(row=2, column=1, sticky="w")
+        self.add_tooltip(self.dic_mask_box, "遮罩是一张指定哪些位置参与计算的黑白图。选择范围后，可点“预览遮罩”检查，下一次分析时生效。", choices={
+            "矩形 ROI": "分析所画矩形内的位置，并跳过手动画出的排除区。ROI 就是在图上画出的分析区域。",
+            "自动纹理": "根据明暗纹理自动排除平坦背景和孔洞；请先预览，检查样品边缘是否被误排除。",
+            "导入遮罩": "使用与参考图片尺寸相同的黑白图片，白色保留、黑色排除；点旁边“导入”选择文件。",
+        })
+        self.dic_mask_load_button = ttk.Button(options, text="导入", command=self.select_dic_mask, style="Compact.TButton")
+        self.dic_mask_load_button.grid(row=2, column=2, sticky="ew")
+        self.add_tooltip(self.dic_mask_load_button, "点击选择与参考图片同样宽、高的黑白遮罩图，白色位置参与计算，黑色位置跳过。选好后会切换为“导入遮罩”并预览。")
+        self.dic_mask_path_label = ttk.Label(options, textvariable=self.dic_mask_path, wraplength=280, style="Hint.TLabel")
+        self.dic_mask_path_label.grid(row=3, column=0, columnspan=3, sticky="ew", pady=4)
+        self.add_tooltip(self.dic_mask_path_label, "这里显示所选黑白遮罩图片的完整路径。要换文件，请点击“导入”。")
+        actions = ttk.Frame(options, style="Card.TFrame")
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew")
+        for column, (label, action, tip) in enumerate((
+            ("预览遮罩", self.preview_dic_mask, "先画好分析区域，再点击查看哪些位置被排除。参考图片上的红色区域将被跳过；这里只预览，不开始计算。"),
+            ("画排除区", self.draw_dic_exclusion, "先画好分析区域，再点击并在参考图片上拖出矩形，排除孔洞、背景等不想计算的位置。可重复画多个框。"),
+            ("清空排除区", self.clear_dic_exclusions, "点击移除所有手动画出的排除框，并更新预览。自动纹理或导入黑白图指定的排除位置仍然有效。"),
+        )):
+            button = ttk.Button(actions, text=label, command=action, style="Compact.TButton")
+            button.grid(row=0, column=column, padx=(0,4), sticky="ew")
+            self.add_tooltip(button, tip)
+        for row in range(3):
+            label = options.grid_slaves(row=row, column=0)[0]
+            entry = options.grid_slaves(row=row, column=1)[0]
+            self.add_tooltip(label, entry._tooltip.resolve_text)
+        convergence_check = ttk.Checkbutton(options, text="仅接受收敛子集", variable=self.dic_reject_nonconverged)
+        convergence_check.grid(row=5, column=0, columnspan=3, sticky="w", pady=3)
+        self.add_tooltip(convergence_check, "收敛表示反复修正后，图片块位置和形状的改动已小到可以停止。勾选后，只使用达到停止条件的点；取消后可查看未达到条件的候选结果，计算状态仍会保存。")
+        ttk.Label(options, text="遮罩中白色保留、黑色排除。\n计算范围越大，起伏越少，细小变化也越不明显。", style="Hint.TLabel", wraplength=300).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
         self.fullfield_frame.grid_remove()
+
+    def dic_mask_settings(self):
+        mode = {"矩形 ROI": "none", "自动纹理": "auto", "导入遮罩": "file"}[self.dic_mask_mode.get()]
+        return {"mode": mode, "path": self.dic_mask_path.get().strip() if mode == "file" else None,
+                "texture_threshold": 3.0, "exclusions": [list(rect) for rect in self.dic_mask_exclusions]}
+
+    def dic_display_options(self):
+        options = {"style": "contour" if self.dic_display_style.get() == "连续云图" else "points",
+                   "background": {"无底图": "none", "参考图": "reference", "变形图": "deformed"}[self.dic_view_background.get()],
+                   "color_mode": {"数据范围": "range", "零点对称": "symmetric", "手动范围": "manual"}[self.dic_color_mode.get()],
+                   "percent": bool(self.dic_percent.get()), "cmap": self.dic_colormap.get(), "alpha": .65}
+        if options["color_mode"] == "manual":
+            try:
+                options["vmin"], options["vmax"] = float(self.dic_color_min.get()), float(self.dic_color_max.get())
+                if not np.isfinite([options["vmin"],options["vmax"]]).all() or options["vmin"] >= options["vmax"]:
+                    raise ValueError()
+            except ValueError as exc:
+                raise RuntimeError("手动色标需要有限且递增的最小值和最大值。") from exc
+        return options
+
+    def select_dic_mask(self):
+        if self.is_processing or self._completion_pending:
+            return
+        path = filedialog.askopenfilename(title="选择参考图像遮罩（白色保留）", filetypes=[("遮罩图像", "*.png *.tif *.tiff *.bmp")])
+        if path:
+            self.dic_mask_path.set(path)
+            self.dic_mask_mode.set("导入遮罩")
+            self.preview_dic_mask()
+
+    def preview_dic_mask(self):
+        if self.is_processing or self._completion_pending or self.field_roi is None:
+            return
+        try:
+            index = int(self.field_roi_reference_frame_1based)-1
+            raw = read_gray_image(self.image_paths[index])
+            reference = normalize_to_uint8(raw)
+            mask, record, _ = _core._resolve_specimen_mask(reference, self.field_roi, {"mask": self.dic_mask_settings()})
+            self.current_preview_index = index
+            self.current_fullres_img8 = reference
+            self._canvas_shows_field_overlay = False
+            rgb = cv2.cvtColor(reference, cv2.COLOR_GRAY2RGB)
+            if mask is not None:
+                rgb[~mask] = (.45*rgb[~mask]+.55*np.array([220,55,55])).astype(np.uint8)
+            height, width = reference.shape
+            self.display_img = cv2.resize(rgb, (max(1,round(width*self.display_scale)), max(1,round(height*self.display_scale))))
+            self.show_image()
+            self._show_image_workspace()
+            self.log(f"遮罩预览：{record.get('included_pixels', reference.size)} 个保留像素；排除区 {len(self.dic_mask_exclusions)} 个。请核对孔洞、背景和试样边缘。")
+        except Exception as exc:
+            messagebox.showerror("遮罩无效", str(exc))
+
+    def draw_dic_exclusion(self):
+        if self.field_roi is None or self.is_processing or self._completion_pending:
+            return
+        self.set_roi_mode(1)
+        if self.current_preview_index+1 != self.field_roi_reference_frame_1based:
+            self.status_var.set("请先切换到绘制全场 ROI 的参考帧。")
+            return
+        self._drawing_mask_exclusion = True
+        self.status_var.set("请拖出排除区域：孔洞、背景或无法跟踪的区域。")
+
+    def clear_dic_exclusions(self):
+        if self.is_processing or self._completion_pending:
+            return
+        self.dic_mask_exclusions = []
+        self._drawing_mask_exclusion = False
+        self.preview_dic_mask()
 
     def is_fullfield_mode(self):
         return str(self.analysis_mode.get()) == ANALYSIS_MODE_FULLFIELD
@@ -4330,70 +4893,70 @@ class MultiROIGUI:
                 "搜索半径 px",
                 self.search_radius,
                 7,
-                "在上一帧 ROI 周围搜索模板匹配候选位置的半径，单位 px。调大可容忍更大帧间位移，但更慢且更容易误匹配；调小更严格，但真实位移超过半径时会失败。",
+                "在上一次找到的位置周围，最多再找多少个像素。填正整数；移动较大时可调大，计算会更慢，也更可能找到相似但错误的位置。",
             ),
             (
                 "hard_corr_entry",
                 "严格接受阈值",
                 self.hard_corr,
                 7,
-                "两个 ROI 的归一化相关系数都高于该值时才直接接受。调大更保守、拒绝更多低质量帧；调小可减少 NaN，但误接受风险升高。范围应在 -1 到 1。",
+                "两个测量框与原有纹理至少要多相似才通过检查，分数越接近 1 越相似。填 -1 到 1；调高会拒绝更多图片，调低也更容易接受错误位置。",
             ),
             (
                 "soft_corr_entry",
                 "弱接受阈值",
                 self.soft_corr,
                 7,
-                "启用自适应弱接受时使用的较低相关阈值，必须不高于严格接受阈值。调小可挽回困难帧，但需要依赖应变连续性和 FB 检查控制误匹配。",
+                "允许较难识别的图片再接受额外检查时，纹理相似分数的最低值。不得高于严格接受阈值；只有勾选“启用自适应弱接受”时生效。",
             ),
             (
                 "max_frame_strain_jump_entry",
                 "单帧应变突变上限",
                 self.max_frame_strain_jump,
                 8,
-                "限制相邻有效帧工程应变的最大跳变；留空会禁用该连续性检查。调大可容忍快速变形，调小会更容易拒绝真实突变或噪声尖峰。",
+                "相邻两张有效图片之间，允许伸缩比例改变多少。0.01 表示相差 1 个百分点；调大允许变化更快，留空关闭这项检查。",
             ),
             (
                 "fb_tolerance_entry",
                 "FB 容差 px",
                 self.fb_tolerance_px,
                 7,
-                "前后向一致性检查的允许误差，单位 px。调小更严格、可减少漂移；调大接受更多候选但误匹配风险增加。仅在启用 FB 检查时生效。",
+                "FB 是先向后追踪、再返回前一张图片检查位置。这里填返回位置允许偏离原位置多少个像素；调小更严格，仅在勾选前后向检查时生效。",
             ),
             (
                 "template_alpha_entry",
                 "模板跟随系数",
                 self.template_alpha,
                 7,
-                "接受新位置后更新模板的权重，0 表示几乎保持旧模板，1 表示完全换成当前帧 patch。调大适合外观逐渐变化，但过大可能累积漂移。",
+                "找到新位置后，用当前图片的纹理替换原有追踪模板的比例。填 0 到 1；0 保留原模板，1 完全替换。仅在勾选模板跟随时生效，过大可能逐渐跟错位置。",
             ),
             (
                 "min_texture_std_entry",
                 "最小灰度标准差",
                 self.min_texture_std,
                 8,
-                "ROI 纹理质量提醒阈值，低于该灰度标准差说明区域可能太平坦。调大更严格；调小会放过低纹理区域，但相关匹配可能不稳定。",
+                "灰度标准差表示测量框里明暗变化有多明显。低于填写值时会提醒纹理太平坦、难以追踪；调高会更容易出现提醒，不会让图片本身变清晰。",
             ),
             (
                 "min_texture_contrast_entry",
                 "最小 P95-P5 对比度",
                 self.min_texture_contrast,
                 8,
-                "ROI 灰度 P95-P5 对比度提醒阈值，用于发现散斑/纹理不足。调大更保守；调小可接受低对比图，但需结合 QC 和 overlay 复查。",
+                "P95-P5 是较亮与较暗像素的灰度差，忽略最亮和最暗各 5%。差值低于这里填写的数时，提醒测量框的明暗对比不足；调高会更容易提醒。",
             ),
             (
                 "max_saturated_frac_entry",
                 "最大近黑/近白比例",
                 self.max_saturated_frac,
                 8,
-                "ROI 中近黑或近白饱和像素比例上限。调小会更早提示曝光问题；调大可放过饱和区域，但饱和纹理会削弱相关匹配可靠性。范围 0 到 1。",
+                "允许测量框里接近全黑或全白的像素占多少，填 0 到 1，例如 0.2 是 20%。超过时提醒可能曝光不足或过亮；调小会更早提醒。",
             ),
             (
                 "overlay_every_entry",
                 "overlay 间隔",
                 self.overlay_every,
                 7,
-                "勾选导出追踪 overlay 时，每隔多少帧保存一张叠加检查图。数值调小检查更密但文件更多；调大文件少但可能漏掉短暂漂移。",
+                "勾选“叠加图像”后，每隔多少张图片保存一次带测量框的检查图。填正整数；数值小会保存更多图片，便于查看是否跟错位置。",
             ),
         ]
         self.advanced_frame.columnconfigure(1, weight=1)
@@ -4416,8 +4979,7 @@ class MultiROIGUI:
 
         option_row = len(advanced_fields)
         adaptive_tip = (
-            "勾选后，严格相关未通过但弱相关、应变连续性和 FB 检查通过的帧可被 adaptive 接受。"
-            "不勾选时只接受严格相关帧，更保守但可能产生更多 NaN。"
+            "勾选后，纹理不够相似的图片仍可按较低相似下限和其他已启用检查判断。取消后只接受严格检查通过的图片，未通过的位置会留空。"
         )
         self.enable_adaptive_check = ttk.Checkbutton(self.advanced_frame, text="启用自适应弱接受", variable=self.enable_adaptive)
         self.enable_adaptive_check.grid(
@@ -4425,8 +4987,7 @@ class MultiROIGUI:
         )
         self.add_tooltip(self.enable_adaptive_check, adaptive_tip)
         template_follow_tip = (
-            "勾选后，每个接受帧都会按模板跟随系数更新 ROI 模板，适合亮度或形貌逐渐变化的序列。"
-            "不勾选则始终更接近参考模板，漂移风险较低，但大变形或光照变化时可能更容易拒绝。"
+            "勾选后，用每次找到的图片块逐渐更新追踪纹理，更新比例由“模板跟随系数”决定。取消后保留参考图片的纹理；跟随可适应外观变化，也可能逐渐跟错位置。"
         )
         self.use_prev_frame_template_check = ttk.Checkbutton(
             self.advanced_frame,
@@ -4438,8 +4999,7 @@ class MultiROIGUI:
         )
         self.add_tooltip(self.use_prev_frame_template_check, template_follow_tip)
         fb_tip = (
-            "勾选后会把当前候选 patch 反向匹配回上一有效帧，并用 FB 容差判断一致性。"
-            "不勾选可减少计算和避免过严拒绝，但自适应接受缺少一层误匹配保护。"
+            "勾选后，找到新位置还会反向追踪回上一张有效图片；返回位置偏差超过“FB 容差”就不接受。取消可减少计算，但少了这项位置核对。"
         )
         self.enable_fb_check_check = ttk.Checkbutton(self.advanced_frame, text="前后向一致性检查", variable=self.enable_fb_check)
         self.enable_fb_check_check.grid(
@@ -4460,29 +5020,25 @@ class MultiROIGUI:
         self.roi1_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.roi1_button,
-            "切换到 ROI 1 绘制模式；在参考帧上按住鼠标左键拖出矩形。"
-            "建议覆盖清晰散斑或稳定纹理，避免边界、反光、裂纹尖端或会消失的区域。",
+            "点击后，在参考图片上按住左键拖出第一个测量框（ROI 1）。框内要有清楚的斑点或纹理，程序将追踪这个位置；画完会切换到第二个框。",
         )
         self.roi2_button = ttk.Button(tool_row, text="画 ROI 2", command=lambda: self.set_roi_mode(2), style="Compact.TButton")
         self.roi2_button.grid(row=0, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.roi2_button,
-            "切换到 ROI 2 绘制模式；ROI 2 与 ROI 1 的中心距就是虚拟引伸计初始标距 L0。"
-            "两个 ROI 太近会放大噪声，太远则更容易受视场边界或局部非均匀变形影响。",
+            "点击后，在参考图片上按住左键拖出第二个测量框（ROI 2）。程序比较两个框中心之间的距离变化；画好后点“添加 ROI 组”保存这一对。",
         )
         self.align_x_button = ttk.Button(tool_row, text="水平对齐 · x", command=lambda: self.align_current_pair("x", set_mode=True), style="Compact.TButton")
         self.align_x_button.grid(row=1, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.align_x_button,
-            "强制 ROI1/ROI2 中心 y 坐标相同，并把应变方向设为 x。"
-            "适合左右分开的标距；如果实际标距不是水平的，强制对齐会改变物理测量方向。",
+            "点击把两个测量框移到同一水平线上，并切换为测量左右间距（x 方向）。位置会改变，适合测量部位左右排列的图片。",
         )
         self.align_y_button = ttk.Button(tool_row, text="垂直对齐 · y", command=lambda: self.align_current_pair("y", set_mode=True), style="Compact.TButton")
         self.align_y_button.grid(row=1, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.align_y_button,
-            "强制 ROI1/ROI2 中心 x 坐标相同，并把应变方向设为 y。"
-            "适合上下分开的标距；如果实际标距不是垂直的，强制对齐会改变物理测量方向。",
+            "点击把两个测量框移到同一垂直线上，并切换为测量上下间距（y 方向）。位置会改变，适合测量部位上下排列的图片。",
         )
 
         roi_summary_frame = ttk.Frame(group_frame, style="Card.TFrame", padding=(0, 4))
@@ -4498,15 +5054,14 @@ class MultiROIGUI:
         self.current_roi_summary_label.grid(row=0, column=0, sticky="ew")
         self.add_tooltip(
             self.current_roi_summary_label,
-            "汇总当前正在编辑的 ROI 尺寸、中心距、L0、实际应变方向和纹理质量；用于在添加 ROI 组前发现低纹理、小 L0 或方向错误。",
+            "显示当前两个测量框的尺寸、测量方向和图像是否容易识别。L0 是参考图片上的初始间距；添加为一组前，可在这里核对。",
         )
 
         form_row = ttk.Frame(group_frame, style="Card.TFrame")
         form_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         form_row.columnconfigure((1, 3), weight=1)
         group_name_tip = (
-            "给当前 ROI 组命名，留空会自动使用 G01、G02 等名称。"
-            "建议用样品位置或重复编号命名，避免多个 ROI 组导出后难以追溯。"
+            "给这一对测量框起个名称，如“样品左侧”。添加或更新时会使用这个名称；留空会自动编号为 G01、G02 等，也会用于结果文件名。"
         )
         self.group_name_label = ttk.Label(form_row, text="组名：")
         self.group_name_label.grid(row=0, column=0, padx=(0, 4), pady=2, sticky="w")
@@ -4515,8 +5070,7 @@ class MultiROIGUI:
         self.group_name_entry.grid(row=0, column=1, padx=(0, 8), pady=2, sticky="ew")
         self.add_tooltip(self.group_name_entry, group_name_tip)
         role_tip = (
-            "选择该 ROI 组在泊松比导出中的角色。普通组只导出自身应变；拉伸方向和横向方向成对存在时才会导出泊松比。"
-            "误用风险：把同一物理方向同时标为轴向和横向，会让泊松比没有明确物理意义。"
+            "说明这组测量沿拉伸方向还是垂直于拉伸方向，添加或更新后生效。泊松比表示横向收缩与纵向伸长的比值，需两种角色同时存在。"
         )
         self.roi_role_label = ttk.Label(form_row, text="角色：", style="Key.TLabel")
         self.roi_role_label.grid(row=0, column=2, padx=(0, 4), pady=2, sticky="w")
@@ -4530,13 +5084,16 @@ class MultiROIGUI:
         )
         self.roi_role_box.grid(row=0, column=3, pady=2, sticky="ew")
         self.roi_role_box.bind("<<ComboboxSelected>>", self.sync_roi_role_from_display)
-        self.add_tooltip(self.roi_role_box, role_tip)
+        self.add_tooltip(self.roi_role_box, role_tip, choices={
+            "普通": "只计算这组的距离变化，不参加泊松比计算，首次只测伸缩可选此项。",
+            "拉伸方向": "这对框测量沿样品受拉方向的伸长，作为泊松比计算中的纵向测量。",
+            "横向方向": "这对框测量垂直于样品受拉方向的收缩，需同时添加拉伸方向组才能计算泊松比。",
+        })
         self.add_group_button = ttk.Button(form_row, text="添加 ROI 组", command=self.add_current_group, style="Secondary.TButton")
         self.add_group_button.grid(row=1, column=0, columnspan=4, pady=(6, 2), sticky="ew")
         self.add_tooltip(
             self.add_group_button,
-            "把当前 ROI1/ROI2 保存为一组虚拟引伸计；每组会独立追踪并导出应变曲线。"
-            "添加前请确认两个 ROI 位于同一参考帧，且中心距 L0 与目标测量方向一致。",
+            "点击把当前两个测量框、名称、方向和角色保存到下方列表。每组会单独计算一条伸缩曲线；先在同一参考图片上画好两个框。",
         )
 
         action_row = ttk.Frame(group_frame, style="Card.TFrame")
@@ -4546,29 +5103,25 @@ class MultiROIGUI:
         self.update_group_button.grid(row=0, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.update_group_button,
-            "用当前 ROI1/ROI2 覆盖列表中选中的组；适合发现 ROI 位置、方向或角色设置不合适后修正。"
-            "误点会改变该组后续分析模板，建议更新前先载入并确认选中组。",
+            "先选中列表中的一组，再点击，用当前两个测量框、名称、方向和角色替换该组设置。下一次分析将使用更新后的设置。",
         )
         self.load_group_button = ttk.Button(action_row, text="载入选中", command=self.load_selected_group, style="Compact.TButton")
         self.load_group_button.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.load_group_button,
-            "把列表中选中的 ROI 组载回当前编辑状态，便于检查、微调或更新。"
-            "载入本身不会改变导出结果，只有随后点击更新选中组才会覆盖原组。",
+            "先选中列表中的一组，再点击，显示它的两个测量框并填回名称、方向和角色。修改后点击“更新选中”才会保存到这组。",
         )
         self.delete_group_button = ttk.Button(action_row, text="删除选中", command=self.delete_selected_group, style="Danger.TButton")
         self.delete_group_button.grid(row=1, column=1, pady=2, sticky="ew")
         self.add_tooltip(
             self.delete_group_button,
-            "从列表中删除选中的 ROI 组；不会删除已经导出的文件，但本次重新分析时该组不再参与计算。"
-            "如果用于泊松比，删除轴向或横向组会导致泊松比无法导出。",
+            "先选中一组，再点击并确认删除。这组将不再参加后续分析，已经保存的结果文件会保留。",
         )
         self.clear_rois_button = ttk.Button(action_row, text="清除当前 ROI", command=self.clear_current_rois, style="Danger.TButton")
         self.clear_rois_button.grid(row=1, column=0, padx=(0, 6), pady=2, sticky="ew")
         self.add_tooltip(
             self.clear_rois_button,
-            "只清空当前正在编辑的 ROI1/ROI2；已经添加到列表中的 ROI 组不受影响。"
-            "适合重画当前框，若要移除已保存的组请使用删除选中组。",
+            "点击并确认后，清空当前正在画的两个测量框，便于重新绘制；列表中已保存的分组会保留。也可按 Esc。",
         )
 
         tree_frame = ttk.Frame(group_frame, style="Card.TFrame")
@@ -4591,15 +5144,17 @@ class MultiROIGUI:
         tree_scroll_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.group_tree.xview)
         self.group_tree.configure(xscrollcommand=tree_scroll_x.set)
         tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.add_tooltip(tree_scroll_x, "左右拖动查看分组表格中被隐藏的列，如测量框的位置和尺寸。")
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.group_tree.yview)
         tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.add_tooltip(tree_scroll_y, "上下拖动查看列表中更多已保存的测量组。")
         self.group_tree.configure(yscrollcommand=tree_scroll_y.set)
         self.group_tree.bind("<Double-1>", lambda event: self.load_selected_group())
         self.group_tree.bind("<<TreeviewSelect>>", lambda _event: self.update_workflow_action_states())
         self.group_tree.bind("<Button-3>", self._show_group_tree_context_menu)  # 右键菜单
         self.add_tooltip(
             self.group_tree,
-            "显示已添加的 ROI 组、角色、实际方向和 L0。双击载入，右键可载入/更新/删除选中组。",
+            self._group_table_help,
         )
 
     def _build_image_section(self, parent):
@@ -4611,10 +5166,10 @@ class MultiROIGUI:
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         toolbar.columnconfigure(5, weight=1)
         buttons = [
-            ("btn_zoom_out", "−", lambda: self.zoom_image(1 / 1.25), 3, "缩小 · Ctrl + -"),
-            ("btn_zoom_in", "+", lambda: self.zoom_image(1.25), 3, "放大 · Ctrl + +"),
-            ("btn_fit", "适应窗口", self.fit_image_to_view, 8, "完整显示图像 · Ctrl + F"),
-            ("btn_1to1", "1:1", self.show_image_1to1, 4, "按原始像素显示；用滚动条检查图像边缘。"),
+            ("btn_zoom_out", "−", lambda: self.zoom_image(1 / 1.25), 3, "点击缩小图片，看到更大的范围（Ctrl + 减号）。只改变显示大小。"),
+            ("btn_zoom_in", "+", lambda: self.zoom_image(1.25), 3, "点击放大图片，便于看清纹理和画框（Ctrl + 加号）。超出窗口的部分可用滚动条查看。"),
+            ("btn_fit", "适应窗口", self.fit_image_to_view, 8, "点击把整张原图缩放到窗口内（Ctrl + F）。窗口大小改变时会自动调整，测量框仍对应原图位置。"),
+            ("btn_1to1", "1:1", self.show_image_1to1, 4, "点击按原始像素大小显示图片，一个图片像素对应一个显示像素。图片较大时，拖动滚动条查看边缘。"),
         ]
         for col, (attr, text, command, width, tip) in enumerate(buttons):
             button = ttk.Button(toolbar, text=text, command=command, style="Compact.TButton", width=width)
@@ -4624,6 +5179,7 @@ class MultiROIGUI:
         self.zoom_label_var = tk.StringVar(value="—")
         self.zoom_label = ttk.Label(toolbar, textvariable=self.zoom_label_var, style="Hint.TLabel", width=7, anchor="center")
         self.zoom_label.grid(row=0, column=4, padx=(2, 4))
+        self.add_tooltip(self.zoom_label, "显示图片相对原始像素大小的比例。100% 是原始大小，200% 是放大到两倍；可用加减按钮或滚轮调整。")
         self.canvas = tk.Canvas(self.image_frame, bg="#111827", cursor="crosshair", highlightthickness=0,
                                 width=400, height=260, xscrollincrement=1, yscrollincrement=1)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -4631,6 +5187,8 @@ class MultiROIGUI:
         scroll_y = ttk.Scrollbar(self.image_frame, orient=tk.VERTICAL, command=self.canvas.yview)
         scroll_x.grid(row=2, column=0, sticky="ew")
         scroll_y.grid(row=1, column=1, sticky="ns")
+        self.add_tooltip(scroll_x, "左右拖动查看放大图片的左侧或右侧，画出的测量框仍按原图位置记录。")
+        self.add_tooltip(scroll_y, "上下拖动查看放大图片的顶部或底部，便于检查窗口之外的测量位置。")
         self.canvas.configure(xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
@@ -4644,7 +5202,13 @@ class MultiROIGUI:
                                              style="Hint.TLabel", wraplength=600, justify=tk.LEFT)
         self.image_context_label.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.image_frame.bind("<Configure>", lambda event: self.image_context_label.configure(wraplength=max(240, event.width - 24)))
-        self.add_tooltip(self.canvas, "在图像内拖出矩形 ROI；滚轮围绕指针缩放，滚动条可查看原始图像边缘。")
+        self.add_tooltip(self.canvas, lambda _event: (
+            "按住左键拖出不想计算的矩形区域，松开后会添加一个排除框。滚轮缩放图片；红色区域表示被排除的位置。"
+            if self._drawing_mask_exclusion else
+            "在参考图片上按住左键拖出要分析的矩形区域，松开后保存范围。滚轮缩放图片，滚动条移动视图。"
+            if self.is_fullfield_mode() else
+            f"在参考图片上按住左键拖出第 {self.current_roi_index} 个测量框，松开后保存。两个框画好后点“添加 ROI 组”；滚轮可缩放图片。"))
+        self.add_tooltip(self.image_context_label, "显示当前图片名称、序号和尺寸，以及用来比较变形的参考图片。px 表示像素；绘制提示说明现在要画哪个测量框。")
 
     def _draw_image_empty_state(self):
         if not hasattr(self, "canvas") or self.display_img is not None:
@@ -4698,9 +5262,9 @@ class MultiROIGUI:
         preset_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         preset_bar.columnconfigure((0, 1, 2), weight=1, uniform="export")
         presets = [
-            ("export_research_preset_button", "推荐", self._apply_research_preset, "核心 TXT、应变 PNG、QC 摘要和参数记录。"),
-            ("export_quick_preset_button", "快速查看", self._apply_quick_view_preset, "应变 PNG 和 QC 摘要。"),
-            ("export_all_preset_button", "完整导出", self._apply_all_export_preset, "包括 Origin OPJU；需要本机 OriginPro 和 originpro 包。"),
+            ("export_research_preset_button", "推荐", self._apply_research_preset, "点击自动勾选数值表格、伸缩曲线图片、质量摘要和参数记录，其余选项取消。开始分析后才会生成文件。"),
+            ("export_quick_preset_button", "快速查看", self._apply_quick_view_preset, "点击只保留伸缩曲线图片和质量摘要，取消其他导出选项。适合先查看分析效果，开始分析后才会生成文件。"),
+            ("export_all_preset_button", "完整导出", self._apply_all_export_preset, "点击勾选所有导出内容，分析时会保存更多文件。包括 Origin 绘图软件的工程文件，需本机装有 OriginPro 和相应连接组件。"),
         ]
         for col, (attr, text, command, tip) in enumerate(presets):
             button = ttk.Button(preset_bar, text=text, command=command, style="Compact.TButton")
@@ -4708,15 +5272,15 @@ class MultiROIGUI:
             setattr(self, attr, button)
             self.add_tooltip(button, tip)
         options = [
-            ("Origin TXT", self.export_origin_txt, "Frame、EngineeringStrain、TrueStrain 三列核心数据。"),
-            ("应变 PNG", self.export_engineering_png, "各 ROI 组的工程应变曲线。"),
-            ("QC 摘要", self.export_qc_summary, "接受 / 拒绝帧和相关系数统计。"),
-            ("参数记录", self.export_parameters, "保存参数与接受统计，便于追溯。"),
-            ("完整 CSV", self.export_full_csv, "完整追踪数据和 ROI 坐标历史。"),
-            ("相关系数 PNG", self.export_corr_plot, "相关系数随帧变化的曲线。"),
-            ("叠加图像", self.export_overlays, "按高级设置中的间隔保存追踪叠加图。"),
-            ("论文图表包", self.export_publication_figures, "600 dpi PNG/TIFF 和 PDF/SVG/EPS 矢量图。"),
-            ("Origin OPJU", self.export_origin_opju, "需要 OriginPro 2021+ 和 originpro 包；不满足环境时记录导出失败。"),
+            ("Origin TXT", self.export_origin_txt, "勾选后保存可导入 Origin 或表格软件的文本数据：图片序号、相对初始距离的伸缩比例、按距离比取对数的真应变。无需安装 Origin。"),
+            ("应变 PNG", self.export_engineering_png, "勾选后，给每组保存一张伸缩曲线图片。纵轴是距离变化除以初始距离，例如 0.01 表示伸长 1%。PNG 是常见图片格式。"),
+            ("QC 摘要", self.export_qc_summary, "QC 表示质量检查。勾选后保存哪些图片通过或未通过检查、纹理相似程度等摘要，便于判断结果是否需要复查。"),
+            ("参数记录", self.export_parameters, "勾选后把本次使用的分析设置和通过检查的数量保存为文本，方便以后核对或重复分析。"),
+            ("完整 CSV", self.export_full_csv, "勾选后保存详细表格，包括每张图片上的测量框位置、伸缩值和检查结果。CSV 是可用 Excel 等表格软件打开的文本表格。"),
+            ("相关系数 PNG", self.export_corr_plot, "勾选后保存纹理相似程度随图片序号变化的曲线图。分数越接近 1 越相似，突然下降的位置值得复查。"),
+            ("叠加图像", self.export_overlays, "勾选后按“高级设置”中的间隔保存带追踪框的原图，用来检查框是否始终跟在同一部位。"),
+            ("论文图表包", self.export_publication_figures, "勾选后额外保存每英寸 600 个点的高清图片，以及放大后仍清晰的矢量图，便于排版或编辑。会增加文件数量。"),
+            ("Origin OPJU", self.export_origin_opju, "勾选后生成可在 Origin 绘图软件中继续编辑的工程文件。需要 OriginPro 2021 或更新版本及 originpro 连接组件；缺少时会报告生成失败。"),
         ]
         self.export_checkbuttons = []
         for idx, (text, variable, tip) in enumerate(options):
@@ -4729,75 +5293,88 @@ class MultiROIGUI:
         self.fullfield_export_info_frame.columnconfigure(0, weight=1)
         self.fullfield_export_info_label = ttk.Label(
             self.fullfield_export_info_frame,
-            text="每个有效变形帧导出 TXT / CSV、位移和应变 PNG。\n位移单位 px；应变无量纲；失败点保留 NaN。",
+            text="每张算出有效结果的图片都会保存数值表和移动、伸缩图。\n移动量以像素计；算不出的位置留空，不当作零。",
             style="Hint.TLabel", justify=tk.LEFT, wraplength=360)
         self.fullfield_export_info_label.grid(row=0, column=0, sticky="ew")
+        self.add_tooltip(self.fullfield_export_info_label, "全场分析会自动保存各测量点的数值表和结果图片。NaN 表示这里没有算出有效数值，不能按零移动或零伸缩理解。")
         self.fullfield_export_overlays_checkbutton = ttk.Checkbutton(
             self.fullfield_export_info_frame, text="额外导出 Exx 叠加图", variable=self.export_overlays)
         self.fullfield_export_overlays_checkbutton.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.add_tooltip(self.fullfield_export_overlays_checkbutton, "叠加在实际分析帧上的 Exx，用于视觉复核。")
+        self.add_tooltip(self.fullfield_export_overlays_checkbutton, "勾选后，额外把左右方向的伸缩值（Exx）用颜色画在对应的分析图片上，方便核对位置；分析结束时保存为图片。")
         self.export_hint_label = ttk.Label(self.analysis_frame, style="Hint.TLabel", justify=tk.LEFT, wraplength=360)
         self.export_hint_label.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.add_tooltip(self.export_hint_label, "导出选项决定下一次分析保存哪些文件。选好后点击“开始分析”，完成后可用顶部“打开输出”查看文件。")
 
-    def _build_run_section(self, parent):
-        self.run_frame = ttk.Frame(parent, style="Card.TFrame", padding=(12, 10))
-        self.run_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+    def _build_run_section(self, parent, row=2):
+        self.run_frame = ttk.Frame(parent, style="Card.TFrame", padding=(12, 6))
+        self.run_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.run_frame.columnconfigure(0, weight=1)
         self.run_state_var = tk.StringVar(value="待加载")
         self.run_state_label = ttk.Label(self.run_frame, textvariable=self.run_state_var, style="Badge.TLabel")
         self.run_state_label.grid(row=0, column=0, sticky="w")
+        self.add_tooltip(self.run_state_label, "显示当前是否可以分析、是否正在计算或需要补充设置。具体下一步操作在下方；失败后可按提示修正并重试。")
         ttk.Label(self.run_frame, text="Ctrl + Enter", style="Hint.TLabel").grid(row=0, column=1, sticky="e")
         self.workflow_hint_label = ttk.Label(self.run_frame, textvariable=self.workflow_hint_var,
                                              style="Hint.TLabel", wraplength=360, justify=tk.LEFT)
-        self.workflow_hint_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 8))
-        self.add_tooltip(self.workflow_hint_label, "显示当前分析条件与下一步操作；如有质量提示，可在“质量与日志”查看完整检查结果和原因。")
+        self.workflow_hint_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        self.add_tooltip(self.workflow_hint_label, "这里告诉你下一步需要做什么。出现质量提醒时，点击“质量与日志”查看具体图片或参数需要检查的原因。")
         self.start_button = ttk.Button(self.run_frame, text="开始分析", command=self.start_processing, style="Primary.TButton")
         self.start_button.grid(row=2, column=0, columnspan=2, sticky="ew")
-        self.add_tooltip(self.start_button, "检查通过后开始分析并导出结果；Ctrl + Enter。运行时可在“质量与日志”查看详细信息。")
+        self.add_tooltip(self.start_button, "点击按当前图片范围、测量框和参数开始计算（Ctrl + Enter）。完成后显示结果图，并把选定文件保存到输出文件夹。")
         self.progress_value = tk.DoubleVar(value=0)
         self.progress_percent_var = tk.StringVar(value="0%")
         self.progress_value.trace_add("write", lambda *_args: self.progress_percent_var.set(f"{self.progress_value.get():.0f}%"))
         self.progress = ttk.Progressbar(self.run_frame, orient=tk.HORIZONTAL, mode="determinate", variable=self.progress_value)
         self.progress.grid(row=3, column=0, sticky="ew", pady=(10, 6), padx=(0, 8))
+        self.add_tooltip(self.progress, "显示本次计算已处理的比例。计算后还会保存文件并更新图表，请等状态显示“处理完成”后再进行下一次分析。")
         ttk.Label(self.run_frame, textvariable=self.progress_percent_var, style="Hint.TLabel").grid(row=3, column=1, sticky="e")
         self.status_var = tk.StringVar(value="未加载图像")
         self.preview_scale_var = tk.StringVar(value="")
         self.status_label = ttk.Label(self.run_frame, textvariable=self.status_var, style="Hint.TLabel",
                                        wraplength=360, justify=tk.LEFT)
         self.status_label.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.add_tooltip(self.status_label, "显示最近的操作、计算进度或错误原因。需要查看更完整的记录时，点击“质量与日志”。")
 
     def _build_quality_section(self, parent):
         parent.rowconfigure(0, weight=0)
-        parent.rowconfigure(1, weight=0)
-        parent.rowconfigure(2, weight=1)
-        preflight_frame = ttk.LabelFrame(parent, text="运行前检查", padding=12)
-        preflight_frame.grid(row=0, column=0, sticky="ew")
-        preflight_frame.columnconfigure(0, weight=1)
-        self.preflight_summary_label = tk.Text(preflight_frame, height=8, width=30, wrap=tk.WORD,
+        parent.rowconfigure(1, weight=1)
+        qc_frame = ttk.Frame(parent, style="Card.TFrame", padding=(0, 2))
+        qc_frame.grid(row=0, column=0, sticky="ew")
+        qc_frame.columnconfigure(1, weight=1)
+        ttk.Label(qc_frame, text="质量概览", style="Key.TLabel").grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        self.qc_overview_label = ttk.Label(qc_frame, textvariable=self.qc_overview_var,
+                                           style="Hint.TLabel", wraplength=500, justify=tk.LEFT)
+        self.qc_overview_label.grid(row=0, column=1, sticky="ew")
+        self.add_tooltip(self.qc_overview_label, "分析后显示多少张图片、多少个测量点通过了检查。找到纹理和算出伸缩是两项检查；未通过的位置留空，数值仍需结合原图核对。")
+        self.quality_notebook = ttk.Notebook(parent)
+        self.quality_notebook.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        self.preflight_page = ttk.Frame(self.quality_notebook, style="Card.TFrame", padding=8)
+        self.log_page = ttk.Frame(self.quality_notebook, style="Card.TFrame", padding=8)
+        for page in (self.preflight_page, self.log_page):
+            page.columnconfigure(0, weight=1)
+            page.rowconfigure(0, weight=1)
+        self.quality_notebook.add(self.preflight_page, text="运行前检查")
+        self.quality_notebook.add(self.log_page, text="运行日志")
+        self.add_tooltip(self.quality_notebook, "点击“运行前检查”查看开始分析需要补充什么；点击“运行日志”查看加载、计算、保存和错误的详细记录。两项均可滚动查看和复制。")
+        self.preflight_summary_label = tk.Text(self.preflight_page, height=5, width=30, wrap=tk.WORD,
                                                font=self.ui_base_font, relief=tk.FLAT, bg=self.panel_bg,
                                                fg=self.text_color, padx=10, pady=8, state=tk.DISABLED)
-        self.preflight_summary_label.grid(row=0, column=0, sticky="ew")
-        scrollbar = ttk.Scrollbar(preflight_frame, orient=tk.VERTICAL, command=self.preflight_summary_label.yview)
+        self.preflight_summary_label.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(self.preflight_page, orient=tk.VERTICAL, command=self.preflight_summary_label.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.preflight_summary_label.configure(yscrollcommand=scrollbar.set)
+        self.add_tooltip(self.preflight_summary_label, "这里列出开始分析前的检查。“阻止”项需要先修正；“警告”项可继续，但需检查原因。可拖动选中文字，再按 Ctrl + C 复制。")
+        self.add_tooltip(scrollbar, "上下拖动查看其他分析前检查项目和具体原因。")
         self.preflight_summary_var.trace_add("write", self._update_preflight_text)
-        qc_frame = ttk.LabelFrame(parent, text="质量概览", padding=12)
-        qc_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        qc_frame.columnconfigure(0, weight=1)
-        self.qc_overview_label = ttk.Label(qc_frame, textvariable=self.qc_overview_var,
-                                           style="Hint.TLabel", wraplength=600, justify=tk.LEFT)
-        self.qc_overview_label.grid(row=0, column=0, sticky="ew")
-        log_frame = ttk.LabelFrame(parent, text="运行日志", padding=8)
-        log_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(log_frame, width=30, height=4, wrap=tk.WORD, bg=self.panel_bg,
+        self.log_text = tk.Text(self.log_page, width=30, height=4, wrap=tk.WORD, bg=self.panel_bg,
                                 fg=self.text_color, font=self.ui_log_font, relief=tk.FLAT,
                                 padx=10, pady=8, state=tk.DISABLED)
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        self.log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_scroll = ttk.Scrollbar(self.log_page, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=self.log_scroll.set)
+        self.add_tooltip(self.log_text, "这里按发生顺序记录加载、计算、保存和错误信息。内容不能修改；可拖动选中文字，再按 Ctrl + C 复制，便于核查问题。")
+        self.add_tooltip(self.log_scroll, "上下拖动查看更早或更新的运行记录。")
         parent.bind("<Configure>", lambda event: self._resize_quality_labels(event.width))
 
     def _update_progress(self, value):
@@ -4806,7 +5383,7 @@ class MultiROIGUI:
             self.progress_value.set(value)
 
     def _resize_quality_labels(self, width):
-        self.qc_overview_label.configure(wraplength=max(220, width - 70))
+        self.qc_overview_label.configure(wraplength=max(220, width - 120))
 
     def _update_preflight_text(self, *_args):
         text = self.preflight_summary_label
@@ -4837,11 +5414,11 @@ class MultiROIGUI:
         self.viewer_export_btn = ttk.Button(viewer_btns, text="导出当前图", command=self.export_viewer_figure,
                                              style="Secondary.TButton", state=tk.DISABLED)
         self.viewer_export_btn.grid(row=0, column=1, padx=(0, 6))
-        self.add_tooltip(self.viewer_export_btn, "保存当前结果图，可选择 PNG 或 PDF；导出包含当前分量、坐标轴和色标。")
+        self.add_tooltip(self.viewer_export_btn, "点击选择文件名和位置，把当前显示的结果图保存为图片或 PDF 文档。图中的坐标轴、颜色刻度和当前查看范围会一起保存。")
         self.viewer_clear_btn = ttk.Button(viewer_btns, text="清除预览", command=self.clear_viewer,
                                             style="Compact.TButton", state=tk.DISABLED)
         self.viewer_clear_btn.grid(row=0, column=2)
-        self.add_tooltip(self.viewer_clear_btn, "清除应用内结果预览并恢复原图；已经导出的分析结果文件保持可用。")
+        self.add_tooltip(self.viewer_clear_btn, "点击清空这里的结果图，图像页面恢复原图。已保存的结果文件保留；要再次显示结果，可重新分析。")
         self.viewer_content_frame = ttk.Frame(self.viewer_frame, style="Card.TFrame")
         self.viewer_content_frame.grid(row=2, column=0, sticky="nsew")
         self.viewer_content_frame.columnconfigure(0, weight=1)
@@ -4946,6 +5523,10 @@ class MultiROIGUI:
         self.roi1 = None
         self.roi2 = None
         self.field_roi = None
+        self.dic_mask_exclusions = []
+        self._drawing_mask_exclusion = False
+        self.dic_mask_path.set("")
+        self.dic_mask_mode.set("矩形 ROI")
         self.roi1_reference_frame_1based = None
         self.roi2_reference_frame_1based = None
         self.field_roi_reference_frame_1based = None
@@ -5645,6 +6226,7 @@ class MultiROIGUI:
     def set_roi_mode(self, idx):
         if self.is_processing or self._completion_pending:
             return
+        self._drawing_mask_exclusion = False
         self._show_image_workspace()
         if self._canvas_shows_field_overlay:
             self._restore_sequence_preview()
@@ -5745,6 +6327,13 @@ class MultiROIGUI:
 
         inv = 1.0 / self.display_scale
         rx, ry, rw, rh = rect_normalize(x0 * inv, y0 * inv, x1 * inv, y1 * inv)
+        if self.is_fullfield_mode() and self._drawing_mask_exclusion:
+            self._drawing_mask_exclusion = False
+            if rw >= 1 and rh >= 1:
+                self.dic_mask_exclusions.append(clamp_rect((rx,ry,rw,rh), self.first_img8.shape))
+                self.preview_dic_mask()
+                self.update_workflow_action_states()
+            return
 
         if rw < 15 or rh < 15:
             messagebox.showwarning("ROI 太小", "ROI 太小。建议至少 30×30 px，且包含清晰散斑纹理。")
@@ -5755,6 +6344,7 @@ class MultiROIGUI:
 
         if self.is_fullfield_mode():
             self.field_roi = rect
+            self.dic_mask_exclusions = []
             self.field_roi_reference_frame_1based = reference_frame_1based
             self.log(f"全场 ROI = {rect}")
             self.log_roi_texture("全场 ROI", rect)
@@ -6089,13 +6679,22 @@ class MultiROIGUI:
 
         # 临时选中该行
         self.group_tree.selection_set(iid)
+        self.update_workflow_action_states()
 
         menu = tk.Menu(self.group_tree, tearoff=0)
-        menu.add_command(label="载入选中组", command=self.load_selected_group)
-        menu.add_command(label="更新选中组", command=self.update_selected_group)
+        menu.add_command(label="载入选中组", command=self.load_selected_group, state=self.load_group_button.cget("state"))
+        menu.add_command(label="更新选中组", command=self.update_selected_group, state=self.update_group_button.cget("state"))
         menu.add_separator()
-        menu.add_command(label="删除选中组", command=self.delete_selected_group)
-        menu.tk_popup(event.x_root, event.y_root)
+        menu.add_command(label="删除选中组", command=self.delete_selected_group, state=self.delete_group_button.cget("state"))
+        actions = {0: self.load_group_button, 1: self.update_group_button, 3: self.delete_group_button}
+        self.add_tooltip(menu, lambda _event: actions[menu.index("active")]._tooltip.resolve_text()
+                         if menu.index("active") in actions else "")
+        menu.bind("<<MenuSelect>>", menu._tooltip.schedule, add="+")
+        menu.bind("<Unmap>", lambda _event: self.root.after_idle(menu.destroy), add="+")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def refresh_group_tree(self):
         self.group_tree.delete(*self.group_tree.get_children())
@@ -6307,6 +6906,11 @@ class MultiROIGUI:
             "dic_zncc_min": self.get_float_setting(self.dic_zncc_min, "ZNCC 下限"),
             "dic_pyramid_levels": self.get_int_setting(self.dic_pyramid_levels, "金字塔层数"),
             "dic_pyramid_scale": self.get_float_setting(self.dic_pyramid_scale, "金字塔缩放"),
+            "strain_degree": self.get_int_setting(self.dic_strain_degree, "拟合阶次"),
+            "robust_strain": bool(self.dic_robust_strain.get()),
+            "reject_nonconverged": bool(self.dic_reject_nonconverged.get()),
+            "outlier_threshold_px": self.get_float_setting(self.dic_outlier_threshold, "异常位移阈值"),
+            "mask": self.dic_mask_settings(),
         }
         return validate_fullfield_snapshot(snapshot)
 
@@ -6424,6 +7028,12 @@ class MultiROIGUI:
             "dic_zncc_min": float(self.dic_zncc_min.get()) if is_ff else 0.75,
             "dic_pyramid_levels": int(self.dic_pyramid_levels.get()) if is_ff else 1,
             "dic_pyramid_scale": float(self.dic_pyramid_scale.get()) if is_ff else 0.5,
+            "strain_degree": int(self.dic_strain_degree.get()) if is_ff else 2,
+            "robust_strain": bool(self.dic_robust_strain.get()) if is_ff else True,
+            "reject_nonconverged": bool(self.dic_reject_nonconverged.get()) if is_ff else False,
+            "outlier_threshold_px": float(self.dic_outlier_threshold.get()) if is_ff else 1.0,
+            "mask": self.dic_mask_settings() if is_ff else {"mode": "none"},
+            "display": self.dic_display_options() if is_ff else {},
         }
 
     def post_to_ui(self, callback, run_token=None):
@@ -7351,6 +7961,17 @@ class MultiROIGUI:
             if reference_filename is not None
             else provenance.get("reference_filename", field.get("reference_filename", previous_reference_filename))
         )
+        options = field.get("display_options") or {}
+        if options:
+            self.dic_view_background.set({"none": "无底图", "reference": "参考图", "deformed": "变形图"}.get(options.get("background", "none"), "无底图"))
+            self.dic_color_mode.set({"range": "数据范围", "symmetric": "零点对称", "manual": "手动范围"}.get(options.get("color_mode", "range"), "数据范围"))
+            self.dic_display_style.set("测量点" if options.get("style") == "points" else "连续云图")
+            self.dic_percent.set(bool(options.get("percent", False)))
+            self.dic_colormap.set(options.get("cmap", "RdBu_r"))
+            self.dic_color_min.set(str(options.get("vmin", "")))
+            self.dic_color_max.set(str(options.get("vmax", "")))
+        if "deformed_image" not in field and self.dic_last_image is not None:
+            field["deformed_image"] = self.dic_last_image
         self._viewer_kind = "fullfield"
         if component:
             self.dic_field_component.set(component)
@@ -7366,6 +7987,7 @@ class MultiROIGUI:
         self.viewer_export_btn.config(state=tk.NORMAL)
         self.viewer_clear_btn.config(state=tk.NORMAL)
         self._update_field_viewer_overlay()
+        self.show_visual_window()
         self.workspace_notebook.select(self.results_page)
         self.log("已更新全场 DIC 色图预览（可切换 u/v/Exx/Eyy/Exy）。")
 
@@ -7390,6 +8012,7 @@ class MultiROIGUI:
                 self.dic_last_image,
                 self.dic_last_field,
                 component=component,
+                options={"coordinate_frame": "deformed", "background": "none"},
             )
             self.auto_fit_enabled = False
             self.display_img = overlay
@@ -7412,21 +8035,20 @@ class MultiROIGUI:
         component = str(self.dic_field_component.get() or "u")
         if component not in DIC_FIELD_COMPONENTS:
             component = "u"
-        cmap = matplotlib.colormaps["viridis" if component == "zncc" else "RdBu_r"].copy()
+        cmap = matplotlib.colormaps["viridis" if component == "zncc" else self.dic_colormap.get()].copy()
         cmap.set_bad(self.panel_bg)
         mesh = render_dic_field_on_axes(ax, self.dic_last_field, component, cmap=cmap)
         values = np.asarray(self.dic_last_field[component], dtype=float)
-        finite = values[np.isfinite(values)]
-        if component == "zncc":
-            mesh.set_clim(0.0, 1.0)
-        elif finite.size:
-            limit = max(float(np.max(np.abs(finite))), 1e-12)
-            mesh.set_clim(-limit, limit)
-        unit = "px" if component in ("u", "v") else "-"
-        cbar = add_dic_colorbar(fig, ax, mesh, f"{component} ({unit})", preset_name="raw_inspection")
+        unit = "px" if component in ("u", "v") else ("%" if self.dic_percent.get() and component != "zncc" else "1")
+        # Keep the equal-aspect specimen centered and its colorbar adjacent,
+        # including very tall ROIs in a wide independently resized window.
+        cax = make_axes_locatable(ax).append_axes("right", size=0.18, pad=0.24)
+        cbar = fig.colorbar(mesh, cax=cax)
+        _core.style_dic_colorbar(cbar, get_plot_preset("raw_inspection"), f"{component} ({unit})")
         ax.set_title(f"全场 {DIC_COMPONENT_LABELS.get(component, component)}")
         self._style_viewer_plot_fonts(ax)
         self._style_viewer_axes_dark(ax)
+        ax.grid(False)
         cbar.ax.yaxis.label.set_color(self.text_color)
         cbar.ax.tick_params(colors=self.muted_color)
         self._attach_viewer_canvas(fig)
@@ -7447,27 +8069,97 @@ class MultiROIGUI:
             state="readonly",
         )
         self.dic_component_box.grid(row=0, column=1, sticky="w")
+        toolbar = ttk.Frame(ctrl, style="Card.TFrame")
+        toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=4)
+        display_controls = (
+            (self.dic_view_background, 8, "选择结果颜色下方显示哪张图片，再点“应用”更新。", {
+                "无底图": "只显示测量结果颜色，便于看清数值分布。",
+                "参考图": "以开始分析时的参考图片作底图，便于核对最初的测量位置。",
+                "变形图": "以当前分析图片作底图，便于对照样品变形后的外观。",
+            }),
+            (self.dic_color_mode, 9, "选择颜色刻度的上下限如何确定，再点“应用”更新。", {
+                "数据范围": "按当前数据的最小值和最大值分配颜色，容易看出这一张图里的差别。",
+                "零点对称": "正负数使用同样大的颜色范围，便于比较伸长与缩短、向前与向后移动。",
+                "手动范围": "使用下方填写的最小值和最大值，便于让多张结果图采用相同刻度。",
+            }),
+            (self.dic_display_style, 8, "选择结果画成颜色区域还是单个测量点，再点“应用”更新。", {
+                "连续云图": "把有测量支持的位置画成连续的颜色区域，便于查看整体分布；空白处表示没有有效结果。",
+                "测量点": "逐个显示实际计算的点，便于查看测量点分布和未能计算的位置。",
+            }),
+            (self.dic_colormap, 8, "选择从小值到大值使用哪些颜色，再点“应用”更新。具体数值请对照图旁的颜色刻度。", {
+                "RdBu_r": "从蓝到白再到红，便于区分负值、接近零和正值；需结合颜色刻度判断。",
+                "viridis": "从深紫经绿色到黄色，通常用更亮的颜色表示更大的值。",
+                "cividis": "从深蓝到黄色，颜色和亮度一起变化，便于区分不同数值。",
+                "turbo": "从深蓝经青、绿、黄到红，色彩变化较多，需对照刻度读取数值。",
+            }),
+        )
+        for column, (variable, width, tip, choices) in enumerate(display_controls):
+            combo = ttk.Combobox(toolbar, textvariable=variable, values=list(choices), width=width, state="readonly")
+            combo.grid(row=0,column=column, padx=(0,5), sticky="w")
+            self.add_tooltip(combo, tip, choices=choices)
+        scales = ttk.Frame(ctrl, style="Card.TFrame")
+        scales.grid(row=2,column=0,columnspan=2,sticky="ew")
+        ttk.Label(scales,text="色标").grid(row=0,column=0,sticky="w",padx=(0,5))
+        for column, variable in enumerate((self.dic_color_min,self.dic_color_max), start=1):
+            entry = ttk.Entry(scales,textvariable=variable,width=9)
+            entry.grid(row=0,column=column,padx=(0,5))
+            limit = "最小" if column == 1 else "最大"
+            self.add_tooltip(entry, f"填写颜色刻度的{limit}值，只在“手动范围”下生效，填好后点“应用”。最小值必须小于最大值；移动量用像素，伸缩值勾选“应变 %”后用百分数。")
+        percent_check = ttk.Checkbutton(scales,text="应变 %",variable=self.dic_percent)
+        percent_check.grid(row=0,column=3,padx=(0,6))
+        self.add_tooltip(percent_check, "勾选后，伸缩值按百分数显示，例如 0.01 显示为 1%。取消后显示原始比例；点击“应用”更新，移动量仍以像素计。")
+        apply_button = ttk.Button(scales,text="应用",command=self.apply_dic_display_options,style="Compact.TButton")
+        apply_button.grid(row=0,column=4)
+        self.add_tooltip(apply_button, "点击用所选底图、颜色范围、绘图方式和单位重新显示当前结果，同时更新图像页面的叠加预览。这里只调整显示，不重新计算数据。")
+        display_button = ttk.Button(ctrl, style="Compact.TButton")
+        display_button.grid(row=0, column=2, sticky="e")
+        def toggle_display_settings():
+            self._dic_display_expanded = not getattr(self, "_dic_display_expanded", False)
+            update_display_settings()
+        def update_display_settings():
+            expanded = getattr(self, "_dic_display_expanded", False)
+            display_button.configure(text="收起显示设置" if expanded else "显示设置")
+            for frame in (toolbar, scales):
+                frame.grid() if expanded else frame.grid_remove()
+        display_button.configure(command=toggle_display_settings)
+        self.add_tooltip(display_button, "展开或收起底图、颜色刻度、百分数和绘图方式的设置，给结果图留出更多查看空间。")
+        update_display_settings()
         ttk.Label(
             ctrl,
             textvariable=self.field_viewer_context_var,
             style="Hint.TLabel",
             wraplength=360,
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         valid = np.asarray(self.dic_last_field.get("valid", []), dtype=bool)
         strain_valid = np.asarray(self.dic_last_field.get("strain_valid", []), dtype=bool)
-        summary = f"相关有效点 {np.count_nonzero(valid)}/{valid.size} · 应变有效点 {np.count_nonzero(strain_valid)}/{strain_valid.size} · 空白区域为 NaN"
-        ttk.Label(ctrl, text=summary, style="Hint.TLabel", wraplength=580).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        eligible_count = int(np.count_nonzero(self.dic_last_field.get("eligible", np.ones(valid.size))))
+        gauge = self.dic_last_field.get("strain_gauge_span_px", "未知")
+        summary = f"位移有效 {np.count_nonzero(valid)}/{eligible_count} · 应变有效 {np.count_nonzero(strain_valid)}/{eligible_count} · 应变窗口跨度 {gauge} px · 空白表示无有效结果"
+        summary_label = ttk.Label(ctrl, text=summary, style="Hint.TLabel", wraplength=580)
+        summary_label.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.add_tooltip(summary_label, "找到对应纹理后，还要利用周围足够多、分布合适的测量点计算伸缩，所以移动量与伸缩量的有效数量可能不同。空白或 NaN 表示没有有效数值，不能当作零。")
         ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
         self.dic_component_box.bind("<<ComboboxSelected>>", self._on_field_component_change)
         self.add_tooltip(
             self.dic_component_box,
-            "选择叠加/预览的场：位移 u/v、相关质量 zncc，或 Green-Lagrange / 无穷小应变分量。",
+            "选择要查看哪一种移动、伸缩或纹理相似程度，选择后立即更新结果图和图像页面的叠加预览。",
+            choices=DIC_COMPONENT_HELP,
         )
 
     def _on_field_component_change(self, _event=None):
         self._rebuild_field_viewer_plot()
         self._update_field_viewer_overlay()
+
+    def apply_dic_display_options(self):
+        if self.dic_last_field is None:
+            return
+        try:
+            options = self.dic_display_options()
+            self.dic_last_field["display_options"] = options
+            self._rebuild_field_viewer_plot()
+            self._update_field_viewer_overlay()
+        except Exception as exc:
+            messagebox.showerror("显示设置无效", str(exc))
 
     def show_results_viewer(self, df, groups):
         """Embed an interactive matplotlib figure showing engineering strain (and optionally Poisson)."""
@@ -7499,6 +8191,7 @@ class MultiROIGUI:
         self.viewer_placeholder.grid_remove()
         self.viewer_export_btn.config(state=tk.NORMAL)
         self.viewer_clear_btn.config(state=tk.NORMAL)
+        self.show_visual_window()
         self.workspace_notebook.select(self.results_page)
 
         self.log("已更新应用内结果曲线预览（支持缩放、平移、泊松比切换）。")
@@ -7609,11 +8302,66 @@ class MultiROIGUI:
         # when grid keeps the widget at its existing size (cropping colorbars).
         self.viewer_canvas._update_device_pixel_ratio()
         self.viewer_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
-        self.viewer_toolbar = NavigationToolbar2Tk(self.viewer_canvas, self.viewer_content_frame, pack_toolbar=False)
+        self.viewer_toolbar = HelpNavigationToolbar(self.viewer_canvas, self.viewer_content_frame, pack_toolbar=False)
+        self.viewer_toolbar.subplot_help = self._add_subplot_help
         self.viewer_toolbar.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        toolbar_help = {
+            "Home": "点击恢复结果图最初的查看范围，放大或移动后可用它返回全图。",
+            "Back": "点击返回上一次查看范围；只有放大或移动过结果图后才有可返回的记录。",
+            "Forward": "点击重回刚才返回前的查看范围；需要先使用“返回上一次”。",
+            "Pan": "点击开启移动模式，再在图内按住左键拖动，移动查看范围；右键拖动可缩放坐标轴。再点一次退出。",
+            "Zoom": "点击开启框选放大，再在图内按住左键拖出想看的范围；右键拖框可缩小。再点一次退出，房子图标可恢复全图。",
+            "Subplots": "点击打开图表边距和图间距调节窗口。当前结果图使用自动布局，手动间距设置可能不生效。",
+            "Save": "点击选择位置和文件格式，保存当前结果图，包含现在的坐标范围和颜色刻度。",
+        }
+        for name, button in self.viewer_toolbar._buttons.items():
+            button.configure(takefocus=True)
+            self.add_tooltip(button, toolbar_help[name])
+        self.add_tooltip(self.viewer_canvas.get_tk_widget(), self._result_plot_help)
+        self.add_tooltip(self.viewer_toolbar._message_label, "鼠标移到图中时，这里显示当前位置的坐标或数值；可对照坐标轴和颜色刻度读取。")
         self._style_viewer_toolbar()
         self.viewer_canvas.draw()
+
+    def _result_plot_help(self, _event=None):
+        mode = self.viewer_toolbar.mode.name
+        if mode == "PAN":
+            return "移动模式：按住左键拖动查看范围，右键拖动缩放坐标轴。再次点击工具栏的移动图标退出，房子图标恢复全图。"
+        if mode == "ZOOM":
+            return "框选模式：按住左键拖出要放大的范围，右键拖框缩小。再次点击放大镜图标退出，房子图标恢复全图。"
+        return ("这是移动量或伸缩量的彩色结果图，数值与单位在图旁的颜色刻度上。空白表示未算出有效结果；用下方图标移动、放大或保存。"
+                if self._viewer_kind == "fullfield" else
+                "横轴是图片序号，纵轴是伸缩比例或泊松比（横向收缩与纵向伸长的比值）。曲线断开表示没有有效结果；用下方图标移动、放大或保存。")
+
+    def _add_subplot_help(self, tool, window):
+        canvas = tool.figure.canvas.get_tk_widget()
+        if hasattr(canvas, "_tooltip"):
+            return
+        window.title("图表边距与间距")
+        tool.figure._suptitle.set_text("点击或拖动滑块调整；悬停查看说明")
+        controls = (
+            (tool.sliderleft, "左边界", "向右拖动会增加图表左侧留白。数值是边界位置相对整个图宽的比例。"),
+            (tool.sliderbottom, "下边界", "向右拖动会增加图表下方留白。数值是边界位置相对整个图高的比例。"),
+            (tool.sliderright, "右边界", "向左拖动会增加图表右侧留白。数值是边界位置相对整个图宽的比例。"),
+            (tool.slidertop, "上边界", "向左拖动会增加图表上方留白。数值是边界位置相对整个图高的比例。"),
+            (tool.sliderwspace, "左右间距", "向右拖动会增加并排图表之间的距离；只有多列图表时有明显作用。"),
+            (tool.sliderhspace, "上下间距", "向右拖动会增加上下图表之间的距离；只有多行图表时有明显作用。"),
+        )
+        regions = []
+        for slider, name, tip in controls:
+            slider.label.set_text(name)
+            regions.append((slider.ax, tip))
+        tool.buttonreset.label.set_text("恢复初始值")
+        regions.append((tool.buttonreset.ax, "点击恢复打开这个窗口时的边距和间距设置。"))
+
+        def help_at(event=None):
+            if event is not None and getattr(event, "keysym", "") != "F1":
+                for axes, tip in regions:
+                    if axes.get_window_extent().contains(event.x, canvas.winfo_height() - event.y):
+                        return tip + "当前结果图使用自动布局，手动设置可能不生效。"
+            return "点击或拖动滑块调整图表留白，数值是位置或间距的比例。“恢复初始值”重置本窗口的修改；自动布局时，手动设置可能不生效。"
+
+        self.add_tooltip(canvas, help_at)
+        tool.figure.canvas.draw_idle()
 
     def _dispose_viewer_plot(self):
         """Release Tk images and variables on the UI thread, before new work."""
@@ -7627,7 +8375,15 @@ class MultiROIGUI:
                     self.root.after_cancel(job)
                     setattr(canvas, attr, None)
         if toolbar is not None:
+            if hasattr(toolbar, "subplot_tool"):
+                toolbar.close_subplots()
             toolbar.destroy()
+            for button in toolbar._buttons.values():
+                # Tooltips and callbacks can retain destroyed button objects.
+                # Release their Tcl variables/images before a worker's GC.
+                for attr in ("var", "_ntimage", "_ntimage_alt"):
+                    if hasattr(button, attr):
+                        setattr(button, attr, None)
             toolbar._buttons.clear()
             # The cached message label points back to its toolbar through
             # master; break that cycle and release native resources now.
@@ -7638,6 +8394,7 @@ class MultiROIGUI:
         if canvas is not None:
             canvas.get_tk_widget().destroy()
             canvas.toolbar = None
+            canvas._tkphoto = None
         if figure is not None:
             figure.set_canvas(None)
         self.viewer_toolbar = None
@@ -7717,10 +8474,12 @@ class MultiROIGUI:
                 self._viewer_mode = new_mode
                 self._rebuild_viewer_plot()
 
-        ttk.Radiobutton(
+        strain_rb = ttk.Radiobutton(
             ctrl, text="工程应变", variable=self.viewer_mode_var, value="strain",
             command=switch_mode
-        ).grid(row=0, column=1, sticky="w", padx=4)
+        )
+        strain_rb.grid(row=0, column=1, sticky="w", padx=4)
+        self.add_tooltip(strain_rb, "点击显示各组的距离伸缩曲线。工程应变是距离变化除以初始距离，例如 0.01 表示伸长 1%；没有有效结果的图片处，曲线会断开。")
 
         poisson_rb = ttk.Radiobutton(
             ctrl, text="泊松比", variable=self.viewer_mode_var, value="poisson",
@@ -7728,6 +8487,10 @@ class MultiROIGUI:
             state=tk.NORMAL if self._has_poisson else tk.DISABLED
         )
         poisson_rb.grid(row=0, column=2, sticky="w", padx=4)
+        self.add_tooltip(poisson_rb, lambda _event: (
+            "点击显示横向收缩与纵向伸长的比值，称为泊松比。没有有效结果的位置会留空。"
+            if self._has_poisson else
+            "泊松比表示横向收缩与纵向伸长的比值。先同时添加“拉伸方向”和“横向方向”两类测量组，再重新分析，这里才能切换。"))
 
         if not self._has_poisson:
             ttk.Label(ctrl, text="泊松比需要同时定义轴向和横向 ROI 组。", style="Hint.TLabel", wraplength=560).grid(
@@ -7860,6 +8623,10 @@ run_2d_dic_sequence = _core.run_2d_dic_sequence
 dic_field_to_dataframe = _core.dic_field_to_dataframe
 write_dic_field_txt = _core.write_dic_field_txt
 write_dic_field_parameters = _core.write_dic_field_parameters
+render_dic_field_on_axes = _core.render_dic_field_on_axes
+plot_dic_field_map = _core.plot_dic_field_map
+add_dic_colorbar = _core.add_dic_colorbar
+dic_color_limits = _core.dic_color_limits
 overlay_dic_field_on_image = _core.overlay_dic_field_on_image
 export_dic_field_outputs = _core.export_dic_field_outputs
 build_core_strain_table = _core.build_core_strain_table

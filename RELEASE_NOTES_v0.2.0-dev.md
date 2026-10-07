@@ -8,6 +8,33 @@ or publication claim is made by this note.
 
 ## Scope of this iteration
 
+### October 2026 2D DIC reliability update
+
+Cached quintic B-spline sampling and fourth-order reference gradients replace
+the quantized subpixel sampler. GN/LM accept actual residual descent and record
+undamped convergence increments. A validated SIFT/RANSAC affine initializer
+extends recoverable motion while keeping per-subset acceptance checks.
+Stalled IC subsets use a current-target normalized Jacobian to finish
+refinement; the desktop defaults to rejecting nonconverged subsets.
+Reference-fixed floating-point normalization preserves high-bit-depth changes.
+
+Specimen masks and rectangular exclusions prevent background/hole subsets;
+robust, connected local polynomial strain fitting records support, order,
+condition and residual diagnostics. Original candidate displacement remains
+available after spatial rejection. Missing measurements are never filled.
+Continuous contours, reference/deformed backgrounds, common explicit color
+limits, percent display and all nine component maps accompany TXT/CSV/NPZ
+exports. GUI/core/CLI share these implementations; SciPy is included in both
+Python installation metadata and the portable Windows bundle.
+
+The current engineering gate is report v6 / cases v4, using independently
+evaluated analytic targets and stricter numeric tolerances. Historical v5
+evidence below remains a record of the earlier implementation. See
+[the complete validation and workflow report](docs/2D_DIC_VALIDATION.md) for
+matched-window results, the explicit noise/resolution tradeoff, successful
+public Ncorr plate-hole imagery and insufficient-coverage GFRP imagery.
+No experimental uncertainty calibration or VIC-2D equivalence is claimed.
+
 The target keeps the existing two workflows and narrows the upgrade to the
 research-use path most directly exercised here:
 
@@ -62,7 +89,7 @@ scientific gate, and manifest verification all passed; `2` means configuration,
 usage, or preflight failure; `3` means I/O, solver, export, or other runtime
 failure; and `4` means scientific-gate or manifest-verification failure.
 
-## Locked synthetic benchmark v5
+## Historical locked synthetic benchmark v5
 
 The benchmark uses the canonical `cases-v3` definitions, fixed geometry, clean
 baselines, and an image-corruption panel. The verified report is
@@ -107,8 +134,8 @@ ratio is `best_to_second_peak_ratio_min = best_peak / second_peak`; larger is
 better, and it must not be inverted to `second_peak / best_peak`.
 
 This target does not implement or claim stereo/3D DIC, DVC, GPU/MPI
-acceleration, global finite-element DIC, SIFT/AKAZE feature guidance, arbitrary
-experimental-texture robustness, crack/occlusion topology support, experimental
+acceleration, global finite-element DIC, arbitrary
+experimental-texture robustness, automatic crack-topology tracking, experimental
 calibration, or uncertainty quantification. Those require separate baselines,
 data, and scientific acceptance gates.
 
@@ -120,3 +147,7 @@ https://doi.org/10.5281/zenodo.20222465
 
 See `LICENSE.txt`, `NOTICE_Attribution_and_Usage.txt`, `CITATION.cff`, and the
 v0.1.4 release notes for the unchanged usage and attribution boundary.
+
+### Independent desktop windows
+
+The analysis console and image/results workspace are separate, independently resizable windows. ROI, mask and field views retain their state when hidden; the console reopens the workspace with Ctrl + I, and successful analysis opens its results. Quality checks and logs use separate scrollable views. Tall fields remain centered with an adjacent full-height colorbar.

@@ -279,6 +279,10 @@ _DEFAULT_SOLVER = {
     "search_radius_px": 20,
     "max_iterations": 25,
     "tolerance": 1e-3,
+    "strain_degree": 2,
+    "robust_strain": True,
+    "outlier_threshold_px": 1.0,
+    "initialization": "auto",
 }
 _DEFAULT_PYRAMID = {"levels": 1, "scale": 0.5}
 _DEFAULT_NORMALIZATION = {
@@ -422,6 +426,50 @@ def _normalize_solver(raw: Any) -> dict[str, Any]:
     result["search_radius_px"] = _integer(result["search_radius_px"], "$.solver.search_radius_px", minimum=1)
     result["max_iterations"] = _integer(result["max_iterations"], "$.solver.max_iterations", minimum=1)
     result["tolerance"] = _number(result["tolerance"], "$.solver.tolerance", minimum=0, exclusive_minimum=True)
+    result["strain_degree"] = _integer(result["strain_degree"], "$.solver.strain_degree", minimum=1)
+    if result["strain_degree"] not in (1, 2):
+        _fail("CONFIG_VALUE_ERROR", "strain degree must be 1 or 2", "$.solver.strain_degree")
+    result["robust_strain"] = _boolean(result["robust_strain"], "$.solver.robust_strain")
+    result["outlier_threshold_px"] = _number(result["outlier_threshold_px"], "$.solver.outlier_threshold_px", minimum=0)
+    if result["initialization"] not in ("auto","local"):
+        _fail("CONFIG_VALUE_ERROR", "initialization must be auto or local", "$.solver.initialization")
+    return result
+
+
+def _normalize_mask(raw, base_dir):
+    result = {"mode": "none", "path": None, "texture_threshold": 3.0, "exclusions": []}
+    result.update(_section(raw, "mask", set(result)))
+    if result["mode"] not in ("none", "auto", "file"):
+        _fail("CONFIG_VALUE_ERROR", "mask mode must be none, auto or file", "$.mask.mode")
+    result["texture_threshold"] = _number(result["texture_threshold"], "$.mask.texture_threshold", minimum=0, exclusive_minimum=True)
+    result["exclusions"] = [_rect(rect, f"$.mask.exclusions[{index}]") for index, rect in enumerate(_array(result["exclusions"], "$.mask.exclusions"))]
+    if result["mode"] == "file":
+        result["path"] = _canonical_path(_string(result["path"], "$.mask.path"), base_dir)
+    elif result["path"] is not None:
+        _fail("CONFIG_VALUE_ERROR", "mask path is only used with file mode", "$.mask.path")
+    return result
+
+
+def _normalize_display(raw):
+    result = {"style": "contour", "color_mode": "range", "vmin": None, "vmax": None,
+              "coordinate_frame": "reference", "background": "none", "percent": False, "alpha": .65,
+              "cmap": "RdBu_r"}
+    result.update(_section(raw, "display", set(result)))
+    for key, allowed in (("style", ("contour", "points")), ("color_mode", ("range", "symmetric", "manual")),
+                         ("coordinate_frame", ("reference", "deformed")), ("background", ("none", "reference", "deformed")),
+                         ("cmap", ("RdBu_r", "viridis", "cividis", "turbo"))):
+        if result[key] not in allowed:
+            _fail("CONFIG_VALUE_ERROR", f"{key} must be one of {allowed}", f"$.display.{key}")
+    result["percent"] = _boolean(result["percent"], "$.display.percent")
+    result["alpha"] = _number(result["alpha"], "$.display.alpha", minimum=0, maximum=1)
+    if result["color_mode"] == "manual":
+        result["vmin"] = _number(result["vmin"], "$.display.vmin")
+        result["vmax"] = _number(result["vmax"], "$.display.vmax")
+        if result["vmin"] >= result["vmax"]:
+            _fail("CONFIG_VALUE_ERROR", "display limits must be increasing", "$.display.vmax")
+    else:
+        if result["vmin"] is not None or result["vmax"] is not None:
+            _fail("CONFIG_VALUE_ERROR", "display limits require manual color mode", "$.display.color_mode")
     return result
 
 
@@ -520,6 +568,8 @@ def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None)
         "quality",
         "solver",
         "pyramid",
+        "mask",
+        "display",
         "normalization",
         "export",
         "transaction",
@@ -578,7 +628,7 @@ def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None)
     normalized["output_dir"] = _canonical_path(_string(root["output_dir"], "$.output_dir"), base_dir)
 
     if mode == "extensometer":
-        for key in ("field_roi", "field_roi_reference_frame_1based", "solver", "pyramid"):
+        for key in ("field_roi", "field_roi_reference_frame_1based", "solver", "pyramid", "mask", "display"):
             if key in root:
                 _fail("CONFIG_MODE_FIELD", f"{key} is not valid in extensometer mode", _path("$", key))
         groups = _array(root.get("roi_groups"), "$.roi_groups", min_items=1)
@@ -601,6 +651,8 @@ def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None)
         normalized["field_roi_reference_frame_1based"] = field_reference
         normalized["solver"] = _normalize_solver(root.get("solver"))
         normalized["pyramid"] = _normalize_pyramid(root.get("pyramid"))
+        normalized["mask"] = _normalize_mask(root.get("mask"), base_dir)
+        normalized["display"] = _normalize_display(root.get("display"))
 
     normalized["texture"] = _normalize_texture(root.get("texture"))
     normalized["quality"] = _normalize_quality(root.get("quality"), mode)
@@ -807,6 +859,12 @@ def build_core_settings(normalized: Mapping[str, Any], core: Any) -> dict[str, A
                 "conv_tol": solver["tolerance"],
                 "pyramid_levels": pyramid["levels"],
                 "pyramid_scale": pyramid["scale"],
+                "strain_degree": solver["strain_degree"],
+                "robust_strain": solver["robust_strain"],
+                "outlier_threshold_px": solver["outlier_threshold_px"],
+                "initialization": solver["initialization"],
+                "mask": normalized["mask"],
+                "display": normalized["display"],
             }
         )
     return _CoreSettings(settings, normalized)

@@ -27,9 +27,12 @@ import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from matplotlib.colors import Normalize
 import numpy as np
 import pandas as pd
 from PIL import Image
+from scipy import ndimage
 
 APP_NAME = "ezDIC"
 APP_VERSION = "0.1.4"
@@ -54,6 +57,10 @@ DIC_SOLVER_ICGN = "IC-GN"
 DIC_SOLVER_ICLM = "IC-LM"
 DIC_SOLVERS = (DIC_SOLVER_ICGN, DIC_SOLVER_ICLM)
 DIC_FIELD_COMPONENTS = ("u", "v", "zncc", "Exx", "Eyy", "Exy", "exx", "eyy", "exy")
+DIC_COMPONENT_FILE_SUFFIXES = {
+    component: f"{component}_infinitesimal" if component in ("exx", "eyy", "exy") else component
+    for component in DIC_FIELD_COMPONENTS
+}
 DIC_COMPONENT_LABELS = {
     "u": "u (px)",
     "v": "v (px)",
@@ -426,7 +433,7 @@ ordered_input_identities = ordered_input_manifest
 def collect_environment():
     """Collect JSON-safe Python/platform and installed-package information."""
     packages = {}
-    for name in ("numpy", "opencv-python", "opencv-contrib-python", "pandas", "Pillow", "matplotlib"):
+    for name in ("numpy", "opencv-python", "opencv-contrib-python", "pandas", "Pillow", "matplotlib", "scipy"):
         try:
             packages[name] = importlib_metadata.version(name)
         except importlib_metadata.PackageNotFoundError:
@@ -904,7 +911,7 @@ def verify_run_manifest(manifest_or_path, *, verify_code=True):
             if relative.startswith("optional/"):
                 return bool(re.fullmatch(r"optional/(?:publication_figures|correlation_plots)/[\w.\-/]+\.(?:png|tiff|pdf|svg|eps)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/full_csv/(?:strain_results_all_groups\.csv|per_group_results/strain_results_[\w.\-]+\.csv)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/parameters/(?:tracking_parameters|acceptance_summary)\.txt", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/overlays/[\w.\-]+/tracked_\d{5}\.png", relative, flags=re.IGNORECASE))
             if relative.startswith("dic/"):
-                return bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|Exx|Eyy|Exy|overlay)|_parameters)?\.(?:txt|csv|png)", relative, flags=re.IGNORECASE))
+                return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
             return False
 
         # Scan only explicit ezDIC output patterns.  Arbitrary files under a
@@ -1212,6 +1219,17 @@ def normalize_with_bounds(image, bounds, *, return_metadata=False, policy=None, 
         return out
     metadata = _normalization_sample_metadata(image, lo, hi, policy=policy, version=version)
     return out, metadata
+
+
+def normalize_dic_float(image, bounds):
+    """Reference-fixed intensity scaling without an 8-bit quantization step."""
+    lo, hi = _coerce_normalization_bounds(bounds)
+    arr = _validate_finite_image(image).astype(np.float64)
+    if arr.ndim == 3:
+        arr = cv2.cvtColor(arr.astype(np.float32), cv2.COLOR_BGR2GRAY).astype(float)
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=float)
+    return np.clip((arr-lo)*255/(hi-lo), 0, 255)
 
 
 def normalize_sequence_frames(reference, frames, *, lower_percentile=DEFAULT_NORMALIZATION_LOWER_PERCENTILE, upper_percentile=DEFAULT_NORMALIZATION_UPPER_PERCENTILE):
@@ -2478,6 +2496,140 @@ def poi_grid_is_usable(X, Y, *, min_rows=3, min_cols=3):
     return bool(rows >= int(min_rows) and cols >= int(min_cols) and X.size > 0 and Y.size > 0)
 
 
+def build_specimen_mask(image, roi, *, texture_threshold=3.0):
+    """Conservative texture-based proposal; users should inspect its boundary.
+
+    Low-texture background and holes are excluded. No hole filling is applied:
+    an excluded area must never become a measured surface by postprocessing.
+    """
+    gray = _as_float_image(image).astype(np.float64)
+    mean = ndimage.uniform_filter(gray, size=9, mode="reflect")
+    variance = np.maximum(0, ndimage.uniform_filter(gray*gray, size=9, mode="reflect")-mean*mean)
+    mask = np.sqrt(variance) >= float(texture_threshold)
+    roi_mask = np.zeros(gray.shape, dtype=bool)
+    x, y, width, height = [int(round(value)) for value in roi]
+    roi_mask[y:y+height, x:x+width] = True
+    mask &= roi_mask
+    mask = ndimage.binary_opening(mask, structure=np.ones((3, 3)))
+    return mask
+
+
+def _resolve_specimen_mask(reference, roi, settings):
+    source = settings.get("mask") if isinstance(settings.get("mask"), Mapping) else {}
+    mode = str(settings.get("mask_mode", source.get("mode", "none")))
+    path = settings.get("mask_path", source.get("path"))
+    threshold = float(settings.get("mask_texture_threshold", source.get("texture_threshold", 3.0)))
+    exclusions = source.get("exclusions", [])
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise CoreError("INVALID_MASK", {"message": "mask texture threshold must be finite and positive"})
+    identity = None
+    if mode == "none":
+        if not exclusions:
+            return None, {"mode": mode}, None
+        mask = np.ones(reference.shape[:2], dtype=bool)
+    elif mode == "auto":
+        mask = build_specimen_mask(reference, roi, texture_threshold=threshold)
+    elif mode == "file" and path:
+        identity = file_identity(path)
+        with Image.open(path) as raster:
+            mask = np.asarray(raster.convert("L")) >= 128
+        if file_identity(path) != identity:
+            raise CoreError("INPUT_CHANGED", {"path": str(path)})
+    else:
+        raise CoreError("INVALID_MASK", {"message": "mask mode must be none, auto or file with a path"})
+    if mask.shape != reference.shape[:2] or not mask.any():
+        raise CoreError("INVALID_MASK", {"message": "mask must be nonempty and match the reference image dimensions"})
+    for rect in exclusions:
+        if not rect_is_inside_image(rect, reference.shape):
+            raise CoreError("INVALID_MASK", {"message": "excluded rectangle must be inside the reference image"})
+        x, y, width, height = [int(round(value)) for value in rect]
+        mask[y:y+height,x:x+width] = False
+    record = {"mode": mode, "texture_threshold": threshold, "included_pixels": int(mask.sum()),
+              "sha256": hashlib.sha256(np.packbits(mask).tobytes()).hexdigest(),
+              "source_sha256": identity["sha256"] if identity else None,
+              "reference_shape": list(mask.shape)}
+    record["exclusions"] = [list(rect) for rect in exclusions]
+    return mask, record, identity
+
+
+def _displacement_outliers(X, Y, U, V, threshold_px=1.0):
+    """Leave-one-out local quadratic prediction; never replace a measurement."""
+    rejected = np.zeros(U.shape, dtype=bool)
+    if not threshold_px:
+        return rejected
+    for i, j in zip(*np.where(np.isfinite(U)&np.isfinite(V))):
+        i0, i1 = max(0, i-2), min(U.shape[0], i+3)
+        j0, j1 = max(0, j-2), min(U.shape[1], j+3)
+        valid = np.isfinite(U[i0:i1, j0:j1]) & np.isfinite(V[i0:i1, j0:j1])
+        labels, _ = ndimage.label(valid)
+        valid &= labels == labels[i-i0, j-j0]
+        valid[i-i0, j-j0] = False
+        if valid.sum() < 12:
+            continue
+        dx, dy = (X[i0:i1,j0:j1][valid]-X[i,j]), (Y[i0:i1,j0:j1][valid]-Y[i,j])
+        scale = max(np.max(np.abs(dx)), np.max(np.abs(dy)), 1)
+        dx, dy = dx/scale, dy/scale
+        A = np.column_stack([np.ones(dx.size), dx, dy, dx*dx, dx*dy, dy*dy])
+        if np.linalg.matrix_rank(A) < 6:
+            continue
+        data = np.column_stack([U[i0:i1,j0:j1][valid], V[i0:i1,j0:j1][valid]])
+        fit = np.linalg.lstsq(A, data, rcond=None)[0]
+        for _ in range(4):
+            residual = np.linalg.norm(data-A@fit, axis=1)
+            noise = max(.001, 1.4826*np.median(np.abs(residual-np.median(residual))))
+            weights = np.minimum(1, 3*noise/np.maximum(residual, .000001))
+            fit = np.linalg.lstsq(A*np.sqrt(weights[:,None]), data*np.sqrt(weights[:,None]), rcond=None)[0]
+        prediction_error = np.linalg.norm(np.array([U[i,j],V[i,j]])-fit[0])
+        rejected[i,j] = prediction_error > max(float(threshold_px), 6*noise, 3*np.median(residual))
+    return rejected
+
+
+def estimate_dic_initial_transform(reference, deformed, roi, specimen_mask=None):
+    """SIFT + RANSAC affine initialization, never a displacement measurement."""
+    height, width = reference.shape[:2]
+    scale = min(1., 1600/max(height,width))
+    shape = (max(1,round(width*scale)),max(1,round(height*scale)))
+    f = cv2.resize(np.clip(reference,0,255).astype(np.uint8),shape)
+    g = cv2.resize(np.clip(deformed,0,255).astype(np.uint8),shape)
+    mask = np.zeros((height,width),dtype=np.uint8)
+    x,y,w,h = [int(round(value)) for value in roi]
+    mask[y:y+h,x:x+w] = 255
+    if specimen_mask is not None:
+        mask[~specimen_mask] = 0
+    mask = cv2.resize(mask,shape,interpolation=cv2.INTER_NEAREST)
+    detector = cv2.SIFT_create(nfeatures=2000)
+    fk,fd = detector.detectAndCompute(f,mask)
+    gk,gd = detector.detectAndCompute(g,None)
+    if fd is None or gd is None or min(len(fk),len(gk)) < 12:
+        return None
+    pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(fd,gd,k=2)
+    matches = [pair[0] for pair in pairs if len(pair)==2 and pair[0].distance < .7*pair[1].distance]
+    if len(matches) < 12:
+        return None
+    source = np.float32([fk[m.queryIdx].pt for m in matches])
+    target = np.float32([gk[m.trainIdx].pt for m in matches])
+    transform,inliers = cv2.estimateAffine2D(source,target,method=cv2.RANSAC,ransacReprojThreshold=1.5,maxIters=2000,confidence=.995,refineIters=10)
+    if transform is None or inliers is None or np.count_nonzero(inliers) < 10 or inliers.mean() < .6:
+        return None
+    linear = transform[:,:2]
+    if not np.isfinite(transform).all() or not .5 < np.linalg.det(linear) < 2 or np.linalg.cond(linear) > 2:
+        return None
+    error = np.linalg.norm(source@linear.T+transform[:,2]-target,axis=1)
+    if np.median(error[inliers.ravel().astype(bool)]) > .8:
+        return None
+    transform[:,2] /= scale
+    return {"matrix": transform, "matches": len(matches), "inliers": int(inliers.sum()),
+            "median_reprojection_error_px": float(np.median(error[inliers.ravel().astype(bool)])/scale)}
+
+
+def _affine_initial_parameters(transform, x, y):
+    if transform is None:
+        return np.zeros(6)
+    matrix = transform["matrix"]
+    u,v = matrix@np.array([x,y,1])-np.array([x,y])
+    return np.array([u,matrix[0,0]-1,matrix[0,1],v,matrix[1,0],matrix[1,1]-1])
+
+
 def _odd_window_size(window):
     size = max(3, int(window))
     if size % 2 == 0:
@@ -2778,203 +2930,179 @@ def _compose_warp_inverse(p, dp):
     )
 
 
-def _refine_subset_ic(
-    reference,
-    deformed,
-    x,
-    y,
-    subset_size,
-    p0=None,
-    method="GN",
-    max_iter=25,
-    tol=1e-3,
-):
-    """Inverse-compositional first-order affine subset match (ZNSSD / ZNCC)."""
-    reference = _as_float_image(reference)
-    deformed = _as_float_image(deformed)
-    subset_size = _odd_subset_size(subset_size)
-    half = subset_size // 2
-    Himg, Wimg = reference.shape[:2]
-    xi = np.arange(-half, half + 1, dtype=np.float64)
-    xx, yy = np.meshgrid(xi, xi)
-    xf = xx.ravel()
-    yf = yy.ravel()
-    x0 = float(x)
-    y0 = float(y)
-    ix, iy = int(round(x0)), int(round(y0))
-    if ix - half < 0 or iy - half < 0 or ix + half >= Wimg or iy + half >= Himg:
-        return None
-    f = reference[iy - half : iy + half + 1, ix - half : ix + half + 1].astype(np.float64)
-    if not np.isfinite(f).all() or not has_nonzero_variance(f):
-        return None
+
+
+def _prepare_dic_images(reference, deformed):
+    """Cache interpolation coefficients and fourth-order reference gradients."""
+    f = np.asarray(reference, dtype=np.float64)
+    g = np.asarray(deformed, dtype=np.float64)
     fy, fx = np.gradient(f)
-    f_tilde = f - f.mean()
-    f_norm = float(np.sqrt(np.sum(f_tilde * f_tilde)))
-    if f_norm < 1e-8:
+    fx[:, 2:-2] = (f[:, :-4] - 8*f[:, 1:-3] + 8*f[:, 3:-1] - f[:, 4:]) / 12
+    fy[2:-2, :] = (f[:-4, :] - 8*f[1:-3, :] + 8*f[3:-1, :] - f[4:, :]) / 12
+    return {"reference": f, "coefficients": ndimage.spline_filter(g, order=5, mode="mirror"),
+            "fx": fx, "fy": fy, "shape": g.shape}
+
+
+def _refine_subset_ic(reference, deformed, x, y, subset_size, p0=None,
+                      method="GN", max_iter=25, tol=1e-3, _prepared=None):
+    """Affine IC correlation with continuous quintic B-splines and ZNSSD.
+
+    The normalized Jacobian projects out brightness and contrast. Both GN and
+    LM evaluate a proposal before accepting it; rejected proposals never
+    replace the current state. Coefficients are reusable across all subsets.
+    """
+    prepared = _prepared or _prepare_dic_images(_as_float_image(reference), _as_float_image(deformed))
+    f_image, height, width = prepared["reference"], *prepared["shape"]
+    half = _odd_subset_size(subset_size) // 2
+    ix, iy = int(round(x)), int(round(y))
+    if ix-half < 0 or iy-half < 0 or ix+half >= width or iy+half >= height:
         return None
-    fn = f_tilde / f_norm
-    fxn = fx.ravel() / f_norm
-    fyn = fy.ravel() / f_norm
-    sd = np.column_stack([fxn, fxn * xf, fxn * yf, fyn, fyn * xf, fyn * yf])
+    ys, xs = slice(iy-half, iy+half+1), slice(ix-half, ix+half+1)
+    f = f_image[ys, xs].ravel()
+    f = f - f.mean()
+    f_norm = np.linalg.norm(f)
+    if not np.isfinite(f_norm) or f_norm < 1e-8:
+        return None
+    fn = f / f_norm
+    yy, xx = np.mgrid[-half:half+1, -half:half+1].astype(float)
+    xf, yf = xx.ravel(), yy.ravel()
+    fx, fy = prepared["fx"][ys, xs].ravel(), prepared["fy"][ys, xs].ravel()
+    sd = np.column_stack([fx, fx*xf, fx*yf, fy, fy*xf, fy*yf]) / f_norm
+    sd -= sd.mean(axis=0)
+    sd -= fn[:, None] * (fn @ sd)[None, :]
     hess = sd.T @ sd
-    try:
-        hessian_condition_number = float(np.linalg.cond(hess))
-    except np.linalg.LinAlgError:
+    condition = float(np.linalg.cond(hess))
+    if not np.isfinite(condition) or np.linalg.matrix_rank(hess) < 6:
         return None
-    if not np.isfinite(hessian_condition_number):
+    p = np.zeros(6) if p0 is None else np.asarray(p0, dtype=float).reshape(6).copy()
+
+    def evaluate(parameters):
+        map_x = float(x) + parameters[0] + (1+parameters[1])*xx + parameters[2]*yy
+        map_y = float(y) + parameters[3] + parameters[4]*xx + (1+parameters[5])*yy
+        if map_x.min() < 2 or map_y.min() < 2 or map_x.max() > width-3 or map_y.max() > height-3:
+            return None
+        g = ndimage.map_coordinates(prepared["coefficients"], [map_y.ravel(), map_x.ravel()],
+                                   order=5, mode="mirror", prefilter=False)
+        g -= g.mean()
+        norm = np.linalg.norm(g)
+        if not np.isfinite(norm) or norm < 1e-8:
+            return None
+        residual = fn - g / norm
+        return residual, float(residual @ residual)
+
+    state = evaluate(p)
+    if state is None:
         return None
-    try:
-        hess_inv = np.linalg.inv(hess)
-    except np.linalg.LinAlgError:
-        return None
-
-    p = np.zeros(6, dtype=np.float64) if p0 is None else np.asarray(p0, dtype=np.float64).reshape(6).copy()
-    mu = 0.01
-    last_cost = np.inf
-    best = None
-    stop_reason = "max_iterations"
-    converged = False
-    last_increment_norm_px = np.nan
-    xx32 = xx.astype(np.float32)
-    yy32 = yy.astype(np.float32)
-
-    for it in range(int(max_iter)):
-        map_x = (x0 + p[0] + (1.0 + p[1]) * xx32 + p[2] * yy32).astype(np.float32)
-        map_y = (y0 + p[3] + p[4] * xx32 + (1.0 + p[5]) * yy32).astype(np.float32)
-        if map_x.min() < 1 or map_y.min() < 1 or map_x.max() > Wimg - 2 or map_y.max() > Himg - 2:
-            stop_reason = "warp_out_of_bounds"
-            break
-        g = cv2.remap(
-            deformed,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_REFLECT_101,
-        ).astype(np.float64)
-        g_tilde = g - g.mean()
-        g_norm = float(np.sqrt(np.sum(g_tilde * g_tilde)))
-        if not np.isfinite(g).all() or g_norm < 1e-8:
-            stop_reason = "nonfinite_or_zero_variance_deformed_patch"
-            break
-        gn = g_tilde / g_norm
-        zncc = float(np.sum(fn * gn))
-        residual = (fn - gn).ravel()
-        cost = float(np.dot(residual, residual))
-        residual_rms = float(np.sqrt(np.mean(residual * residual)))
-        if best is None or zncc > best["zncc"]:
-            best = {
-                "u": float(p[0]),
-                "v": float(p[3]),
-                "p": p.copy(),
-                "zncc": zncc,
-                "iters": it + 1,
-                "iterations": it + 1,
-                "residual_rms": residual_rms,
-                "hessian_condition_number": hessian_condition_number,
-                "converged": False,
-                "stop_reason": "iterating",
-            }
-
-        b = sd.T @ residual
-        if method == "LM":
-            damped = hess + mu * np.diag(np.diag(hess))
-            try:
-                dp = -np.linalg.solve(damped, b)
-            except np.linalg.LinAlgError:
-                mu *= 10.0
-                stop_reason = "damped_hessian_solve_failure"
-                continue
-        else:
-            dp = -hess_inv @ b
-
-        if not np.isfinite(dp).all():
-            stop_reason = "nonfinite_increment"
-            break
-        increment_components = np.asarray(
-            [dp[0], dp[3], half * dp[1], half * dp[2], half * dp[4], half * dp[5]],
-            dtype=float,
-        )
-        last_increment_norm_px = float(np.linalg.norm(increment_components))
-        if last_increment_norm_px <= float(tol):
-            stop_reason = "converged_all_affine_increment"
-            converged = True
-            if best is not None:
-                best["converged"] = True
-                best["stop_reason"] = stop_reason
-                best["increment_norm_px"] = last_increment_norm_px
-            break
-
-        p_new = _compose_warp_inverse(p, dp)
-        if p_new is None:
-            stop_reason = "warp_update_failure"
-            break
-
-        if method == "LM":
-            if cost <= last_cost * 1.0000001:
-                mu = max(mu / 10.0, 1e-8)
-                p = p_new
-                last_cost = cost
-            else:
-                mu *= 10.0
-                if mu > 1e8:
-                    stop_reason = "lm_damping_limit"
-                    break
-                continue
-        else:
-            if cost > last_cost:
-                # A final cubic-sampling round can increase the normalized
-                # residual by numerical noise after the six-parameter update
-                # has already become displacement-equivalent small.  Treat
-                # only that explicit all-affine stagnation case as converged;
-                # a large update still remains a quality failure.
-                if last_increment_norm_px <= max(float(tol) * 20.0, 1e-3):
-                    stop_reason = "converged_cost_stagnation"
-                    converged = True
-                    if best is not None:
-                        best["converged"] = True
-                        best["stop_reason"] = stop_reason
-                        best["increment_norm_px"] = last_increment_norm_px
-                else:
-                    stop_reason = "cost_increased"
+    mu, converged, reason, increment = 1e-3, False, "max_iterations", np.nan
+    iteration = 0
+    use_forward = False
+    for iteration in range(1, int(max_iter)+1):
+        residual, cost = state
+        if use_forward:
+            # At a noisy optimum the fixed reference Jacobian can point uphill.
+            # Recompute the normalized target Jacobian only for stalled subsets.
+            mx = float(x)+p[0]+(1+p[1])*xf+p[2]*yf
+            my = float(y)+p[3]+p[4]*xf+(1+p[5])*yf
+            def sample(dx, dy):
+                return ndimage.map_coordinates(prepared["coefficients"], [my+dy, mx+dx],
+                                              order=5, mode="mirror", prefilter=False)
+            g = sample(0, 0)
+            g -= g.mean()
+            g_norm = np.linalg.norm(g)
+            normalized = g/g_norm
+            gx = (sample(.01, 0)-sample(-.01, 0))/.02
+            gy = (sample(0, .01)-sample(0, -.01))/.02
+            sd = np.column_stack([gx, gx*xf, gx*yf, gy, gy*xf, gy*yf])/g_norm
+            sd -= sd.mean(axis=0)
+            sd -= normalized[:, None]*(normalized@sd)[None, :]
+            hess = sd.T@sd
+            current_condition = float(np.linalg.cond(hess))
+            condition = max(condition, current_condition)
+            if not np.isfinite(current_condition) or np.linalg.matrix_rank(hess) < 6:
+                reason = "ill_conditioned_forward_hessian"
                 break
-            p = p_new
-            last_cost = cost
+        rhs = sd.T @ residual
+        try:
+            undamped = -np.linalg.solve(hess, rhs)
+        except np.linalg.LinAlgError:
+            reason = "hessian_solve_failure"
+            break
+        undamped_norm = float(np.linalg.norm(undamped*np.array([1,half,half,1,half,half])))
+        if undamped_norm <= float(tol):
+            reason = "converged_forward_affine_increment" if use_forward else "converged_all_affine_increment"
+            converged, increment = True, undamped_norm
+            break
+        accepted = False
+        for trial in range(12):
+            try:
+                dp = -np.linalg.solve(hess + (mu*np.diag(np.diag(hess)) if method == "LM" else 0), rhs)
+            except np.linalg.LinAlgError:
+                reason = "hessian_solve_failure"
+                break
+            if method != "LM":
+                dp *= .5**trial
+            increment = float(np.linalg.norm(dp * np.array([1, half, half, 1, half, half])))
+            if not np.isfinite(increment):
+                reason = "nonfinite_increment"
+                break
+            # A rejected step shrunk by damping/line search is not convergence
+            # evidence: only the original proposed step qualifies.
+            candidate = p-dp if use_forward else _compose_warp_inverse(p, dp)
+            next_state = evaluate(candidate) if candidate is not None else None
+            if next_state is not None and next_state[1] <= cost + 1e-14:
+                p, state, accepted = candidate, next_state, True
+                mu = max(mu / 3, 1e-10)
+                break
+            if method == "LM":
+                mu *= 10
+        if converged:
+            break
+        if not use_forward and (not accepted or trial >= 3):
+            use_forward = True
+            mu = 1e-3
+            continue
+        if not accepted:
+            reason = "no_descent_step"
+            break
+    residual, cost = state
+    return {"u": float(p[0]), "v": float(p[3]), "p": p, "zncc": float(1-cost/2),
+            "iters": iteration, "iterations": iteration,
+            "residual_rms": float(np.sqrt(cost/residual.size)),
+            "hessian_condition_number": condition, "converged": converged,
+            "stop_reason": reason, "increment_norm_px": increment}
 
-    if best is not None:
-        best.setdefault("iterations", best.get("iters", 0))
-        best.setdefault("residual_rms", np.nan)
-        best["hessian_condition_number"] = hessian_condition_number
-        best["converged"] = bool(best.get("converged", False) or converged)
-        best["stop_reason"] = stop_reason if stop_reason != "max_iterations" or best["converged"] else "max_iterations"
-        best["increment_norm_px"] = float(last_increment_norm_px)
-    return best
 
-
-def refine_subset_icgn(reference, deformed, x, y, subset_size, p0=None, max_iter=25, tol=1e-3):
+def refine_subset_icgn(reference, deformed, x, y, subset_size, p0=None, max_iter=25, tol=1e-3, _prepared=None):
     return _refine_subset_ic(
-        reference, deformed, x, y, subset_size, p0=p0, method="GN", max_iter=max_iter, tol=tol
+        reference, deformed, x, y, subset_size, p0=p0, method="GN", max_iter=max_iter, tol=tol, _prepared=_prepared
     )
 
 
-def refine_subset_iclm(reference, deformed, x, y, subset_size, p0=None, max_iter=25, tol=1e-3):
+def refine_subset_iclm(reference, deformed, x, y, subset_size, p0=None, max_iter=25, tol=1e-3, _prepared=None):
     return _refine_subset_ic(
-        reference, deformed, x, y, subset_size, p0=p0, method="LM", max_iter=max_iter, tol=tol
+        reference, deformed, x, y, subset_size, p0=p0, method="LM", max_iter=max_iter, tol=tol, _prepared=_prepared
     )
 
 
 def _nan_gaussian(arr, sigma):
     if sigma is None or float(sigma) <= 0:
         return arr
-    orig_nan = ~np.isfinite(arr)
-    mask = np.isfinite(arr).astype(np.float32)
-    filled = np.where(np.isfinite(arr), arr, 0.0).astype(np.float32)
-    ksize = int(max(3, 2 * int(3 * float(sigma)) + 1)) | 1
-    sm = cv2.GaussianBlur(filled, (ksize, ksize), float(sigma))
-    wt = cv2.GaussianBlur(mask, (ksize, ksize), float(sigma))
-    out = sm / np.maximum(wt, 1e-6)
-    out[wt < 0.15] = np.nan
-    out[orig_nan] = np.nan
-    return out.astype(np.float64)
+    values = np.asarray(arr, dtype=np.float64)
+    finite = np.isfinite(values)
+    out = np.full(values.shape, np.nan)
+    radius = max(1, int(np.ceil(3*float(sigma))))
+    ny, nx = values.shape
+    # Restrict each kernel to the center's connected neighborhood. A normalized
+    # convolution over all finite values would mix opposite sides of a crack.
+    for i, j in zip(*np.nonzero(finite)):
+        i0, i1 = max(0, i-radius), min(ny, i+radius+1)
+        j0, j1 = max(0, j-radius), min(nx, j+radius+1)
+        labels, _ = ndimage.label(finite[i0:i1, j0:j1])
+        support = labels == labels[i-i0, j-j0]
+        yy, xx = np.mgrid[i0:i1, j0:j1]
+        weights = np.exp(-((xx-j)**2+(yy-i)**2)/(2*float(sigma)**2))*support
+        out[i, j] = np.sum(weights*np.nan_to_num(values[i0:i1,j0:j1]))/weights.sum()
+    return out
 
 
 def compute_strain_fields(
@@ -2986,14 +3114,23 @@ def compute_strain_fields(
     window=5,
     smooth_sigma=0.0,
     max_condition_number=1e12,
+    degree=2,
+    robust=True,
 ):
-    """Fit local displacement planes and report explicit strain validity."""
+    """Local polynomial virtual strain gauge, without filling missing data.
+
+    Coordinates are scaled before fitting. A quadratic fit avoids one-sided
+    linear-fit bias near specimen boundaries. Tukey IRLS limits the influence
+    of isolated mismatches; local connectivity prevents fits across gaps.
+    """
     X = np.asarray(X, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
     U = np.asarray(U, dtype=np.float64).copy()
     V = np.asarray(V, dtype=np.float64).copy()
     if X.shape != Y.shape or U.shape != X.shape or V.shape != X.shape:
         raise ValueError("X, Y, U, and V must have identical grid shapes.")
+    if degree not in (1, 2):
+        raise ValueError("strain polynomial degree must be 1 or 2")
     if smooth_sigma and float(smooth_sigma) > 0:
         U = _nan_gaussian(U, smooth_sigma)
         V = _nan_gaussian(V, smooth_sigma)
@@ -3016,6 +3153,9 @@ def compute_strain_fields(
     fit_residual_rms = np.full((ny, nx), np.nan)
     fit_point_count = np.zeros((ny, nx), dtype=np.int32)
     strain_invalid_reason = np.full((ny, nx), "INVALID_CENTER", dtype=object)
+    fit_effective_count = np.zeros((ny, nx), dtype=float)
+    fit_degree = np.zeros((ny, nx), dtype=np.int32)
+    gradient_standard_error = np.full((ny, nx, 4), np.nan)
 
     for i in range(ny):
         i0, i1 = max(0, i - half), min(ny, i + half + 1)
@@ -3028,14 +3168,33 @@ def compute_strain_fields(
             if not (np.isfinite(U[i, j]) and np.isfinite(V[i, j])):
                 continue
             ok = np.isfinite(us) & np.isfinite(vs) & np.isfinite(xs) & np.isfinite(ys)
+            connected, _ = ndimage.label(ok.reshape(i1-i0, j1-j0))
+            center_label = connected[i-i0, j-j0]
+            ok &= connected.ravel() == center_label
             count = int(ok.sum())
             fit_point_count[i, j] = count
             if count < 6:
                 strain_invalid_reason[i, j] = "INSUFFICIENT_NEIGHBORS"
                 continue
-            A = np.column_stack([np.ones(count), xs[ok] - X[i, j], ys[ok] - Y[i, j]])
+            scale = max(np.max(np.abs(xs[ok]-X[i, j])), np.max(np.abs(ys[ok]-Y[i, j])), 1.0)
+            dx, dy = (xs[ok]-X[i, j])/scale, (ys[ok]-Y[i, j])/scale
+            A = np.column_stack([np.ones(count), dx, dy])
+            effective_degree = 1
+            if degree == 2:
+                quadratic = np.column_stack([A, dx*dx, dx*dy, dy*dy])
+                if count >= 9 and np.linalg.matrix_rank(quadratic) == 6:
+                    data_for_order = np.column_stack([us[ok], vs[ok]])
+                    linear_fit = np.linalg.lstsq(A, data_for_order, rcond=None)[0]
+                    quadratic_fit = np.linalg.lstsq(quadratic, data_for_order, rcond=None)[0]
+                    linear_rss = float(np.sum((data_for_order-A@linear_fit)**2))
+                    quadratic_rss = float(np.sum((data_for_order-quadratic@quadratic_fit)**2))
+                    # Avoid paying quadratic boundary variance for a flat or
+                    # affine noisy field. Record the order used at every POI.
+                    curvature_f = max(0, linear_rss-quadratic_rss)/3 / max(quadratic_rss/(count-6), 1e-18)
+                    if curvature_f > 6:
+                        A, effective_degree = quadratic, 2
             rank = int(np.linalg.matrix_rank(A))
-            if rank < 3:
+            if rank < A.shape[1]:
                 strain_invalid_reason[i, j] = "RANK_DEFICIENT"
                 continue
             try:
@@ -3048,20 +3207,49 @@ def compute_strain_fields(
                 strain_invalid_reason[i, j] = "ILL_CONDITIONED_FIT"
                 continue
             try:
-                au, *_ = np.linalg.lstsq(A, us[ok], rcond=None)
-                av, *_ = np.linalg.lstsq(A, vs[ok], rcond=None)
+                data = np.column_stack([us[ok], vs[ok]])
+                weights = np.ones(count)
+                coefficients, *_ = np.linalg.lstsq(A, data, rcond=None)
+                if robust:
+                    for _ in range(5):
+                        residual = data-A@coefficients
+                        noise = max(1e-6, float(np.max(1.4826*np.median(np.abs(residual-np.median(residual, axis=0)),axis=0))))
+                        radius = np.linalg.norm(residual, axis=1)/(8.0*noise)
+                        proposed = np.square(np.clip(1-radius**2, 0, 1))
+                        if np.sum(proposed > .05) < A.shape[1]+3:
+                            break
+                        root_weights = np.sqrt(proposed)
+                        weighted = A*root_weights[:, None]
+                        if np.linalg.matrix_rank(weighted) < A.shape[1]:
+                            break
+                        updated, *_ = np.linalg.lstsq(weighted, data*root_weights[:, None], rcond=None)
+                        weights, coefficients = proposed, updated
+                au, av = coefficients[:, 0], coefficients[:, 1]
             except np.linalg.LinAlgError:
                 strain_invalid_reason[i, j] = "FIT_FAILURE"
                 continue
             if not (np.isfinite(au).all() and np.isfinite(av).all()):
                 strain_invalid_reason[i, j] = "NONFINITE_FIT"
                 continue
+            weighted_condition = float(np.linalg.cond(A*np.sqrt(weights[:,None])))
+            fit_condition_number[i,j] = weighted_condition
+            if not np.isfinite(weighted_condition) or weighted_condition > float(max_condition_number):
+                strain_invalid_reason[i,j] = "ILL_CONDITIONED_FIT"
+                continue
             residual_u = A @ au - us[ok]
             residual_v = A @ av - vs[ok]
             residual_rms = float(np.sqrt(np.mean(np.concatenate([residual_u, residual_v]) ** 2)))
             fit_residual_rms[i, j] = residual_rms
-            du_dx, du_dy = float(au[1]), float(au[2])
-            dv_dx, dv_dy = float(av[1]), float(av[2])
+            du_dx, du_dy = float(au[1]/scale), float(au[2]/scale)
+            dv_dx, dv_dy = float(av[1]/scale), float(av[2]/scale)
+            fit_effective_count[i, j] = float(weights.sum())
+            fit_degree[i, j] = effective_degree
+            # Conditional fit standard errors are diagnostics, not calibrated
+            # experimental uncertainties (overlapping subsets are correlated).
+            dof = max(float(weights.sum())-A.shape[1], 1)
+            covariance = np.linalg.pinv(A.T@(weights[:, None]*A))
+            variance = np.sum(weights[:, None]*(data-A@coefficients)**2, axis=0)/dof
+            gradient_standard_error[i, j] = np.sqrt(np.maximum(0, [covariance[1,1]*variance[0], covariance[2,2]*variance[0], covariance[1,1]*variance[1], covariance[2,2]*variance[1]]))/scale
             Fxx, Fxy, Fyx, Fyy = 1.0 + du_dx, du_dy, dv_dx, 1.0 + dv_dy
             values = (
                 0.5 * (Fxx * Fxx + Fyx * Fyx - 1.0),
@@ -3100,6 +3288,11 @@ def compute_strain_fields(
         "fit_residual_rms": fit_residual_rms,
         "strain_fit_residual_rms": fit_residual_rms,
         "fit_point_count": fit_point_count,
+        "fit_effective_count": fit_effective_count,
+        "fit_degree": fit_degree,
+        "gradient_standard_error": gradient_standard_error,
+        "degree": int(degree),
+        "robust": bool(robust),
         "strain_invalid_reason": strain_invalid_reason,
     }
 
@@ -3160,12 +3353,14 @@ def field_quality_summary(
         residual_threshold = float("inf")
     valid = np.asarray(field.get("valid", []), dtype=bool).ravel()
     size = int(valid.size)
+    eligible = _field_array(field, "eligible", dtype=bool, size=size, default=True)
+    eligible_count = int(eligible.sum())
     strain_valid = _field_array(field, "strain_valid", dtype=bool, size=size, default=False)
-    if size == 0:
+    if eligible_count == 0:
         correlation_fraction = strain_fraction = 0.0
     else:
-        correlation_fraction = float(valid.mean())
-        strain_fraction = float(strain_valid.mean())
+        correlation_fraction = float((valid & eligible).sum()/eligible_count)
+        strain_fraction = float((strain_valid & eligible).sum()/eligible_count)
     reasons = _field_array(field, "invalid_reason", dtype=object, size=size, default="")
     peak_ambiguous = _field_array(field, "peak_is_ambiguous", dtype=bool, size=size, default=False)
     reason_ambiguous = np.asarray(
@@ -3192,7 +3387,7 @@ def field_quality_summary(
             invalid_reason_histogram[key] = invalid_reason_histogram.get(key, 0) + 1
     false_accept_mask = valid & ambiguous_mask
     false_accept_count = int(false_accept_mask.sum())
-    false_reject_proxy_mask = (~valid) & (~ambiguous_mask) & np.asarray(
+    false_reject_proxy_mask = eligible & (~valid) & (~ambiguous_mask) & np.asarray(
         [str(reason) not in {"", "INVALID_CORRELATION", "AMBIGUOUS_PEAK"} for reason in reasons],
         dtype=bool,
     )
@@ -3206,6 +3401,9 @@ def field_quality_summary(
         reasons_out.append("ambiguous_peaks_accepted")
     return {
         "point_count": size,
+        "eligible_point_count": eligible_count,
+        "masked_point_count": size-eligible_count,
+        "spatial_outlier_count": int(np.count_nonzero(field.get("spatial_outlier", []))),
         "correlation_valid_count": int(valid.sum()),
         "strain_valid_count": int(strain_valid.sum()),
         "correlation_valid_fraction": correlation_fraction,
@@ -3352,6 +3550,12 @@ def _run_2d_dic_multiscale(
     min_strain_valid_fraction,
     pyramid_levels,
     pyramid_scale,
+    specimen_mask=None,
+    strain_degree=2,
+    robust_strain=True,
+    outlier_threshold_px=1.0,
+    initialization="auto",
+    _global_initial_transform=None,
 ):
     """Recover large translations coarse-to-fine, then run the canonical fine solver."""
     reference = _as_float_image(reference)
@@ -3383,13 +3587,16 @@ def _run_2d_dic_multiscale(
     ]
     refine = _legacy_refiner_for(solver_name)
     initial_guesses = {}
+    prepared_levels = [_prepare_dic_images(f, g) for f, g in zip(reference_pyramid, deformed_pyramid)] if refine is _CANONICAL_REFINERS[solver_name] else []
     pyramid_diagnostics = []
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             x_fine, y_fine = float(X[i, j]), float(Y[i, j])
-            seed_u = 0.0
-            seed_v = 0.0
-            seed_p = None
+            seed_p = _affine_initial_parameters(_global_initial_transform,x_fine,y_fine) if _global_initial_transform is not None else None
+            seed_u = float(seed_p[0]*scales_x[0]) if seed_p is not None else 0.
+            seed_v = float(seed_p[3]*scales_y[0]) if seed_p is not None else 0.
+            if seed_p is not None:
+                seed_p[0],seed_p[3] = seed_u,seed_v
             point_levels = []
             for level_index, (reference_level, deformed_level) in enumerate(
                 zip(reference_pyramid, deformed_pyramid)
@@ -3433,6 +3640,7 @@ def _run_2d_dic_multiscale(
                                 p0=p0,
                                 max_iter=max_iter,
                                 tol=conv_tol,
+                                **({"_prepared": prepared_levels[level_index]} if prepared_levels else {}),
                             )
                         )
                     except Exception:
@@ -3532,6 +3740,9 @@ def _run_2d_dic_multiscale(
         _pyramid_diagnostics=pyramid_diagnostics,
         _coordinate_offset=(0.0, 0.0),
         _output_roi=roi,
+        specimen_mask=specimen_mask, strain_degree=strain_degree,
+        robust_strain=robust_strain, outlier_threshold_px=outlier_threshold_px,
+        initialization=initialization, _global_initial_transform=_global_initial_transform,
     )
     field["pyramid_levels_requested"] = int(pyramid_levels)
     field["pyramid_levels_used"] = int(pyramid_levels)
@@ -3572,6 +3783,12 @@ def run_2d_dic(
     min_strain_valid_fraction=DEFAULT_MIN_STRAIN_VALID_FRACTION,
     pyramid_levels=1,
     pyramid_scale=0.5,
+    specimen_mask=None,
+    strain_degree=2,
+    robust_strain=True,
+    outlier_threshold_px=1.0,
+    initialization="auto",
+    _global_initial_transform=None,
     _initial_guesses=None,
     _pyramid_diagnostics=None,
     _coordinate_offset=None,
@@ -3605,6 +3822,22 @@ def run_2d_dic(
         )
     if not rect_is_inside_image(roi, reference.shape):
         raise ValueError("roi must be a positive rectangle fully inside the reference image.")
+    if strain_degree not in (1, 2) or not np.isfinite(outlier_threshold_px) or outlier_threshold_px < 0:
+        raise ValueError("strain degree must be 1 or 2 and outlier threshold finite and nonnegative")
+    if specimen_mask is not None:
+        specimen_mask = np.asarray(specimen_mask, dtype=bool)
+        if specimen_mask.shape != reference.shape:
+            raise ValueError("specimen mask must match the reference image shape")
+    if initialization not in ("auto","local"):
+        raise ValueError("initialization must be auto or local")
+    global_transform = _global_initial_transform
+    if initialization == "auto" and global_transform is None and _initial_guesses is None:
+        proposal = estimate_dic_initial_transform(reference,deformed,roi,specimen_mask)
+        if proposal is not None:
+            x,y,w,h = roi
+            initial = _affine_initial_parameters(proposal,x+w/2,y+h/2)
+            if np.linalg.norm(initial[[0,3]]) > max(2.,.6*float(search_radius or 10)) or np.linalg.norm(initial[[1,2,4,5]]) > .02:
+                global_transform = proposal
     subset_size = _odd_subset_size(subset_size)
     step = max(1, int(step))
     solver_name = str(solver).strip().upper().replace("_", "-")
@@ -3646,10 +3879,17 @@ def run_2d_dic(
             min_strain_valid_fraction=min_strain_valid_fraction,
             pyramid_levels=pyramid_levels,
             pyramid_scale=pyramid_scale,
+            specimen_mask=specimen_mask, strain_degree=strain_degree,
+            robust_strain=robust_strain, outlier_threshold_px=outlier_threshold_px,
+            initialization=initialization, _global_initial_transform=global_transform,
         )
     refine = _legacy_refiner_for(solver_name)
+    prepared_images = _prepare_dic_images(reference, deformed) if refine is _CANONICAL_REFINERS[solver_name] else None
     if search_radius is None:
         search_radius = max(8, subset_size // 2)
+    effective_search_radius = int(search_radius)
+    if global_transform is not None:
+        effective_search_radius = min(effective_search_radius, max(3,int(math.ceil(3*global_transform["median_reprojection_error_px"]))))
 
     grid_X, grid_Y = build_poi_grid(roi, subset_size, step, reference.shape)
     if _coordinate_offset is None:
@@ -3662,6 +3902,10 @@ def run_2d_dic(
     X = grid_X - coordinate_offset[0]
     Y = grid_Y - coordinate_offset[1]
     ny, nx = X.shape
+    eligible = np.ones((ny, nx), dtype=bool)
+    if specimen_mask is not None:
+        supported = ndimage.minimum_filter(specimen_mask.astype(np.uint8), size=subset_size, mode="constant", cval=0).astype(bool)
+        eligible = supported[np.rint(grid_Y).astype(int), np.rint(grid_X).astype(int)]
     U = np.full((ny, nx), np.nan, dtype=np.float64)
     V = np.full((ny, nx), np.nan, dtype=np.float64)
     Z = np.full((ny, nx), np.nan, dtype=np.float64)
@@ -3684,9 +3928,14 @@ def run_2d_dic(
 
     for i in range(ny):
         for j in range(nx):
+            if not eligible[i, j]:
+                invalid_reason[i, j] = "MASK_EXCLUDED"
+                if progress_callback is not None:
+                    progress_callback(i*nx+j+1, total)
+                continue
             px = float(grid_X[i, j])
             py = float(grid_Y[i, j])
-            seed = (0.0, 0.0)
+            seed = _affine_initial_parameters(global_transform,px,py) if global_transform is not None else (0.0,0.0)
             if _initial_guesses is not None:
                 seed = _initial_guesses.get((i, j), seed)
             try:
@@ -3706,7 +3955,7 @@ def run_2d_dic(
                 px,
                 py,
                 subset_size,
-                search_radius,
+                effective_search_radius,
                 initial_u=seed_u,
                 initial_v=seed_v,
             )
@@ -3766,6 +4015,7 @@ def run_2d_dic(
                     p0=p0,
                     max_iter=max_iter,
                     tol=conv_tol,
+                    **({"_prepared": prepared_images} if prepared_images is not None else {}),
                 )
             except Exception:
                 result = None
@@ -3854,6 +4104,11 @@ def run_2d_dic(
             if progress_callback is not None:
                 progress_callback(i * nx + j + 1, total)
 
+    raw_U, raw_V = U.copy(), V.copy()
+    spatial_outlier = _displacement_outliers(X, Y, U, V, outlier_threshold_px)
+    U[spatial_outlier] = V[spatial_outlier] = np.nan
+    valid[spatial_outlier] = False
+    invalid_reason[spatial_outlier] = "SPATIAL_OUTLIER"
     strains = compute_strain_fields(
         X,
         Y,
@@ -3862,6 +4117,7 @@ def run_2d_dic(
         window=strain_window,
         smooth_sigma=smooth_sigma,
         max_condition_number=max_condition_number,
+        degree=strain_degree, robust=robust_strain,
     )
     strain_valid = np.asarray(strains["strain_valid"], dtype=bool) & valid
     field = {
@@ -3871,8 +4127,11 @@ def run_2d_dic(
         # raw solver outputs are exposed separately for auditability.
         "u": strains["U"].ravel(),
         "v": strains["V"].ravel(),
-        "u_raw": U.ravel(),
-        "v_raw": V.ravel(),
+        "u_raw": raw_U.ravel(),
+        "v_raw": raw_V.ravel(),
+        "eligible": eligible.ravel(),
+        "spatial_outlier": spatial_outlier.ravel(),
+        "specimen_mask": specimen_mask,
         "zncc": Z.ravel(),
         "valid": valid.ravel(),
         "strain_valid": strain_valid.ravel(),
@@ -3921,12 +4180,26 @@ def run_2d_dic(
         "strain_fit_condition_number": np.asarray(strains["fit_condition_number"], dtype=float).ravel(),
         "strain_fit_residual_rms": np.asarray(strains["fit_residual_rms"], dtype=float).ravel(),
         "fit_point_count": np.asarray(strains["fit_point_count"], dtype=int).ravel(),
+        "strain_fit_effective_count": strains["fit_effective_count"].ravel(),
+        "strain_fit_degree": strains["fit_degree"].ravel(),
+        "dudx_standard_error": strains["gradient_standard_error"][:,:,0].ravel(),
+        "dudy_standard_error": strains["gradient_standard_error"][:,:,1].ravel(),
+        "dvdx_standard_error": strains["gradient_standard_error"][:,:,2].ravel(),
+        "dvdy_standard_error": strains["gradient_standard_error"][:,:,3].ravel(),
         "subset_size": subset_size,
         "step": step,
         "solver": solver_name,
         "roi": tuple(int(round(v)) for v in (_output_roi if _output_roi is not None else roi)),
         "zncc_min": float(zncc_min),
         "smooth_sigma": float(smooth_sigma or 0.0),
+        "interpolation": "quintic_bspline_v1",
+        "strain_degree": int(strain_degree),
+        "robust_strain": bool(robust_strain),
+        "outlier_threshold_px": float(outlier_threshold_px),
+        "strain_gauge_span_px": (int(strains["window"])-1)*step,
+        "initialization": initialization,
+        "effective_search_radius_px": effective_search_radius,
+        "initial_transform": {key: (value.tolist() if isinstance(value,np.ndarray) else value) for key,value in global_transform.items()} if global_transform is not None else None,
         "requested_subset_size": requested_subset_size,
         "requested_strain_window": requested_strain_window,
         "strain_window": int(strains["window"]),
@@ -4024,6 +4297,14 @@ def dic_field_to_dataframe(field, *, include_quality=True):
             ("strain_fit_residual_rms", float),
             ("fit_point_count", int),
             ("strain_invalid_reason", object),
+            ("eligible", bool),
+            ("spatial_outlier", bool),
+            ("strain_fit_degree", int),
+            ("strain_fit_effective_count", float),
+            ("dudx_standard_error", float),
+            ("dudy_standard_error", float),
+            ("dvdx_standard_error", float),
+            ("dvdy_standard_error", float),
         )
         for name, dtype in quality_columns:
             if name in field:
@@ -4042,7 +4323,7 @@ def write_dic_field_txt(field, path):
     for row in table.itertuples(index=False):
         cells = []
         for col, value in zip(columns, row):
-            if col in {"valid", "strain_valid", "peak_is_ambiguous", "converged", "convergence_known"}:
+            if col in {"valid", "strain_valid", "peak_is_ambiguous", "converged", "convergence_known", "eligible", "spatial_outlier"}:
                 cells.append("1" if bool(value) else "0")
             elif col in {"stop_reason", "invalid_reason", "strain_invalid_reason"}:
                 cells.append("" if value is None else str(value))
@@ -4073,6 +4354,16 @@ def write_dic_field_parameters(field, path):
         "effective_strain_window": field.get("effective_strain_window", field.get("strain_window")),
         "requested_strain_window": field.get("requested_strain_window", field.get("strain_window")),
         "smooth_sigma": field.get("smooth_sigma"),
+        "interpolation": field.get("interpolation"),
+        "strain_degree": field.get("strain_degree"),
+        "robust_strain": field.get("robust_strain"),
+        "strain_gauge_span_px": field.get("strain_gauge_span_px"),
+        "outlier_threshold_px": field.get("outlier_threshold_px"),
+        "initialization": field.get("initialization"),
+        "initial_transform": field.get("initial_transform"),
+        "effective_search_radius_px": field.get("effective_search_radius_px"),
+        "mask": field.get("mask_provenance"),
+        "display": field.get("display_options", {}),
         "peak_margin_min": field.get("peak_margin_min"),
         "peak_ratio_min": field.get("peak_ratio_min"),
         "max_condition_number": field.get("max_condition_number"),
@@ -4119,6 +4410,8 @@ def write_dic_field_parameters(field, path):
 def style_dic_colorbar(cbar, preset, label):
     cbar.set_label(label, fontsize=preset["colorbar_label_size"])
     cbar.ax.tick_params(labelsize=preset["colorbar_tick_size"])
+    cbar.locator = matplotlib.ticker.MaxNLocator(nbins=5, min_n_ticks=3)
+    cbar.update_ticks()
     return cbar
 
 
@@ -4134,19 +4427,96 @@ def add_dic_colorbar(fig, ax, mappable, label, preset_name="publication"):
     return style_dic_colorbar(cbar, preset, label)
 
 
-def render_dic_field_on_axes(ax, field, component="u", *, cmap="turbo"):
-    """Draw a POI-grid colormap of one DIC component on an existing axes."""
+def dic_color_limits(field, component, options=None):
+    """One explicit scale for maps and overlays; no percentile clipping."""
+    options = dict(field.get("display_options") or {}) | dict(options or {})
+    values = np.asarray(field[component], dtype=float)
+    scale = 100.0 if options.get("percent", False) and component not in ("u", "v", "zncc") else 1.0
+    finite = values[np.isfinite(values)]*scale
+    mode = options.get("color_mode", "range")
+    if mode == "manual":
+        lo, hi = float(options["vmin"]), float(options["vmax"])
+        if not np.isfinite([lo, hi]).all() or lo >= hi:
+            raise ValueError("color minimum and maximum must be finite and increasing")
+    elif component == "zncc" and mode in ("range", "symmetric"):
+        lo, hi = 0., 1.
+    elif mode == "symmetric":
+        hi = max(float(np.max(np.abs(finite))) if finite.size else 0, 1e-9)
+        lo = -hi
+    elif mode == "range":
+        lo, hi = (float(finite.min()), float(finite.max())) if finite.size else (0., 1.)
+        if hi-lo < 1e-12:
+            padding = max(abs(lo)*.01, 1e-9)
+            lo, hi = lo-padding, hi+padding
+    else:
+        raise ValueError("color mode must be range, symmetric or manual")
+    return lo, hi, scale
+
+
+def _dic_display_mesh(field, component, options=None):
+    """Structured cells only: gaps, holes and folded cells have no triangles."""
     if component not in DIC_FIELD_COMPONENTS:
         raise ValueError(f"unknown DIC component: {component}")
+    options = dict(field.get("display_options") or {}) | dict(options or {})
+    background = options.get("background", "none")
+    if background in ("reference", "deformed"):
+        options["coordinate_frame"] = background
     X = np.asarray(field["X"], dtype=float)
     Y = np.asarray(field["Y"], dtype=float)
-    raw = field[component]
-    values = np.asarray(raw, dtype=float)
-    if values.ndim == 1:
-        values = values.reshape(X.shape)
-    mesh = ax.pcolormesh(X, Y, values, cmap=cmap, shading="nearest")
+    values = np.asarray(field[component], dtype=float).reshape(X.shape)
+    valid = np.isfinite(values) & np.asarray(field.get("valid", np.ones(X.size)), dtype=bool).reshape(X.shape)
+    if component not in ("u", "v", "zncc"):
+        valid &= np.asarray(field.get("strain_valid", np.ones(X.size)), dtype=bool).reshape(X.shape)
+    coordinate = options.get("coordinate_frame", "reference")
+    if coordinate == "deformed":
+        X = X+np.asarray(field["u"]).reshape(X.shape)
+        Y = Y+np.asarray(field["v"]).reshape(Y.shape)
+    elif coordinate != "reference":
+        raise ValueError("coordinate frame must be reference or deformed")
+    valid &= np.isfinite(X)&np.isfinite(Y)
+    triangles = []
+    ny, nx = X.shape
+    specimen = field.get("specimen_mask")
+    if specimen is not None:
+        specimen = np.asarray(specimen,dtype=bool)
+    for i in range(ny-1):
+        for j in range(nx-1):
+            if valid[i:i+2,j:j+2].all():
+                if specimen is not None:
+                    rx = np.asarray(field["X"])[i:i+2,j:j+2]
+                    ry = np.asarray(field["Y"])[i:i+2,j:j+2]
+                    region = specimen[max(0,int(np.ceil(ry.min()))):int(np.floor(ry.max()))+1,
+                                      max(0,int(np.ceil(rx.min()))):int(np.floor(rx.max()))+1]
+                    if region.size == 0 or not region.all():
+                        continue
+                a, b, c, d = i*nx+j, i*nx+j+1, (i+1)*nx+j, (i+1)*nx+j+1
+                for tri in ((a,b,d), (a,d,c)):
+                    tx, ty = X.ravel()[list(tri)], Y.ravel()[list(tri)]
+                    if (tx[1]-tx[0])*(ty[2]-ty[0])-(tx[2]-tx[0])*(ty[1]-ty[0]) > 1e-8:
+                        triangles.append(tri)
+    mesh = mtri.Triangulation(np.nan_to_num(X.ravel()), np.nan_to_num(Y.ravel()), np.asarray(triangles, dtype=int)) if triangles else None
+    return X, Y, values, valid, mesh, options
+
+
+def render_dic_field_on_axes(ax, field, component="u", *, cmap=None, options=None):
+    """Continuous piecewise-linear contours, with original POIs unchanged."""
+    X, Y, values, valid, tri, options = _dic_display_mesh(field, component, options)
+    lo, hi, scale = dic_color_limits(field, component, options)
+    cmap = cmap or options.get("cmap") or ("viridis" if component == "zncc" else "RdBu_r")
+    image = field.get(f"{options.get('background', 'none')}_image")
+    alpha = float(options.get("alpha", .65)) if image is not None else 1.
+    if image is not None:
+        ax.imshow(image, cmap="gray", vmin=0, vmax=255, origin="upper")
+    if tri is not None and options.get("style", "contour") == "contour":
+        minimum,maximum = float(np.min(values[valid]*scale)),float(np.max(values[valid]*scale))
+        extension = "both" if minimum < lo and maximum > hi else ("min" if minimum < lo else ("max" if maximum > hi else "neither"))
+        mesh = ax.tricontourf(tri, np.nan_to_num(values.ravel())*scale, levels=np.linspace(lo,hi,129),
+                             cmap=cmap, vmin=lo, vmax=hi, extend=extension, alpha=alpha)
+    else:
+        mesh = ax.scatter(X[valid], Y[valid], c=values[valid]*scale, cmap=cmap, vmin=lo, vmax=hi, s=12, marker="s")
     ax.set_aspect("equal")
-    ax.invert_yaxis()
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
     ax.set_xlabel("x (px)")
     ax.set_ylabel("y (px)")
     return mesh
@@ -4156,57 +4526,49 @@ def plot_dic_field_map(field, path, component="u", title=None, preset_name="publ
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax, preset = create_plot_figure(preset_name)
+    span_x, span_y = np.ptp(field["X"]), np.ptp(field["Y"])
+    if span_y > 1.8*max(span_x,1):
+        fig.set_size_inches(4.2,6.4)
     mesh = render_dic_field_on_axes(ax, field, component)
     label = DIC_COMPONENT_LABELS.get(component, component)
+    if (field.get("display_options") or {}).get("percent") and component not in ("u", "v", "zncc"):
+        label += " (%)"
     add_dic_colorbar(fig, ax, mesh, label, preset_name=preset_name)
     if title is None:
         title = label
     style_publication_axes(ax, preset, "x (px)", "y (px)", title, show_legend=False)
+    ax.grid(False)
     ax.set_aspect("equal")
     save_plot_figure(fig, path, preset_name)
     return path
 
 
-def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap="turbo"):
+def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap=None, options=None):
     """Blend a DIC colormap onto the specimen image (uint8 RGB)."""
     gray = _as_float_image(image)
     h, w = gray.shape[:2]
     base = cv2.cvtColor(np.clip(gray, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2RGB)
-    X = np.asarray(field["X"], dtype=float)
-    Y = np.asarray(field["Y"], dtype=float)
-    values = np.asarray(field[component], dtype=float)
-    if values.ndim == 1:
-        values = values.reshape(X.shape)
-    finite = np.isfinite(values)
-    if not finite.any():
+    settings = {"coordinate_frame": "deformed"} | dict(field.get("display_options") or {}) | dict(options or {})
+    alpha = float(settings.get("alpha", alpha))
+    if not np.isfinite(alpha) or not 0 <= alpha <= 1:
+        raise ValueError("overlay opacity must be between zero and one")
+    X, Y, values, valid, tri, settings = _dic_display_mesh(field, component, settings)
+    if tri is None:
         return base
-    vmin = float(np.nanpercentile(values[finite], 2))
-    vmax = float(np.nanpercentile(values[finite], 98))
-    if not np.isfinite(vmin) or abs(vmax - vmin) < 1e-12:
-        vmax = vmin + 1e-6
-    norm = np.clip((values - vmin) / (vmax - vmin), 0, 1)
-    cmap_fn = plt.get_cmap(cmap)
-    color = np.zeros((h, w, 3), dtype=np.float32)
-    weight = np.zeros((h, w), dtype=np.float32)
-    half = max(1, int(field.get("step", 5)) // 2)
-    ny, nx = X.shape
-    for i in range(ny):
-        for j in range(nx):
-            if not finite[i, j]:
-                continue
-            cx = int(round(X[i, j]))
-            cy = int(round(Y[i, j]))
-            x0, x1 = max(0, cx - half), min(w, cx + half + 1)
-            y0, y1 = max(0, cy - half), min(h, cy + half + 1)
-            rgb = cmap_fn(float(norm[i, j]))[:3]
-            color[y0:y1, x0:x1, :] += np.float32(rgb)
-            weight[y0:y1, x0:x1] += 1.0
-    mask = weight > 0
-    color[mask] /= weight[mask][:, None]
-    overlay = (color * 255.0).astype(np.uint8)
+    x0, x1 = max(0,int(np.floor(X[valid].min()))), min(w,int(np.ceil(X[valid].max()))+1)
+    y0, y1 = max(0,int(np.floor(Y[valid].min()))), min(h,int(np.ceil(Y[valid].max()))+1)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    interpolator = mtri.LinearTriInterpolator(tri, np.nan_to_num(values.ravel()))
+    pixels = interpolator(xx, yy)
+    mask = ~np.ma.getmaskarray(pixels)
+    vmin, vmax, scale = dic_color_limits(field, component, settings)
+    cmap = cmap or settings.get("cmap") or ("viridis" if component == "zncc" else "RdBu_r")
+    color = plt.get_cmap(cmap)(Normalize(vmin, vmax, clip=True)(pixels.filled(0)*scale))[:,:,:3]
+    overlay = np.clip(color*255, 0, 255).astype(np.uint8)
     out = base.copy()
-    out[mask] = (
-        (1.0 - alpha) * base[mask].astype(np.float32) + alpha * overlay[mask].astype(np.float32)
+    region = out[y0:y1,x0:x1]
+    region[mask] = (
+        (1.0 - alpha) * region[mask].astype(np.float32) + alpha * overlay[mask].astype(np.float32)
     ).astype(np.uint8)
     return out
 
@@ -4216,11 +4578,11 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
     output_dir.mkdir(parents=True, exist_ok=True)
     table_path = write_dic_field_txt(field, output_dir / f"{stem}.txt")
     plot_paths = []
-    for component in ("u", "v", "Exx", "Eyy", "Exy"):
+    for component in DIC_FIELD_COMPONENTS:
         plot_paths.append(
             plot_dic_field_map(
                 field,
-                output_dir / f"{stem}_{component}.png",
+                output_dir / f"{stem}_{DIC_COMPONENT_FILE_SUFFIXES[component]}.png",
                 component=component,
                 preset_name=preset_name,
             )
@@ -4228,7 +4590,16 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
     csv_path = output_dir / f"{stem}.csv"
     dic_field_to_dataframe(field).to_csv(csv_path, index=False)
     parameters_path = write_dic_field_parameters(field, output_dir / f"{stem}_parameters.txt")
-    return {"txt": table_path, "csv": csv_path, "plots": plot_paths, "parameters": parameters_path}
+    arrays = {key: np.asarray(value) for key, value in field.items()
+              if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" and not key.endswith("_image")}
+    parameters = {key: field.get(key) for key in ("subset_size", "step", "strain_window", "smooth_sigma", "strain_degree",
+                  "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px")}
+    arrays["metadata_json"] = np.asarray(json.dumps({"roi": field.get("roi"), "parameters": parameters, "provenance": field.get("provenance", {}),
+                       "interpolation": field.get("interpolation"), "strain_gauge_span_px": field.get("strain_gauge_span_px"),
+                       "mask": field.get("mask_provenance"), "display": field.get("display_options", {})}))
+    array_path = output_dir / f"{stem}.npz"
+    np.savez_compressed(array_path, **arrays)
+    return {"txt": table_path, "csv": csv_path, "plots": plot_paths, "parameters": parameters_path, "arrays": array_path}
 
 def _frame_column(df):
     if "frame_global_1based" in df.columns:
@@ -5140,7 +5511,7 @@ def _is_ezdic_output_pattern(relative, mode=None):
         if relative.startswith("optional/"):
             return bool(re.fullmatch(r"optional/(?:publication_figures|correlation_plots)/[\w.\-/]+\.(?:png|tiff|pdf|svg|eps)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/full_csv/(?:strain_results_all_groups\.csv|per_group_results/strain_results_[\w.\-]+\.csv)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/parameters/(?:tracking_parameters|acceptance_summary)\.txt", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/overlays/[\w.\-]+/tracked_\d{5}\.png", relative, flags=re.IGNORECASE))
     if mode in (None, ANALYSIS_MODE_FULLFIELD) and relative.startswith("dic/"):
-        return bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|Exx|Eyy|Exy|overlay)|_parameters)?\.(?:txt|csv|png)", relative, flags=re.IGNORECASE))
+        return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
     return False
 
 
@@ -6516,6 +6887,10 @@ def _fullfield_settings(settings):
         "step": int(_setting_value(settings, "step", aliases=("dic_step",), section="solver", default=solver.get("step_px", 5))),
         "strain_window": int(_setting_value(settings, "strain_window", aliases=("dic_strain_window",), section="solver", default=solver.get("strain_window_px", 5))),
         "smooth_sigma": float(_setting_value(settings, "smooth_sigma", aliases=("dic_smooth_sigma",), section="solver", default=solver.get("smooth_sigma_poi", 0.0))),
+        "strain_degree": int(_setting_value(settings, "strain_degree", section="solver", default=2)),
+        "robust_strain": bool(_setting_value(settings, "robust_strain", section="solver", default=True)),
+        "outlier_threshold_px": float(_setting_value(settings, "outlier_threshold_px", section="solver", default=1.0)),
+        "initialization": str(_setting_value(settings, "initialization", section="solver", default="auto")),
         "search_radius": int(_setting_value(settings, "search_radius", aliases=("dic_search_radius",), section="solver", default=solver.get("search_radius_px", 20))),
         "solver": str(_setting_value(settings, "solver_name", aliases=("dic_solver",), section="solver", default=solver.get("name", DIC_SOLVER_ICGN))),
         "max_iter": int(_setting_value(settings, "max_iter", section="solver", default=solver.get("max_iterations", 25))),
@@ -6553,6 +6928,7 @@ def run_fullfield_sequence(settings, progress_callback=None):
     reference_raw = inputs["decoded"][inputs["reference_idx"]]
     normalization = _normalization_from_settings(reference_raw, settings)
     reference8 = normalize_with_bounds(reference_raw, normalization)
+    reference_float = normalize_dic_float(reference_raw, normalization)
     roi = settings.get("field_roi")
     if roi is None:
         raise CoreError("NO_FIELD_ROI", {"message": "fullfield mode requires field_roi"})
@@ -6562,6 +6938,8 @@ def run_fullfield_sequence(settings, progress_callback=None):
         raise CoreError("INVALID_FIELD_ROI", {"message": str(exc)}) from exc
     if not rect_is_inside_image(roi, reference8.shape):
         raise CoreError("ROI_OUT_OF_BOUNDS", {"field_roi": roi})
+    specimen_mask, mask_record, mask_identity = _resolve_specimen_mask(reference8, roi, settings)
+    input_identities = inputs["input_identities"] + ([mask_identity] if mask_identity is not None else [])
     min_structure_ratio = float(_setting_value(settings, "min_structure_ratio", section="texture", default=DEFAULT_TEXTURE_MIN_STRUCTURE_RATIO))
     max_directional_coherence = float(_setting_value(settings, "max_directional_coherence", section="texture", default=DEFAULT_TEXTURE_MAX_DIRECTIONAL_COHERENCE))
     min_periodicity_score = float(_setting_value(settings, "min_periodicity_score", section="texture", default=DEFAULT_TEXTURE_MIN_PERIODICITY_SCORE))
@@ -6611,7 +6989,7 @@ def run_fullfield_sequence(settings, progress_callback=None):
     X, Y = build_poi_grid(roi, _odd_subset_size(solver["subset_size"]), solver["step"], reference8.shape)
     if not poi_grid_is_usable(X, Y, min_rows=3, min_cols=3):
         raise CoreError("UNUSABLE_POI_GRID", {"message": "current field ROI must produce at least a 3x3 POI grid"})
-    transaction = RunTransaction(settings.get("output_dir"), config=snapshot, input_identities=inputs["input_identities"], mode=ANALYSIS_MODE_FULLFIELD)
+    transaction = RunTransaction(settings.get("output_dir"), config=snapshot, input_identities=input_identities, mode=ANALYSIS_MODE_FULLFIELD)
     transaction.create_staging()
     output_options = _fullfield_export_options(settings)
     fields = []
@@ -6620,15 +6998,18 @@ def run_fullfield_sequence(settings, progress_callback=None):
     last_image = reference8
     try:
         use_adapter_hooks = bool(settings.get("_gui_adapter", False))
+        if specimen_mask is not None:
+            write_image_checked(transaction.stage_root/"dic"/"specimen_mask.png", specimen_mask.astype(np.uint8)*255)
         run_dic = _adapter_callable("run_2d_dic", run_2d_dic, allow_adapter=use_adapter_hooks)
         export_dic = _adapter_callable("export_dic_field_outputs", export_dic_field_outputs, allow_adapter=use_adapter_hooks)
         for local_index, global_index in enumerate(inputs["processing_indices"]):
             if global_index == inputs["reference_idx"]:
                 continue
             image8 = normalize_with_bounds(inputs["decoded"][global_index], normalization)
+            image_float = normalize_dic_float(inputs["decoded"][global_index], normalization)
             try:
                 field = run_dic(
-                    reference8, image8, roi,
+                    reference_float, image_float, roi,
                     subset_size=solver["subset_size"], step=solver["step"], solver=solver["solver"],
                     search_radius=solver["search_radius"], max_iter=solver["max_iter"], conv_tol=solver["conv_tol"],
                     zncc_min=solver["zncc_min"], strain_window=solver["strain_window"], smooth_sigma=solver["smooth_sigma"],
@@ -6638,10 +7019,16 @@ def run_fullfield_sequence(settings, progress_callback=None):
                     min_correlation_valid_fraction=solver["min_correlation_valid_fraction"],
                     min_strain_valid_fraction=solver["min_strain_valid_fraction"],
                     pyramid_levels=solver["pyramid_levels"], pyramid_scale=solver["pyramid_scale"],
+                    specimen_mask=specimen_mask, strain_degree=solver["strain_degree"],
+                    robust_strain=solver["robust_strain"], outlier_threshold_px=solver["outlier_threshold_px"],
+                    initialization=solver["initialization"],
                 )
             except Exception as exc:
                 raise RuntimeError(f"fullfield solver failed at frame {global_index + 1}: {exc}") from exc
             field = dict(field)
+            field["mask_provenance"] = mask_record
+            field["reference_image"], field["deformed_image"] = reference8, image8
+            field["display_options"] = dict(settings.get("display") or {})
             field["provenance"] = {
                 "analysis_mode": ANALYSIS_MODE_FULLFIELD,
                 "reference_frame_1based": inputs["reference_frame_1based"],
@@ -6650,6 +7037,8 @@ def run_fullfield_sequence(settings, progress_callback=None):
                 "frame_filename": Path(inputs["paths"][global_index]).name,
                 "field_roi": tuple(int(round(value)) for value in roi),
                 "normalization": normalization,
+                "correlation_intensity": "float64 reference-fixed scaling; display uses uint8",
+                "mask": mask_record,
             }
             field["reference_frame_1based"] = inputs["reference_frame_1based"]
             field["reference_filename"] = Path(inputs["paths"][inputs["reference_idx"]]).name
@@ -6696,8 +7085,9 @@ def run_fullfield_sequence(settings, progress_callback=None):
                     expected = [
                         transaction.stage_root / "dic" / f"{stem}.txt",
                         transaction.stage_root / "dic" / f"{stem}.csv",
+                        transaction.stage_root / "dic" / f"{stem}.npz",
                         transaction.stage_root / "dic" / f"{stem}_parameters.txt",
-                        *[transaction.stage_root / "dic" / f"{stem}_{component}.png" for component in ("u", "v", "Exx", "Eyy", "Exy")],
+                        *[transaction.stage_root / "dic" / f"{stem}_{DIC_COMPONENT_FILE_SUFFIXES[component]}.png" for component in DIC_FIELD_COMPONENTS],
                     ]
                     missing = [str(path) for path in expected if not path.is_file()]
                     if missing:

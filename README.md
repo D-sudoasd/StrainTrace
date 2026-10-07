@@ -36,6 +36,13 @@ IC-GN/IC-LM solver diagnostics, explicit point `valid` versus strain-fit
 `strain_valid`, and hash-linked run provenance. The locked synthetic benchmark
 is a regression gate, not an estimate of experimental uncertainty.
 
+The October 2026 2D DIC update adds cached quintic B-spline subpixel sampling,
+validated feature initialization, robust local strain fitting, specimen masks,
+and continuous contours with matching reference/deformed-image overlays.
+See the [workflow, quantitative before/after results, public-data validation,
+and tuning limits](docs/2D_DIC_VALIDATION.md). Display interpolation preserves
+measured POIs and leaves unsupported regions blank.
+
 StrainTrace has two explicit workflows:
 
 1. **Virtual extensometer:** track two user-defined ROI markers and export engineering strain, true strain, QC, and Origin-compatible TXT (optional OPJU).
@@ -52,7 +59,7 @@ Developed by **Dr. Delun Gong** · [DOI 10.5281/zenodo.20222465](https://doi.org
 | You need | StrainTrace provides |
 | --- | --- |
 | Fast 1D strain | Two-ROI virtual extensometer |
-| In-plane full-field maps | Rectangular ROI, POI grid, IC-GN / IC-LM, `u`/`v` and strain components |
+| In-plane full-field maps | ROI and specimen mask, POI grid, IC-GN / IC-LM, nine displacement/correlation/strain components |
 | A fixed comparison frame | Every full-field deformation frame is correlated to the selected reference frame |
 | Honest failures | Failed points/frames remain `NaN`; a full-field run with zero valid strain points fails |
 | Lab plotting | Origin-compatible TXT; optional OPJU; publication colormaps |
@@ -89,10 +96,15 @@ dic/
 ├─ frame_0002_Exx.png
 ├─ frame_0002_Eyy.png
 ├─ frame_0002_Exy.png
+├─ frame_0002_exx_infinitesimal.png    # also eyy_infinitesimal, exy_infinitesimal and zncc maps
+├─ frame_0002.npz        # raw/processed POIs, mask and JSON metadata; no pickle
+├─ specimen_mask.png    # when a specimen mask or exclusions are used
 └─ frame_0002_parameters.txt
 ```
 
 `x`, `y`, `u`, and `v` are in **px**. All strain components are **dimensionless**. `Exx`, `Eyy`, and `Exy` are Green–Lagrange components; `exx`, `eyy`, and `exy` are infinitesimal components. `Exy`/`exy` are **tensor shear components** (the off-diagonal strain terms), not engineering shear values with an extra factor of two.
+
+Green–Lagrange component maps retain `Exx/Eyy/Exy` filenames. Infinitesimal component maps use `exx_infinitesimal/eyy_infinitesimal/exy_infinitesimal` to remain distinct on case-insensitive filesystems; CSV and NPZ component names are unchanged.
 
 The `valid` column records whether a POI correlation passed the quality threshold. `strain_valid` is a separate strain-fit column and is exported after the 12 core measurement fields, together with solver-quality diagnostics. Failed points are exported as `NaN` for measurement fields (`u`/`v`, strain, and quality fields as applicable); `x`/`y` remain the POI grid coordinates. Failed measurements are not interpolated or filled. A frame with no finite strain field is a **normally skipped failed frame**: it contributes no current-frame files, but other valid frames may still be committed if the run has no fatal error. If no analyzed deformation frame has valid strain points, the full-field run fails and is not reported as completed.
 
@@ -138,22 +150,25 @@ Failed tracking frames stay `NaN`. Poisson uses role-averaged groups; tiny axial
 
 ## Desktop workbench
 
-The native desktop UI separates **Image & ROI**, **Analysis results**, and
-**Quality & logs**. Measurement settings stay beside the active workspace;
-the readiness indicator, analysis action, progress, and completion status
-remain visible while the settings scroll. Advanced tracking and export
-options remain available without crowding the primary workflow.
+The desktop uses **two independently resizable windows**. The analysis console
+contains image inputs, parameters, quality checks, logs and progress. The
+image/results window contains ROI drawing, masks, curves and field maps.
+Closing the image window preserves its contents and allows analysis to continue;
+reopen it with the console button or Ctrl + I. Successful analysis shows its
+results automatically. Both windows can be moved or resized independently.
 
-The workbench supports light/dark themes, DPI scaling, centered image
-previews, scrollable zoom, and resizable plots with a navigation toolbar.
-Field maps identify the analyzed and reference frames, show separate
-correlation-valid and strain-valid counts, and retain blank `NaN` regions.
+The workbench supports light/dark themes, DPI scaling, centered image previews,
+scrollable zoom, and plot navigation. Field maps identify the analyzed and
+reference frames, show separate displacement and strain support counts, and
+retain blank invalid regions. A tall specimen remains centered with its
+colorbar adjacent and at the same height.
 
 See the [desktop workflow guide](docs/UI_WORKBENCH.md) for interactions,
-shortcuts, screenshots, and the UI validation scope. The screenshots use
-synthetic speckle images and illustrate software behavior.
+shortcuts, screenshots, and the UI validation scope. The current example uses
+[Ncorr's public plate-with-hole images](https://ncorr.com/download/sample12.zip);
+its numerical checks are recorded in the [DIC validation guide](docs/2D_DIC_VALIDATION.md).
 
-![Desktop workbench with a synthetic image sequence and virtual-extensometer ROIs](assets/ui/workbench-light.png)
+![Independent image/results window showing a plate-with-hole strain field](assets/ui/two-window-results.png)
 
 ## Windows quick start
 
@@ -328,7 +343,19 @@ is better and the default lower bound is 1.02. It is not the inverse
 0.95 correlation-valid fraction and 0.80 strain-valid fraction; they can be
 made stricter in a caller configuration but are never silently relaxed.
 
-The locked v5 synthetic engineering gate currently records the following clean
+The current locked gate is **report v6 / cases v4**, with independently
+evaluated continuous texture and inverse affine targets. Its case hash is
+`0fb244586def285fe0ca6b816eac588ddae8d4a0de0ce1a313b183bf369db138`.
+Small/large translation and affine displacement RMSE are 0.000243,
+0.000143 and 0.000145 px. The displacement RMSE/P95/max gates are
+0.001/0.002/0.005 px; affine strain and consistency gates are 0.0001.
+CSV hashes are verified against each run's report; numerical cross-environment
+baselines use explicit tolerances. Quality ranking includes 551 good and
+16 rejected bad outcomes, while the illustrative threshold remains
+`NOT_CALIBRATED`. See the [current validation report](docs/2D_DIC_VALIDATION.md)
+for interpretation and noise/resolution tradeoffs.
+
+The **historical v5** synthetic engineering gate recorded the following clean
 baseline values (`report_version=ezdic-benchmark-report-v5`,
 `cases_version=ezdic-benchmark-cases-v3`, locked case hash
 `3dbe0dae3fdf8f30ec32c9fd8f036f0a53b4a705380626e7860773f62f31cb20`):
@@ -363,7 +390,7 @@ more accurate or robust than every other DIC project.
 
 ## Scientific and implementation limits
 
-Full-field DIC is an in-plane local-subset method using IC-GN / IC-LM with a first-order affine subset warp. It reports a POI grid, not per-pixel values; it is not stereo / 3D DIC, DVC, GPU/MPI, SIFT/AKAZE feature guidance, crack-topology masking, or global finite-element DIC. Arbitrary experimental texture is not an accepted capability claim. Pixel coordinates and displacements remain in px unless the user supplies an external calibration; strain values are dimensionless. Experimental calibration and uncertainty quantification are not implemented in this target. Failed subsets stay `NaN`, and finite output or a passing synthetic gate is not by itself experimental validation.
+Full-field DIC is an in-plane local-subset method using IC-GN / IC-LM with a first-order affine subset warp. It reports a POI grid, not per-pixel measurements. Validated SIFT/RANSAC initialization and imported/manual/texture masks are available; automatic crack-topology tracking, stereo / 3D DIC, DVC, GPU/MPI and global finite-element DIC are not implemented. Arbitrary experimental texture is not an accepted capability claim. Pixel coordinates and displacements remain in px unless the user supplies an external calibration; strain values are dimensionless. Experimental calibration and uncertainty quantification are not implemented in this target. Failed subsets stay `NaN`, and finite output or a passing synthetic gate is not by itself experimental validation.
 
 Relative to projects with stereo/3D, DVC, global-FE, GPU/MPI, or broader feature-guided solvers, StrainTrace deliberately does not claim those capabilities. Its intended narrow advantage is an auditable local workflow for the fixed-reference 2D tensile-image scenario: one numerical core, deterministic normalization, explicit quality/strain validity, transactional output, and reproducible synthetic gates.
 

@@ -1,0 +1,450 @@
+{
+  "report_version": "dic-research-validation-v1",
+  "date": "2026-10-07",
+  "baseline_commit": "2736691035772a17c34b3d9e856fa30f9bc98612",
+  "analytic": {
+    "before_window5": {
+      "subpixel_sweep": {
+        "rmse_px": 0.03705969037331717,
+        "max_abs_error_px": 0.053515636716673365,
+        "failed": 0,
+        "mean_iterations": 4.0
+      },
+      "translation": {
+        "displacement_rmse_px": 0.03762726884861846,
+        "Exx_rmse": 0.00014506739747388394,
+        "Exx_bias": -7.141930630779528e-06,
+        "Exx_p99_abs_error": 0.00033781041498154345,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.08268889999453677
+      },
+      "affine": {
+        "displacement_rmse_px": 0.03205653401385441,
+        "Exx_rmse": 0.0013743928473816823,
+        "Exx_bias": 0.0002737025516708605,
+        "Exx_p99_abs_error": 0.002156023934820365,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.10526979999849573
+      },
+      "quadratic": {
+        "displacement_rmse_px": 0.03378141065681319,
+        "Exx_rmse": 0.0013571693176328923,
+        "Exx_bias": 0.0005234735240560122,
+        "Exx_p99_abs_error": 0.002737103531703151,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.09768400000029942
+      },
+      "noisy_translation": {
+        "displacement_rmse_px": 0.03457570564488697,
+        "Exx_rmse": 0.0002693019102679818,
+        "Exx_bias": -7.568097633795598e-05,
+        "Exx_p99_abs_error": 0.0006766340119059766,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.0913654999967548
+      },
+      "elapsed_s": 1.003450399999565,
+      "code_sha256": "c48d289020cf28f7ec0ae262dddb83caa6df67f937f7c1fbcdb99b774f9179e6",
+      "texture": "continuous random Fourier texture; independent analytic inverse warp"
+    },
+    "after_window5": {
+      "subpixel_sweep": {
+        "rmse_px": 2.549833535365661e-06,
+        "max_abs_error_px": 3.724070155641801e-06,
+        "failed": 0,
+        "mean_iterations": 4.0
+      },
+      "translation": {
+        "displacement_rmse_px": 3.22877329656666e-05,
+        "Exx_rmse": 1.4098003513454257e-06,
+        "Exx_bias": -5.456133164186779e-07,
+        "Exx_p99_abs_error": 5.591988622003496e-06,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.23398160000215285
+      },
+      "affine": {
+        "displacement_rmse_px": 3.0973724475021976e-05,
+        "Exx_rmse": 6.494339633934189e-07,
+        "Exx_bias": 1.5013948349077306e-07,
+        "Exx_p99_abs_error": 3.1021233361054563e-06,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.22490050000487827
+      },
+      "quadratic": {
+        "displacement_rmse_px": 0.0033720468409968694,
+        "Exx_rmse": 0.0001201906406136349,
+        "Exx_bias": 3.6560388514958346e-05,
+        "Exx_p99_abs_error": 0.0004535515433024294,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.2152882000009413
+      },
+      "noisy_translation": {
+        "displacement_rmse_px": 0.006817424747828808,
+        "Exx_rmse": 0.00029649229209863465,
+        "Exx_bias": -6.727012022962245e-05,
+        "Exx_p99_abs_error": 0.0010358694900370051,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.32325020000280347
+      },
+      "elapsed_s": 1.5995858000023873,
+      "code_sha256": "972dd46bea7a03720df26e17f1a26e2472e8a683c91562e50468ec0d502a904e",
+      "texture": "continuous random Fourier texture; independent analytic inverse warp",
+      "parameters": {
+        "subset_size_px": 25,
+        "step_px": 8,
+        "strain_window_poi": 5,
+        "strain_gauge_span_px": 32,
+        "smooth_sigma": 0.0
+      }
+    },
+    "after_window7": {
+      "subpixel_sweep": {
+        "rmse_px": 2.549833535365661e-06,
+        "max_abs_error_px": 3.724070155641801e-06,
+        "failed": 0,
+        "mean_iterations": 4.0
+      },
+      "translation": {
+        "displacement_rmse_px": 3.22877329656666e-05,
+        "Exx_rmse": 1.3513693166008572e-06,
+        "Exx_bias": -4.4850590093514776e-07,
+        "Exx_p99_abs_error": 6.162075048353737e-06,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.22002969999448396
+      },
+      "affine": {
+        "displacement_rmse_px": 3.0973724475021976e-05,
+        "Exx_rmse": 2.7237387818992706e-07,
+        "Exx_bias": 5.5418624546386213e-08,
+        "Exx_p99_abs_error": 1.2101239644150821e-06,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.24045879999903264
+      },
+      "quadratic": {
+        "displacement_rmse_px": 0.0033720468409968694,
+        "Exx_rmse": 8.446104789774128e-05,
+        "Exx_bias": 2.248583378112359e-05,
+        "Exx_p99_abs_error": 0.0003265602680183477,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.23821850000240374
+      },
+      "noisy_translation": {
+        "displacement_rmse_px": 0.006817424747828808,
+        "Exx_rmse": 0.0001698005291864242,
+        "Exx_bias": -7.288298951095498e-05,
+        "Exx_p99_abs_error": 0.0003916794485372716,
+        "valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "elapsed_s": 0.380214500000875
+      },
+      "elapsed_s": 1.7291115999978501,
+      "code_sha256": "972dd46bea7a03720df26e17f1a26e2472e8a683c91562e50468ec0d502a904e",
+      "texture": "continuous random Fourier texture; independent analytic inverse warp",
+      "parameters": {
+        "subset_size_px": 25,
+        "step_px": 8,
+        "strain_window_poi": 7,
+        "strain_gauge_span_px": 48,
+        "smooth_sigma": 0.0
+      }
+    }
+  },
+  "ncorr_plate_hole": {
+    "source": "https://ncorr.com/download/sample12.zip",
+    "input_sha256": {
+      "ohtcfrp_00.tif": "590a69e5d5e3baf14d6f5084d367a4df413c9cf064f72e7208fd3584e3942412",
+      "ohtcfrp_04.tif": "75345cd6b95b0dce01934ac98db871b6999c1de79ea1d588d9ed3eade380cd2b",
+      "ohtcfrp_08.tif": "f61d51bf408bfed5181f72e3f4a9a2abcebaf60d14ed9411f12380a3233ae093",
+      "roi.tif": "f4aa4584fda88847a45d8b6fa55fab810c38d524677b0881f6244effa8aef63e"
+    },
+    "core_sha256": "972dd46bea7a03720df26e17f1a26e2472e8a683c91562e50468ec0d502a904e",
+    "settings": {
+      "subset_size": 31,
+      "step": 8,
+      "search_radius": 16,
+      "strain_window": 5,
+      "smooth_sigma": 0.0,
+      "max_iter": 40,
+      "zncc_min": 0.85,
+      "after_reject_nonconverged": true
+    },
+    "roi_xywh": [
+      45,
+      30,
+      302,
+      975
+    ],
+    "records": {
+      "ohtcfrp_04.tif": {
+        "after": {
+          "correlation_fraction": 1.0,
+          "strain_fraction": 1.0,
+          "scientific_ok": true,
+          "converged_valid_count": 3784,
+          "median_zncc": 0.9979178720201667,
+          "median_Eyy": 0.0024426417562122826,
+          "Eyy_p01_p99": [
+            0.0005392463728034313,
+            0.004233737499351163
+          ],
+          "median_fit_residual_px": 0.0013807321959506886,
+          "invalid_reasons": {
+            "MASK_EXCLUDED": 262
+          }
+        },
+        "before_unmasked": {
+          "correlation_fraction": 0.9866534849233811,
+          "strain_fraction": 0.9866534849233811,
+          "scientific_ok": true,
+          "converged_valid_count": 3187,
+          "median_zncc": 0.9959980619413132,
+          "median_Eyy": 0.00236543876190054,
+          "Eyy_p01_p99": [
+            -0.001957742918321341,
+            0.012023587290115016
+          ],
+          "median_fit_residual_px": 0.0057634428368218546,
+          "invalid_reasons": {
+            "AMBIGUOUS_PEAK": 5,
+            "ZNCC_BELOW_THRESHOLD": 49
+          }
+        },
+        "common_domain_fit_residual_px": {
+          "point_count": 3784,
+          "before": 0.005657406915545102,
+          "after": 0.0013807321959506886
+        }
+      },
+      "ohtcfrp_08.tif": {
+        "after": {
+          "correlation_fraction": 1.0,
+          "strain_fraction": 1.0,
+          "scientific_ok": true,
+          "converged_valid_count": 3784,
+          "median_zncc": 0.9979020359293982,
+          "median_Eyy": 0.005081768478397974,
+          "Eyy_p01_p99": [
+            0.0013335673809218862,
+            0.00867854235859733
+          ],
+          "median_fit_residual_px": 0.0013990192806390106,
+          "invalid_reasons": {
+            "MASK_EXCLUDED": 262
+          }
+        },
+        "before_unmasked": {
+          "correlation_fraction": 0.9859120118635689,
+          "strain_fraction": 0.9859120118635689,
+          "scientific_ok": true,
+          "converged_valid_count": 3497,
+          "median_zncc": 0.9961608221876744,
+          "median_Eyy": 0.005037433130172797,
+          "Eyy_p01_p99": [
+            0.000934230109594556,
+            0.015101159496480972
+          ],
+          "median_fit_residual_px": 0.0052747705504110065,
+          "invalid_reasons": {
+            "AMBIGUOUS_PEAK": 5,
+            "ZNCC_BELOW_THRESHOLD": 52
+          }
+        },
+        "common_domain_fit_residual_px": {
+          "point_count": 3784,
+          "before": 0.005166759522335265,
+          "after": 0.0013990192806390106
+        }
+      }
+    },
+    "boundary": "Public experimental imagery; no independent strain ground truth or VIC-2D comparison."
+  },
+  "py2dic_natural_texture": {
+    "source": "py2DIC LabTest GFRP",
+    "crop_xyxy": [
+      2600,
+      0,
+      3820,
+      3456
+    ],
+    "roi_xywh": [
+      350,
+      40,
+      820,
+      3330
+    ],
+    "settings": {
+      "subset_size": 81,
+      "step": 48,
+      "search_radius": 40,
+      "strain_window": 7,
+      "max_iter": 40,
+      "zncc_min": 0.85,
+      "reject_nonconverged": true
+    },
+    "exclusion_xywh": [
+      0,
+      1540,
+      1000,
+      500
+    ],
+    "records": {
+      "IMG_0050.JPG": {
+        "quality": {
+          "point_count": 1088,
+          "eligible_point_count": 920,
+          "masked_point_count": 168,
+          "spatial_outlier_count": 0,
+          "correlation_valid_count": 229,
+          "strain_valid_count": 160,
+          "correlation_valid_fraction": 0.24891304347826088,
+          "strain_valid_fraction": 0.17391304347826086,
+          "converged_count": 276,
+          "convergence_known_count": 789,
+          "converged_fraction": 0.34980988593155893,
+          "invalid_reason_histogram": {
+            "ZNCC_BELOW_THRESHOLD": 346,
+            "NOT_CONVERGED": 214,
+            "AMBIGUOUS_PEAK": 131,
+            "MASK_EXCLUDED": 168
+          },
+          "ambiguous_rejected_count": 131,
+          "ambiguous_accepted_count": 0,
+          "unsafe_accept_count": 0,
+          "false_accept_count": 0,
+          "false_reject_count": 560,
+          "false_reject_proxy_count": 560,
+          "false_reject_is_proxy": true,
+          "ambiguous_count": 131,
+          "residual_threshold_enabled": false,
+          "max_residual_rms": null,
+          "scientific_ok": false,
+          "scientific_reasons": [
+            "correlation_valid_fraction_below_threshold",
+            "strain_valid_fraction_below_threshold"
+          ],
+          "thresholds": {
+            "min_correlation_valid_fraction": 0.95,
+            "min_strain_valid_fraction": 0.8
+          }
+        },
+        "converged": 276,
+        "accepted_nonconverged": 0,
+        "initial_transform": {
+          "matrix": [
+            [
+              1.0013192466766379,
+              0.0020909458135571664,
+              -3.58949569189985
+            ],
+            [
+              -0.01170399953632451,
+              1.001120746319898,
+              58.23732442941196
+            ]
+          ],
+          "matches": 73,
+          "inliers": 61,
+          "median_reprojection_error_px": 0.9523529561755159
+        }
+      },
+      "IMG_0100.JPG": {
+        "quality": {
+          "point_count": 1088,
+          "eligible_point_count": 920,
+          "masked_point_count": 168,
+          "spatial_outlier_count": 1,
+          "correlation_valid_count": 182,
+          "strain_valid_count": 122,
+          "correlation_valid_fraction": 0.19782608695652174,
+          "strain_valid_fraction": 0.13260869565217392,
+          "converged_count": 233,
+          "convergence_known_count": 729,
+          "converged_fraction": 0.3196159122085048,
+          "invalid_reason_histogram": {
+            "ZNCC_BELOW_THRESHOLD": 362,
+            "NOT_CONVERGED": 184,
+            "AMBIGUOUS_PEAK": 191,
+            "MASK_EXCLUDED": 168,
+            "SPATIAL_OUTLIER": 1
+          },
+          "ambiguous_rejected_count": 191,
+          "ambiguous_accepted_count": 0,
+          "unsafe_accept_count": 0,
+          "false_accept_count": 0,
+          "false_reject_count": 547,
+          "false_reject_proxy_count": 547,
+          "false_reject_is_proxy": true,
+          "ambiguous_count": 191,
+          "residual_threshold_enabled": false,
+          "max_residual_rms": null,
+          "scientific_ok": false,
+          "scientific_reasons": [
+            "correlation_valid_fraction_below_threshold",
+            "strain_valid_fraction_below_threshold"
+          ],
+          "thresholds": {
+            "min_correlation_valid_fraction": 0.95,
+            "min_strain_valid_fraction": 0.8
+          }
+        },
+        "converged": 233,
+        "accepted_nonconverged": 0,
+        "initial_transform": {
+          "matrix": [
+            [
+              0.9994084749947975,
+              0.0033395344799559707,
+              1.8636071378262502
+            ],
+            [
+              -0.006190263533480921,
+              1.0081124064378637,
+              169.61532467859197
+            ]
+          ],
+          "matches": 69,
+          "inliers": 46,
+          "median_reprojection_error_px": 0.7549652320216358
+        }
+      }
+    },
+    "core_sha256": "972dd46bea7a03720df26e17f1a26e2472e8a683c91562e50468ec0d502a904e",
+    "input_sources": [
+      {
+        "name": "IMG_0010.JPG",
+        "url": "https://raw.githubusercontent.com/Geod-Geom/py2DIC/master/LabTest/IMG_0010.JPG",
+        "bytes": 2677429,
+        "sha256": "7738640444452e988142fe114e06addc139453eb99f416423f6f94933b10d10b"
+      },
+      {
+        "name": "IMG_0050.JPG",
+        "url": "https://raw.githubusercontent.com/Geod-Geom/py2DIC/master/LabTest/IMG_0050.JPG",
+        "bytes": 2549732,
+        "sha256": "3a205ea7da5540501f88ecee9e6966dde116f1943a0c7d817065e5149e95e624"
+      },
+      {
+        "name": "IMG_0100.JPG",
+        "url": "https://raw.githubusercontent.com/Geod-Geom/py2DIC/master/LabTest/IMG_0100.JPG",
+        "bytes": 2530788,
+        "sha256": "ff3a911905ccc3ad5949415f0be5bcbdb66bf892f1da981d4fa453a9071abd72"
+      },
+      {
+        "name": "strain_gauge_measurements.txt",
+        "url": "https://raw.githubusercontent.com/Geod-Geom/py2DIC/master/LabTest/strain_gauge_measurements.txt",
+        "bytes": 108130,
+        "sha256": "fbae961a65b9d73ee0d64dd64e39c3579dd784e1b6d044f0c630570afcdd171b"
+      }
+    ]
+  },
+  "interpretation": "Engineering validation, not experimental calibration or VIC-2D equivalence."
+}

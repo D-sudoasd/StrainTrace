@@ -318,7 +318,10 @@ def test_run_2d_dic_sequence_matches_single_frame():
 
 def test_ic_refinement_beats_integer_guess_on_shipped_icgn():
     tx, ty = 1.37, -0.62
-    reference, deformed, roi = _speckle_pair_translation(tx, ty, seed=3)
+    # A quantized OpenCV warp embeds a sampling bias in the manufactured
+    # target. Evaluate an independent continuous image for subpixel truth.
+    from benchmarks.research_validation import analytic_pair
+    reference, deformed = analytic_pair(u=tx, v=ty)
     x = y = 64.0
     u0, v0, cc = ezdic.integer_cc_guess(reference, deformed, x, y, 21, search_radius=8)
     assert cc > 0.5

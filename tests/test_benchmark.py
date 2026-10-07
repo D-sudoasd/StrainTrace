@@ -20,22 +20,22 @@ def test_locked_benchmark_emits_strict_metrics_and_hash_linked_csv(tmp_path: Pat
     report = RUNNER.run_benchmark(Path("benchmarks/cases_v1.json"), tmp_path)
     assert report["overall_pass"] is True
     assert report["exit_code"] == 0
-    assert report["report_version"] == "ezdic-benchmark-report-v5"
-    assert report["cases_version"] == "ezdic-benchmark-cases-v3"
+    assert report["report_version"] == "ezdic-benchmark-report-v6"
+    assert report["cases_version"] == "ezdic-benchmark-cases-v4"
     quality = report["quality_error"]
     assert quality["good_label_count"] > 0
-    assert quality["bad_label_count"] >= 2
+    assert quality["ranking_bad_label_count"] >= 2
     assert quality["roc_auc"] >= 0.90
     assert quality["error_tolerance_px"] == pytest.approx(0.25)
     assert quality["quality_threshold_evaluated"] is False
     assert quality["quality_threshold_pass"] is None
     assert quality["threshold_status"] == "NOT_CALIBRATED"
-    assert quality["false_accept_rate"] == pytest.approx(1.0)
-    assert quality["false_accept_count"] == 2
-    assert quality["bad_label_count"] == 2
+    assert quality["false_accept_rate"] is None
+    assert quality["false_accept_count"] == 0
+    assert quality["bad_label_count"] == 0
     assert quality["false_reject_rate"] == pytest.approx(0.0)
-    assert quality["ranking_bad_label_count"] == 4
-    assert quality["ranking_rejected_bad_count"] == 2
+    assert quality["ranking_bad_label_count"] == 16
+    assert quality["ranking_rejected_bad_count"] == 16
     assert quality["corruption_row_count"] == 4
     cases = {case["case_id"]: case for case in report["cases"]}
     assert cases["small_translation"]["metrics"]["valid_fraction"] >= 0.95

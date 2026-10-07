@@ -198,7 +198,12 @@ benchmark 模块以及 `schemas/run_config_v1.json`。`ezdic_frozen_entrypoint.p
 必要支持文件；只有当 `EZDIC_FROZEN_SMOKE_MARKER` 明确指向调用方临时路径时才写入
 marker，默认不写仓库或用户输出目录。
 
-锁定的 v5 合成工程 gate（`report_version=ezdic-benchmark-report-v5`、
+当前 2D DIC 增强（2026-10-07）：五阶 B 样条亚像素计算、经验证的特征初值、
+稳健一阶/二阶应变拟合、试样遮罩、连续云图及 NPZ 数值导出。
+完整操作、公开数据验证和噪声/分辨率取舍见 docs/2D_DIC_VALIDATION.md。
+当前工程基准为 report-v6 / cases-v4，位移 RMSE 门槛 0.001 px，质量分数仍未标定。
+
+以下为历史 v5 合成工程 gate（`report_version=ezdic-benchmark-report-v5`、
 `cases_version=ezdic-benchmark-cases-v3`、locked case hash
 `3dbe0dae3fdf8f30ec32c9fd8f036f0a53b4a705380626e7860773f62f31cb20`）在固定几何、
 种子、clean baseline 和图像 corruption panel 下的观测值为：
@@ -269,6 +274,9 @@ dic/
 ├─ frame_0002_Exx.png
 ├─ frame_0002_Eyy.png
 ├─ frame_0002_Exy.png
+├─ frame_0002_exx_infinitesimal.png    # 另有 eyy_infinitesimal、exy_infinitesimal 和 zncc 图
+├─ frame_0002.npz        # POI 原始/处理后数组、遮罩与 JSON 元数据
+├─ specimen_mask.png    # 启用遮罩或排除区时
 └─ frame_0002_parameters.txt
 ```
 
@@ -290,8 +298,14 @@ dic/
 - 1D 导出项在全场模式下不参与 2D 核心输出，也不会成为 2D 分析的开始条件。
 
 本开发目标明确不实现或不宣称：立体/3D DIC、DVC、GPU/MPI、全局有限元 DIC、
-SIFT/AKAZE 特征引导、任意实验纹理鲁棒性、裂纹/遮挡拓扑 mask、实验标定和不确定度
+任意实验纹理鲁棒性、自动裂纹拓扑跟踪、实验标定和不确定度
 量化。上述方向需要独立的基线、数据和科学验收，不能由本次合成基准替代。
+
+已实现经过检查的 SIFT/RANSAC 仿射初值、同尺寸导入遮罩、纹理候选遮罩和矩形排除区。
+遮罩文件应放在图像序列目录外。子集必须完整位于保留区域中，孔边未测区域保持空白。
+结果图的“显示设置”可选择连续云图/测量点、参考图/变形图底图、完整/对称/手动色标
+和应变百分数。九个分量 PNG、原始数值 TXT/CSV、NPZ 与参数均自动输出；显示插值
+不会填补失败点或改变测量值。比较不同帧时应使用一致的手动色标和相同单位。
 
 默认输出
 --------
@@ -326,3 +340,7 @@ Gong, D. (2026). ezDIC: A lightweight virtual extensometer for extracting linear
 安全提示
 --------
 当前版本未进行代码签名。部分电脑上的 Windows Defender 或 SmartScreen 可能显示“未知发布者”警告。
+
+独立窗口工作流：分析控制台负责图像序列、参数、质量与进度；“图像与结果”窗口负责 ROI、遮罩和结果，可独立调整大小、移动或放到另一个屏幕。关闭图像窗口仅收起窗口，保留 ROI 和结果；控制台顶部按钮或 Ctrl + I 可重新打开。“排列窗口”恢复屏幕内排列。详见 docs/UI_WORKBENCH.md。
+
+应变图文件名：Green–Lagrange 分量为 Exx/Eyy/Exy，无穷小分量为 exx_infinitesimal/eyy_infinitesimal/exy_infinitesimal；两类应变图在 Windows 上独立保存。数值表和 NPZ 中的分量名不变。

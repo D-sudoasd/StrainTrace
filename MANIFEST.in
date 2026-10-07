@@ -5,6 +5,8 @@ recursive-include paper *.md *.bib *.png *.svg *.py
 recursive-include tests *.py
 recursive-include schemas *.json
 recursive-include benchmarks *.json
+recursive-include assets/validation *.png
+recursive-include assets/ui *.png
 include RELEASE_NOTES*.md
 
 recursive-include docs/joss *.md *.json

@@ -1,159 +1,191 @@
 {
-  "cases": [
-    {
-      "case_id": "small_translation",
-      "kind": "translation",
-      "pyramid_levels": 1,
-      "search_radius": 8,
-      "seed": 17,
-      "translation": [2.3, -1.2]
-    },
-    {
-      "case_id": "large_translation",
-      "kind": "translation",
-      "pyramid_levels": 3,
-      "search_radius": 8,
-      "seed": 17,
-      "translation": [28.0, -18.0]
-    },
-    {
-      "F": [
-        [1.012, 0.007],
-        [-0.004, 0.989]
-      ],
-      "case_id": "small_affine_strain",
-      "center": [95.5, 95.5],
-      "kind": "affine",
-      "pyramid_levels": 1,
-      "search_radius": 8,
-      "seed": 23
-    },
-    {
-      "case_id": "near_1d_periodic",
-      "kind": "near_1d_periodic",
-      "period_px": 16,
-      "pyramid_levels": 1,
-      "search_radius": 8,
-      "seed": 29,
-      "translation": [2.0, -1.0]
-    }
-  ],
+  "version": "ezdic-benchmark-cases-v4",
+  "migration": {
+    "previous_version": "ezdic-benchmark-cases-v3",
+    "reason": "independent continuous texture and inverse deformation; remove OpenCV sampling bias; tighten numeric error limits"
+  },
   "contract": {
-    "coordinate_order": "row-major y then x; exactly 81 locked POIs",
-    "image_shape": [192, 192],
-    "reference_frame": "fixed clean reference; each deformed image is compared to it",
-    "roi": [40, 60, 88, 88],
-    "solver": {
-      "smooth_sigma": 0.0,
-      "step": 8,
-      "strain_window": 5,
-      "subset_size": 21,
-      "zncc_min": 0.75
-    },
+    "image_shape": [
+      192,
+      192
+    ],
+    "roi": [
+      40,
+      60,
+      88,
+      88
+    ],
+    "subset_size": 21,
     "step": 8,
     "strain_window": 5,
-    "subset_size": 21
+    "coordinate_order": "row-major y then x; exactly 81 locked POIs",
+    "reference_frame": "fixed clean reference; each deformed image is compared to it",
+    "solver": {
+      "subset_size": 21,
+      "step": 8,
+      "zncc_min": 0.75,
+      "strain_window": 5,
+      "smooth_sigma": 0.0,
+      "initialization": "local"
+    },
+    "image_generator": "analytic_random_fourier_v1"
   },
   "quality_contract": {
+    "version": "quality_score_v1",
+    "error_tolerance_px": 0.25,
+    "quality_validity_required": true,
+    "illustrative_quality_threshold": {
+      "status": "NOT_CALIBRATED",
+      "quality_accept_score_min": 0.5
+    },
+    "roc_auc_min": 0.9,
+    "minimum_bad_label_count": 2,
+    "minimum_corruption_row_count": 4,
+    "score_components": {
+      "zncc": 0.25,
+      "second_peak_margin": 0.15,
+      "second_peak_ratio_best_over_second": 0.15,
+      "residual_rms": 0.15,
+      "hessian_condition_number": 0.15,
+      "iterations": 0.05,
+      "converged": 0.1
+    },
+    "score_normalization": {
+      "zncc_floor": 0.5,
+      "zncc_span": 0.5,
+      "second_peak_margin_span": 0.25,
+      "second_peak_ratio_floor": 1.0,
+      "second_peak_ratio_span": 0.75,
+      "residual_rms_scale": 0.1,
+      "hessian_condition_ceiling": 1000.0,
+      "iterations_free_ceiling": 8.0,
+      "iterations_span": 40.0
+    },
+    "texture_preflight": {
+      "version": "texture_preflight_v2",
+      "min_std": 8.0,
+      "min_contrast": 25.0,
+      "max_saturated_frac": 0.2,
+      "min_structure_ratio": 0.02,
+      "max_directional_coherence": 0.85,
+      "min_periodicity_score": 0.9
+    },
     "corruption_panel": {
+      "version": "image_corruption_panel_v1",
       "apply_to": "deformed_image_only",
       "target_coordinate": "oracle_deformed_poi_center",
       "variants": [
         {
+          "variant_id": "gaussian_noise_target_0",
           "case_ids": [
             "small_translation",
             "large_translation"
+          ],
+          "target_point_indices": [
+            0
           ],
           "radius_px": 3,
-          "seed": 1701,
           "sigma_gray": 160.0,
-          "target_point_indices": [0],
-          "variant_id": "gaussian_noise_target_0"
+          "seed": 1701
         },
         {
+          "variant_id": "gaussian_noise_target_80",
           "case_ids": [
             "small_translation",
             "large_translation"
           ],
+          "target_point_indices": [
+            80
+          ],
           "radius_px": 4,
-          "seed": 1701,
           "sigma_gray": 160.0,
-          "target_point_indices": [80],
-          "variant_id": "gaussian_noise_target_80"
+          "seed": 1701
         }
-      ],
-      "version": "image_corruption_panel_v1"
-    },
-    "error_tolerance_px": 0.25,
-    "minimum_bad_label_count": 2,
-    "minimum_corruption_row_count": 4,
-    "quality_validity_required": true,
-    "illustrative_quality_threshold": {
-      "quality_accept_score_min": 0.5,
-      "status": "NOT_CALIBRATED"
-    },
-    "roc_auc_min": 0.9,
-    "score_components": {
-      "converged": 0.1,
-      "hessian_condition_number": 0.15,
-      "iterations": 0.05,
-      "residual_rms": 0.15,
-      "second_peak_margin": 0.15,
-      "second_peak_ratio_best_over_second": 0.15,
-      "zncc": 0.25
-    },
-    "score_normalization": {
-      "hessian_condition_ceiling": 1000.0,
-      "iterations_free_ceiling": 8.0,
-      "iterations_span": 40.0,
-      "residual_rms_scale": 0.1,
-      "second_peak_margin_span": 0.25,
-      "second_peak_ratio_floor": 1.0,
-      "second_peak_ratio_span": 0.75,
-      "zncc_floor": 0.5,
-      "zncc_span": 0.5
-    },
-    "texture_preflight": {
-      "max_directional_coherence": 0.85,
-      "max_saturated_frac": 0.2,
-      "min_contrast": 25.0,
-      "min_periodicity_score": 0.9,
-      "min_structure_ratio": 0.02,
-      "min_std": 8.0,
-      "version": "texture_preflight_v2"
-    },
-    "version": "quality_score_v1"
+      ]
+    }
   },
   "thresholds": {
+    "small_translation": {
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.001,
+      "p95_error_px_max": 0.002,
+      "max_error_px_max": 0.005
+    },
     "large_translation": {
-      "max_error_px_max": 0.15,
-      "p95_error_px_max": 0.1,
-      "rmse_px_max": 0.05,
-      "valid_fraction_min": 0.95
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.001,
+      "p95_error_px_max": 0.002,
+      "max_error_px_max": 0.005
+    },
+    "small_affine_strain": {
+      "valid_fraction_min": 0.95,
+      "rmse_px_max": 0.001,
+      "p95_error_px_max": 0.002,
+      "max_error_px_max": 0.005,
+      "strain_component_abs_error_max": 0.0001,
+      "strain_valid_fraction_min": 0.8,
+      "strain_consistency_abs_error_max": 0.0001
     },
     "near_1d_periodic": {
       "expected_failure_code": "AMBIGUOUS_TEXTURE",
       "max_successful_export_artifacts": 0
-    },
-    "small_affine_strain": {
-      "max_error_px_max": 0.15,
-      "p95_error_px_max": 0.1,
-      "rmse_px_max": 0.05,
-      "strain_component_abs_error_max": 0.0005,
-      "strain_consistency_abs_error_max": 0.0005,
-      "strain_valid_fraction_min": 0.8,
-      "valid_fraction_min": 0.95
-    },
-    "small_translation": {
-      "max_error_px_max": 0.15,
-      "p95_error_px_max": 0.1,
-      "rmse_px_max": 0.05,
-      "valid_fraction_min": 0.95
     }
   },
-  "migration": {
-    "previous_version": "ezdic-benchmark-cases-v2",
-    "reason": "strict numeric gates and natural image-level corruption panel"
-  },
-  "version": "ezdic-benchmark-cases-v3"
+  "cases": [
+    {
+      "case_id": "small_translation",
+      "kind": "translation",
+      "seed": 17,
+      "translation": [
+        2.3,
+        -1.2
+      ],
+      "pyramid_levels": 1,
+      "search_radius": 8
+    },
+    {
+      "case_id": "large_translation",
+      "kind": "translation",
+      "seed": 17,
+      "translation": [
+        28.0,
+        -18.0
+      ],
+      "pyramid_levels": 3,
+      "search_radius": 8
+    },
+    {
+      "case_id": "small_affine_strain",
+      "kind": "affine",
+      "seed": 23,
+      "F": [
+        [
+          1.012,
+          0.007
+        ],
+        [
+          -0.004,
+          0.989
+        ]
+      ],
+      "center": [
+        95.5,
+        95.5
+      ],
+      "pyramid_levels": 1,
+      "search_radius": 8
+    },
+    {
+      "case_id": "near_1d_periodic",
+      "kind": "near_1d_periodic",
+      "seed": 29,
+      "period_px": 16,
+      "translation": [
+        2.0,
+        -1.0
+      ],
+      "pyramid_levels": 1,
+      "search_radius": 8
+    }
+  ]
 }

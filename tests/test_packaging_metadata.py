@@ -206,6 +206,7 @@ def assert_widget_fully_visible_in(container, widget, *, min_width=20, min_heigh
 
 
 def scroll_workflow_widget_into_view(root, app, widget):
+    app.control_notebook.select(app.settings_page)
     root.update()
     root.update_idletasks()
     bbox = app.controls_canvas.bbox("all")
@@ -287,7 +288,7 @@ def test_window_title_contains_developer(gui_app):
     root, _app = gui_app
     title = root.title()
 
-    assert title == "ezDIC v0.1.4 - Developed by Dr. Delun Gong - DOI: 10.5281/zenodo.20222465"
+    assert title == "分析控制台 · ezDIC v0.1.4 - Developed by Dr. Delun Gong - DOI: 10.5281/zenodo.20222465"
 
 
 def test_gui_initializes_poisson_role_selection(gui_app):
@@ -326,7 +327,7 @@ def test_gui_minimum_size_fits_research_laptop_width(gui_app):
     min_w, min_h = root.minsize()
     # Hidden tables and inactive notebook pages may request a wider size;
     # the actual viewport is checked below, rather than their natural size.
-    assert min_w >= 1040
+    assert 620 <= min_w < 1040
     assert min_w <= 1366
     assert min_h <= 768
 
@@ -361,14 +362,14 @@ def test_gui_layout_fits_research_laptop_viewport(gui_app):
         assert getattr(app, attr, None) is not None
 
     assert_widget_fully_visible_in(app.controls_frame, app.workflow_guide_frame)
-    assert_widget_fully_visible_in(app.controls_frame, app.workflow_hint_label)
+    assert_widget_fully_visible_in(root, app.workflow_hint_label)
     assert app.workflow_hint_var.get().strip()
 
     root_w = root.winfo_width()
     root_h = root.winfo_height()
     root_x = root.winfo_rootx()
     root_y = root.winfo_rooty()
-    for widget in [app.canvas, app.controls_canvas, app.run_frame, app.start_button, app.progress]:
+    for widget in [app.controls_canvas, app.run_frame, app.start_button, app.progress]:
         assert widget.winfo_width() > 20
         assert widget.winfo_height() > 10
         x0 = widget.winfo_rootx() - root_x
@@ -384,9 +385,11 @@ def test_gui_layout_fits_research_laptop_viewport(gui_app):
     for widget in [app.roi1_button, app.roi2_button, app.group_tree]:
         scroll_workflow_widget_into_view(root, app, widget)
         assert_widget_fully_visible_in(app.controls_canvas, widget)
-    app.workspace_notebook.select(app.quality_page)
+    app.control_notebook.select(app.quality_page)
+    app.quality_notebook.select(app.log_page)
     root.update()
     assert_widget_fully_visible_in(app.quality_page, app.log_text)
+    app.control_notebook.select(app.settings_page)
     root.withdraw()
 
 
@@ -413,6 +416,7 @@ def test_export_preset_buttons_fit_research_laptop_viewport(gui_app):
 
 def test_measurement_settings_are_primary_and_visible_on_laptop_viewport(gui_app):
     root, app = gui_app
+    app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
     root.update()
@@ -426,7 +430,7 @@ def test_measurement_settings_are_primary_and_visible_on_laptop_viewport(gui_app
     assert getattr(app, "workflow_panel", None) is app.controls_panel
     assert app.controls_canvas.winfo_height() >= 250
     assert app.measure_frame.winfo_height() >= 160
-    assert_widget_fully_visible_in(app.controls_frame, app.workflow_hint_label)
+    assert_widget_fully_visible_in(root, app.workflow_hint_label)
     assert_widget_fully_visible_in(root, app.start_button)
 
     for widget in [
@@ -473,6 +477,7 @@ def test_minimum_view_keeps_measurement_panel_and_image_canvas_useful(gui_app):
 
 def test_expanded_advanced_settings_scroll_without_hiding_base_measurement_controls(gui_app):
     root, app = gui_app
+    app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
     try:
@@ -496,6 +501,7 @@ def test_expanded_advanced_settings_scroll_without_hiding_base_measurement_contr
             app.strain_mode_box,
             app.tracking_preset_box,
         ]:
+            scroll_workflow_widget_into_view(root, app, widget)
             assert_widget_fully_visible_in(app.controls_canvas, widget)
     finally:
         if app.advanced_visible.get():
@@ -577,7 +583,7 @@ def test_auto_fit_shrinks_when_canvas_becomes_smaller(gui_app, tmp_path):
     root, app = gui_app
     reset_gui_app(app)
     root.deiconify()
-    root.geometry("1480x900+0+0")
+    app.visual_window.geometry("1480x900+0+0")
     root.update()
     root.update_idletasks()
 
@@ -594,7 +600,7 @@ def test_auto_fit_shrinks_when_canvas_becomes_smaller(gui_app, tmp_path):
     root.update_idletasks()
     large_h, large_w = app.display_img.shape[:2]
 
-    root.geometry("1120x740+0+0")
+    app.visual_window.geometry("1120x740+0+0")
     root.update()
     root.update_idletasks()
     app.fit_image_to_view()
@@ -619,8 +625,8 @@ def test_gui_beginner_workflow_and_key_button_tooltips_are_available(gui_app):
 
     tooltip_targets = [
         ("load_images_button", getattr(app, "load_images_button", None), "加载"),
-        ("add_group_button", getattr(app, "add_group_button", None), "ROI"),
-        ("start_button", app.start_button, "开始分析"),
+        ("add_group_button", getattr(app, "add_group_button", None), "测量框"),
+        ("start_button", app.start_button, "开始计算"),
     ]
     for name, widget, expected_text in tooltip_targets:
         assert widget is not None, f"{name} should be available for GUI tests"
@@ -758,8 +764,8 @@ def test_export_preset_buttons_are_named_and_explained(gui_app):
     _root, app = gui_app
 
     expected = {
-        "export_research_preset_button": ("推荐", "核心"),
-        "export_quick_preset_button": ("快速查看", "QC"),
+        "export_research_preset_button": ("推荐", "数值表格"),
+        "export_quick_preset_button": ("快速查看", "质量摘要"),
         "export_all_preset_button": ("完整导出", "OriginPro"),
     }
     for attr, (text, tooltip_keyword) in expected.items():
@@ -1593,7 +1599,7 @@ def test_pyinstaller_build_files_define_green_folder_release():
     spec_text = spec.read_text(encoding="utf-8")
     script_text = build_script.read_text(encoding="utf-8")
 
-    for package in ["opencv-python", "numpy", "pandas", "matplotlib", "pillow"]:
+    for package in ["opencv-python", "numpy", "pandas", "matplotlib", "pillow", "scipy"]:
         assert package in req_text
     assert "originpro" not in req_text
     assert "originpro" in (ROOT / "requirements-origin.txt").read_text(encoding="utf-8")
@@ -2534,14 +2540,18 @@ def test_fullfield_overlay_checkbox_and_workflow_steps_are_visible_and_mode_spec
     root.update_idletasks()
     assert app.fullfield_export_info_frame.grid_info()
     fullfield_text = app.workflow_steps_label.cget("text")
-    assert "全场 ROI" in fullfield_text
-    assert "DIC 分析" in fullfield_text
+    assert "参考图片" in fullfield_text
+    assert "分析区域" in fullfield_text
+    assert "开始分析" in fullfield_text
 
     app.analysis_mode.set(ezdic.ANALYSIS_MODE_EXTENSOMETER)
     app.set_analysis_mode()
     root.update_idletasks()
     assert app.fullfield_export_info_frame.grid_info() == {}
-    assert "ROI 配对" in app.workflow_steps_label.cget("text")
+    extensometer_text = app.workflow_steps_label.cget("text")
+    assert "两个测量框" in extensometer_text
+    assert "开始分析" in extensometer_text
+    assert fullfield_text != extensometer_text
 
 
 def test_processing_rejects_duplicate_start_while_completion_is_pending(gui_app, monkeypatch):

@@ -192,8 +192,9 @@ def test_fullfield_real_files_publish_pyramid_and_verify(tmp_path: Path) -> None
     assert result["manifest"]["frames"][0]["strain_valid_fraction"] >= 0.75
     valid = np.asarray(result["fields"][0]["valid"], dtype=bool)
     strain_valid = np.asarray(result["fields"][0]["strain_valid"], dtype=bool)
-    assert valid.sum() == 43
-    assert strain_valid.sum() == 43
+    assert valid.mean() >= .75
+    assert strain_valid.mean() >= .75
+    assert np.all(~strain_valid | valid)
     assert float(np.nanmean(np.asarray(result["fields"][0]["u"])[valid])) == pytest.approx(0.8, abs=0.25)
     assert float(np.nanmean(np.asarray(result["fields"][0]["v"])[valid])) == pytest.approx(-0.25, abs=0.25)
     assert core.verify_run_manifest(manifest_path)["ok"] is True

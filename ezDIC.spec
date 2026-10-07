@@ -9,7 +9,7 @@ same headless CLI contract as ``python ezdic_cli.py`` in a source checkout.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 
 # PyInstaller executes a spec in a generated namespace without ``__file__``;
@@ -32,6 +32,12 @@ root_datas = [
     (source_file("LICENSE.txt"), "."),
     (source_file("CITATION.cff"), "."),
     (source_file("schemas/run_config_v1.json"), "schemas"),
+    (source_file("docs/2D_DIC_VALIDATION.md"), "docs"),
+    (source_file("docs/UI_WORKBENCH.md"), "docs"),
+    (source_file("docs/validation/dic_research_20261007.json"), "docs/validation"),
+    (source_file("assets/validation/plate-hole-Eyy.png"), "assets/validation"),
+    (source_file("assets/ui/two-window-control.png"), "assets/ui"),
+    (source_file("assets/ui/two-window-results.png"), "assets/ui"),
 ]
 # Keep auditable source copies in the onedir bundle.  PyInstaller executes the
 # modules from its archive, so these copies let the frozen smoke record stable
@@ -50,7 +56,7 @@ benchmark_datas = [
     (source_file("benchmarks/run_benchmark.py"), "sources/benchmarks"),
     (source_file("benchmarks/synthetic_cases.py"), "sources/benchmarks"),
 ]
-common_datas = root_datas + source_datas + benchmark_datas + collect_data_files("matplotlib")
+common_datas = root_datas + source_datas + benchmark_datas + collect_data_files("matplotlib") + copy_metadata("scipy")
 common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
@@ -82,7 +88,6 @@ common_excludes = [
     "dask",
     "pyarrow",
     "fsspec",
-    "scipy",
     "win32com",
     "pythoncom",
     "pywintypes",

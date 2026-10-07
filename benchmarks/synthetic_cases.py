@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-CASE_DOCUMENT_VERSION = "ezdic-benchmark-cases-v3"
+CASE_DOCUMENT_VERSION = "ezdic-benchmark-cases-v4"
 QUALITY_SCORE_VERSION = "quality_score_v1"
 CORRUPTION_PANEL_VERSION = "image_corruption_panel_v1"
 ERROR_TOLERANCE_PX = 0.25
@@ -27,6 +27,7 @@ SOLVER_SETTINGS = {
     "zncc_min": 0.75,
     "strain_window": STRAIN_WINDOW,
     "smooth_sigma": 0.0,
+    "initialization": "local",
 }
 TEXTURE_PREFLIGHT = {
     "version": "texture_preflight_v2",
@@ -74,8 +75,8 @@ def _locked_document() -> dict[str, Any]:
     return {
         "version": CASE_DOCUMENT_VERSION,
         "migration": {
-            "previous_version": "ezdic-benchmark-cases-v2",
-            "reason": "strict numeric gates and natural image-level corruption panel",
+            "previous_version": "ezdic-benchmark-cases-v3",
+            "reason": "independent continuous texture and inverse deformation; remove OpenCV sampling bias; tighten numeric error limits",
         },
         "contract": {
             "image_shape": list(IMAGE_SHAPE),
@@ -86,6 +87,7 @@ def _locked_document() -> dict[str, Any]:
             "coordinate_order": "row-major y then x; exactly 81 locked POIs",
             "reference_frame": "fixed clean reference; each deformed image is compared to it",
             "solver": SOLVER_SETTINGS,
+            "image_generator": "analytic_random_fourier_v1",
         },
         "quality_contract": {
             "version": QUALITY_SCORE_VERSION,
@@ -128,24 +130,24 @@ def _locked_document() -> dict[str, Any]:
         "thresholds": {
             "small_translation": {
                 "valid_fraction_min": 0.95,
-                "rmse_px_max": 0.05,
-                "p95_error_px_max": 0.10,
-                "max_error_px_max": 0.15,
+                "rmse_px_max": 0.001,
+                "p95_error_px_max": 0.002,
+                "max_error_px_max": 0.005,
             },
             "large_translation": {
                 "valid_fraction_min": 0.95,
-                "rmse_px_max": 0.05,
-                "p95_error_px_max": 0.10,
-                "max_error_px_max": 0.15,
+                "rmse_px_max": 0.001,
+                "p95_error_px_max": 0.002,
+                "max_error_px_max": 0.005,
             },
             "small_affine_strain": {
                 "valid_fraction_min": 0.95,
-                "rmse_px_max": 0.05,
-                "p95_error_px_max": 0.10,
-                "max_error_px_max": 0.15,
-                "strain_component_abs_error_max": 5e-4,
+                "rmse_px_max": 0.001,
+                "p95_error_px_max": 0.002,
+                "max_error_px_max": 0.005,
+                "strain_component_abs_error_max": 1e-4,
                 "strain_valid_fraction_min": 0.80,
-                "strain_consistency_abs_error_max": 5e-4,
+                "strain_consistency_abs_error_max": 1e-4,
             },
             "near_1d_periodic": {
                 "expected_failure_code": "AMBIGUOUS_TEXTURE",
@@ -262,6 +264,21 @@ def _oracle_for_case(case: Mapping[str, Any], coordinates: Any) -> tuple[Any, An
     return displacement[:, 0], displacement[:, 1], np.asarray((E[0, 0], E[1, 1], E[0, 1]), dtype=float)
 
 
+def analytic_texture(x, y, seed=381):
+    """Continuous texture evaluated independently of the DIC sampler."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    angles = rng.uniform(0, 2*np.pi, 100)
+    frequencies = rng.uniform(.025, .145, 100)
+    phases = rng.uniform(0, 2*np.pi, 100)
+    amplitudes = rng.uniform(.4, 1., 100)
+    result = np.full(np.broadcast_shapes(np.shape(x),np.shape(y)),128.)
+    scale = 34/np.sqrt(np.sum(amplitudes**2)/2)
+    for angle,frequency,phase,amplitude in zip(angles,frequencies,phases,amplitudes):
+        result += scale*amplitude*np.cos(2*np.pi*frequency*(np.cos(angle)*x+np.sin(angle)*y)+phase)
+    return np.clip(result,0,255)
+
+
 def make_case(case: Mapping[str, Any], *, core_module: Any | None = None) -> dict[str, Any]:
     """Return clean deterministic images and analytic POI oracles."""
 
@@ -278,16 +295,18 @@ def make_case(case: Mapping[str, Any], *, core_module: Any | None = None) -> dic
         tx, ty = (float(value) for value in case["translation"])
         deformed = np.asarray(core.warp_image_translation(reference, tx, ty), dtype=np.float32)
     else:
-        reference = np.asarray(core.generate_synthetic_speckle(*IMAGE_SHAPE, seed=int(case["seed"])), dtype=np.float32)
+        yy, xx = np.indices(IMAGE_SHAPE, dtype=float)
+        reference = analytic_texture(xx, yy, seed=int(case["seed"]))
         if case["kind"] == "translation":
             tx, ty = (float(value) for value in case["translation"])
-            deformed = np.asarray(core.warp_image_translation(reference, tx, ty), dtype=np.float32)
+            deformed = analytic_texture(xx-tx, yy-ty, seed=int(case["seed"]))
         elif case["kind"] == "affine":
             F = np.asarray(case["F"], dtype=float).reshape(2, 2)
-            deformed = np.asarray(
-                core.warp_image_deformation_gradient(reference, F, center=np.asarray(case["center"], dtype=float)),
-                dtype=np.float32,
-            )
+            center = np.asarray(case["center"], dtype=float)
+            inverse = np.linalg.inv(F)
+            dx, dy = xx-center[0], yy-center[1]
+            rx, ry = inverse[0,0]*dx+inverse[0,1]*dy+center[0], inverse[1,0]*dx+inverse[1,1]*dy+center[1]
+            deformed = analytic_texture(rx, ry, seed=int(case["seed"]))
         else:
             raise ValueError(f"unsupported locked case kind: {case['kind']}")
     return {
@@ -311,8 +330,8 @@ def apply_image_corruption(
 
     import numpy as np
 
-    reference = np.asarray(fixture["reference"], dtype=np.float32).copy()
-    deformed = np.asarray(fixture["deformed"], dtype=np.float32).copy()
+    reference = np.asarray(fixture["reference"]).copy()
+    deformed = np.asarray(fixture["deformed"]).copy()
     coordinates = np.asarray(fixture["coordinates"], dtype=float)
     if str(case["case_id"]) not in variant.get("case_ids", []):
         raise ValueError(f"corruption variant {variant.get('variant_id')} is not locked for {case['case_id']}")

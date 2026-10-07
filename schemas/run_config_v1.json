@@ -23,6 +23,8 @@
     "quality": {"$ref": "#/$defs/quality"},
     "solver": {"$ref": "#/$defs/solver"},
     "pyramid": {"$ref": "#/$defs/pyramid"},
+    "mask": {"$ref": "#/$defs/mask"},
+    "display": {"$ref": "#/$defs/display"},
     "normalization": {"$ref": "#/$defs/normalization"},
     "export": {"$ref": "#/$defs/export"},
     "transaction": {"$ref": "#/$defs/transaction"},
@@ -39,7 +41,7 @@
       "if": {"properties": {"analysis_mode": {"const": "extensometer"}}},
       "then": {
         "required": ["roi_groups"],
-        "not": {"anyOf": [{"required": ["field_roi"]}, {"required": ["solver"]}, {"required": ["pyramid"]}]},
+        "not": {"anyOf": [{"required": ["field_roi"]}, {"required": ["solver"]}, {"required": ["pyramid"]}, {"required": ["mask"]}, {"required": ["display"]}]},
         "properties": {
           "quality": {"not": {"anyOf": [{"required": ["zncc_min"]}, {"required": ["max_condition_number"]}, {"required": ["max_residual_rms"]}, {"required": ["reject_nonconverged"]}, {"required": ["min_correlation_valid_fraction"]}]}}
         }
@@ -148,8 +150,27 @@
         "smooth_sigma_poi": {"$ref": "#/$defs/nonNegativeNumber", "description": "POI-grid index units."},
         "search_radius_px": {"type": "integer", "minimum": 1},
         "max_iterations": {"type": "integer", "minimum": 1},
-        "tolerance": {"$ref": "#/$defs/positiveNumber"}
+        "tolerance": {"$ref": "#/$defs/positiveNumber"},
+        "strain_degree": {"type": "integer", "enum": [1, 2], "description": "Maximum polynomial order; supported curvature selects order 2."},
+        "robust_strain": {"type": "boolean"},
+        "outlier_threshold_px": {"$ref": "#/$defs/nonNegativeNumber", "description": "Local prediction rejection floor in pixels; zero disables rejection. Raw measurements are retained."},
+        "initialization": {"enum": ["auto", "local"], "description": "auto may use a validated SIFT/RANSAC affine initial guess for large motion; every POI still requires local correlation."}
       }
+    },
+    "mask": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"mode": {"enum": ["none", "auto", "file"]}, "path": {"type": ["string", "null"]}, "texture_threshold": {"$ref": "#/$defs/positiveNumber"}, "exclusions": {"type": "array", "items": {"$ref": "#/$defs/rect"}}},
+      "allOf": [{"if": {"required": ["mode"], "properties": {"mode": {"const": "file"}}}, "then": {"required": ["path"], "properties": {"path": {"type": "string", "minLength": 1}}}, "else": {"properties": {"path": {"type": "null"}}}}]
+    },
+    "display": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "style": {"enum": ["contour", "points"]}, "color_mode": {"enum": ["range", "symmetric", "manual"]},
+        "vmin": {"type": ["number", "null"]}, "vmax": {"type": ["number", "null"]},
+        "coordinate_frame": {"enum": ["reference", "deformed"]}, "background": {"enum": ["none", "reference", "deformed"]},
+        "percent": {"type": "boolean"}, "alpha": {"$ref": "#/$defs/fraction"}, "cmap": {"enum": ["RdBu_r", "viridis", "cividis", "turbo"]}
+      },
+      "allOf": [{"if": {"required": ["color_mode"], "properties": {"color_mode": {"const": "manual"}}}, "then": {"required": ["vmin", "vmax"], "properties": {"vmin": {"type": "number"}, "vmax": {"type": "number"}}}, "else": {"properties": {"vmin": {"type": "null"}, "vmax": {"type": "null"}}}}]
     },
     "pyramid": {
       "type": "object",
