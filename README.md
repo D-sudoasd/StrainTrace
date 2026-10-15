@@ -8,6 +8,8 @@
 
 A dual-mode desktop and headless workstation for image-based strain analysis. Choose a two-ROI gauge for strain histories, or a rectangular field ROI and specimen mask for local-subset in-plane digital image correlation.
 
+**批次项目：**桌面与 `straintrace campaign` 共用采集身份、ROI 建议与人工审核、可恢复分析、时间／载荷对齐及版本化交付。已有接受结果可只读导入并复用，不必清空重算。见[中文批次指南](docs/CAMPAIGN_WORKFLOW.md)与[AI 阅读说明](docs/CAMPAIGN_AI_README.md)。
+
 [Windows / 源码启动](#windows-quick-start) · [桌面工作流](docs/UI_WORKBENCH.md) · [二维验证与参数](docs/2D_DIC_VALIDATION.md) · [输出约定](#full-field-output-contract) · [引用](#cite)
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465) [![MIT](https://img.shields.io/badge/License-MIT-455A64)](LICENSE.txt)

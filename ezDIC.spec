@@ -32,6 +32,9 @@ root_datas = [
     (source_file("LICENSE.txt"), "."),
     (source_file("CITATION.cff"), "."),
     (source_file("schemas/run_config_v1.json"), "schemas"),
+    (source_file("schemas/campaign_config_v1.json"), "schemas"),
+    (source_file("docs/CAMPAIGN_WORKFLOW.md"), "docs"),
+    (source_file("docs/CAMPAIGN_AI_README.md"), "docs"),
     (source_file("docs/2D_DIC_VALIDATION.md"), "docs"),
     (source_file("docs/UI_WORKBENCH.md"), "docs"),
     (source_file("docs/validation/dic_research_20261007.json"), "docs/validation"),
@@ -49,6 +52,10 @@ source_datas = [
     (source_file("ezdic_cli.py"), "sources"),
     (source_file("ezdic_benchmark.py"), "sources"),
 ]
+source_datas += [
+    (str(path), "sources/" + str(path.parent.relative_to(PROJECT_ROOT)).replace("\\", "/"))
+    for path in sorted((PROJECT_ROOT / "straintrace_campaign").rglob("*.py"))
+]
 benchmark_datas = [
     # The JSON is runtime data; source copies are retained for audit hashes
     # when the package modules execute from the PyInstaller archive.
@@ -64,6 +71,19 @@ common_hiddenimports = [
     "benchmarks",
     "benchmarks.run_benchmark",
     "benchmarks.synthetic_cases",
+    "straintrace_campaign",
+    "straintrace_campaign.models",
+    "straintrace_campaign.storage",
+    "straintrace_campaign.workflow",
+    "straintrace_campaign.cli",
+    "straintrace_campaign.roi",
+    "straintrace_campaign.numerics",
+    "straintrace_campaign.alignment",
+    "straintrace_campaign.delivery",
+    "straintrace_campaign.gui",
+    "straintrace_campaign.adapters",
+    "straintrace_campaign.adapters.generic",
+    "straintrace_campaign.adapters.desy",
 ]
 # The source workflow uses Tk and Matplotlib's Agg/Tk backends.  A developer
 # machine may have multiple optional Qt bindings installed; excluding them

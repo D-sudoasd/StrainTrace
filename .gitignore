@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environments
 .venv/
 .venv-build/
+.venv-system/
 
 # PyInstaller and release build outputs
 build/
@@ -27,6 +28,7 @@ Thumbs.db
 
 *.egg-info/
 outputs/
+analysis_outputs/
 paper/paper.pdf
 paper/paper.tex
 paper/paper.html

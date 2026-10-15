@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://straintrace.org/schema/campaign_config_v1.json",
+  "title": "StrainTrace campaign project v1",
+  "description": "Strict persistent metadata for reusable DIC campaigns. Missing measurements are null; image and measurement frame namespaces stay explicit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "project_id", "name", "roots", "acquisitions", "metadata"],
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "kind": {"const": "straintrace_campaign", "type": "string"},
+    "project_id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "roots": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "acquisitions": {"type": "array", "items": {"$ref": "#/$defs/acquisition"}},
+    "metadata": {"type": "object"}
+  },
+  "$defs": {
+    "finiteOrNull": {"type": ["number", "null"]},
+    "rect": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "minimum": 1},
+        {"type": "integer", "minimum": 1}
+      ],
+      "minItems": 4,
+      "maxItems": 4,
+      "items": false
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["area_mm2", "width_mm", "thickness_mm", "status", "source"],
+      "properties": {
+        "area_mm2": {"allOf": [{"$ref": "#/$defs/finiteOrNull"}, {"type": ["number", "null"], "exclusiveMinimum": 0}]},
+        "width_mm": {"allOf": [{"$ref": "#/$defs/finiteOrNull"}, {"type": ["number", "null"], "exclusiveMinimum": 0}]},
+        "thickness_mm": {"allOf": [{"$ref": "#/$defs/finiteOrNull"}, {"type": ["number", "null"], "exclusiveMinimum": 0}]},
+        "status": {"type": "string", "minLength": 1},
+        "source": {"type": ["string", "null"]}
+      }
+    },
+    "imageFrame": {
+      "type": "object",
+      "required": ["frame", "native_frame", "path"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "native_frame": {"type": "integer", "minimum": 0},
+        "path": {"type": "string", "minLength": 1},
+        "timestamp_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "estimated_timestamp_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "time_s": {"$ref": "#/$defs/finiteOrNull"},
+        "timestamp_source": {"type": ["string", "null"]},
+        "timestamp_status": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "measurementFrame": {
+      "type": "object",
+      "required": ["frame", "native_cbf_frame", "scan_id", "scan_id_is_global_fio"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "native_cbf_frame": {"type": "integer", "minimum": 0},
+        "scan_id": {"type": ["integer", "string", "null"]},
+        "scan_id_is_global_fio": {"type": "boolean"},
+        "timestamp_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "estimated_timestamp_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "time_s": {"$ref": "#/$defs/finiteOrNull"},
+        "exposure_start_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "exposure_end_unix_s": {"$ref": "#/$defs/finiteOrNull"},
+        "timestamp_source": {"type": ["string", "null"]},
+        "timestamp_status": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "roiGroup": {
+      "type": "object",
+      "required": ["name", "roi1", "roi2"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "roi1": {"$ref": "#/$defs/rect"},
+        "roi2": {"$ref": "#/$defs/rect"}
+      },
+      "additionalProperties": true
+    },
+    "roi": {
+      "type": "object",
+      "required": ["free_region", "groups", "reference_frame", "reference_path", "reference_sha256", "proposal_hash"],
+      "properties": {
+        "free_region": {"$ref": "#/$defs/rect"},
+        "exclusions": {"type": "array", "items": {"$ref": "#/$defs/rect"}},
+        "groups": {"type": "array", "items": {"$ref": "#/$defs/roiGroup"}},
+        "reference_frame": {"type": "integer", "minimum": 0},
+        "reference_path": {"type": "string", "minLength": 1},
+        "reference_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "proposal_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "diagnostics": {"type": "object"},
+        "preview_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_hash", "reference_sha256", "reviewer", "approved_at", "specimen_confirmed"],
+      "properties": {
+        "proposal_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "reference_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "reviewer": {"type": "string", "minLength": 1},
+        "approved_at": {"type": "string", "minLength": 1},
+        "specimen_confirmed": {"const": true, "type": "boolean"},
+        "review_status": {"enum": ["APPROVED"]}
+      }
+    },
+    "stageRecord": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "fingerprint", "rows_path", "artifacts", "checksums", "provenance", "summary"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "fingerprint": {"type": "string", "minLength": 1},
+        "rows_path": {"type": "string", "minLength": 1},
+        "artifacts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "checksums": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "provenance": {"type": "object"},
+        "summary": {"type": "object"}
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acquisition_id", "name", "relative_path", "source_kind", "physical_specimen_id", "dimensions", "analysis_mode", "image_frames", "measurement_frames", "roi", "approval", "analysis_config", "result", "alignment", "metadata"],
+      "properties": {
+        "acquisition_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "relative_path": {"type": "string", "minLength": 1},
+        "source_kind": {"type": "string", "minLength": 1},
+        "physical_specimen_id": {"type": ["string", "null"]},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "analysis_mode": {"enum": ["extensometer", "fullfield"]},
+        "image_frames": {"type": "array", "items": {"$ref": "#/$defs/imageFrame"}},
+        "measurement_frames": {"type": "array", "items": {"$ref": "#/$defs/measurementFrame"}},
+        "roi": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/roi"}]},
+        "approval": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/approval"}]},
+        "analysis_config": {"type": "object"},
+        "result": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/stageRecord"}]},
+        "alignment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/stageRecord"}]},
+        "metadata": {"type": "object"}
+      }
+    }
+  }
+}
