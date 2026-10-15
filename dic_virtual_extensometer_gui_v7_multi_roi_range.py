@@ -3362,11 +3362,13 @@ class MultiROIGUI:
                 return ""
         else:
             index = self.workspace_notebook.index("current")
-        return (
+        help_text = (
             "点击查看图片并画测量框。ROI 就是要追踪或计算的图片区域；先选参考图片，再按住左键拖出矩形。",
             "点击查看分析得到的曲线或彩色结果图。完成分析后，可在这里放大、移动或保存图表。",
-            "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。",
-        )[index]
+            "点击查看 campaign 项目的首、中、末参考帧、自由段和引伸计取点；编辑仍在控制台批次项目页进行。",
+            "查看当前批次的 frame-strain 曲线及已生成的图像叠图。",
+        )
+        return help_text[index] if 0 <= index < len(help_text) else ""
 
     def _group_table_help(self, event=None):
         action = "单击选中一组，双击载入编辑；右键可载入、更新或删除。"
@@ -4115,6 +4117,13 @@ class MultiROIGUI:
             page.rowconfigure(0, weight=1)
         self.control_notebook.add(self.settings_page, text="分析设置")
         self.control_notebook.add(self.quality_page, text="质量与日志")
+        # Campaign support is a separate workflow surface. Import only its Tk
+        # page here; the campaign service layer remains lazy until an action is
+        # started, preserving the legacy single-sequence import path.
+        from straintrace_campaign.gui import CampaignPage
+
+        self.campaign_page = CampaignPage(self.control_notebook, app=self)
+        self.control_notebook.add(self.campaign_page, text="批次项目")
         self.add_tooltip(self.control_notebook, self._control_workspace_help)
 
         self.visual_window = tk.Toplevel(self.root)
@@ -4143,11 +4152,63 @@ class MultiROIGUI:
         self.workspace_notebook.grid(row=1, column=0, sticky="nsew")
         self.image_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
         self.results_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
+        self.campaign_visual_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
         for page in (self.image_page, self.results_page):
             page.columnconfigure(0, weight=1)
             page.rowconfigure(0, weight=1)
         self.workspace_notebook.add(self.image_page, text="图像与 ROI")
         self.workspace_notebook.add(self.results_page, text="分析结果")
+        self.campaign_visual_page.columnconfigure(0, weight=1)
+        self.campaign_visual_page.rowconfigure(1, weight=1)
+        ttk.Label(self.campaign_visual_page, text="批次 DIC 参考帧与已审核取点").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(8, 2))
+        self.campaign_preview_info_var = tk.StringVar(value="请在控制台的“批次项目”页选择批次和参考帧。")
+        ttk.Label(self.campaign_visual_page, textvariable=self.campaign_preview_info_var).grid(
+            row=2, column=0, sticky="w", padx=10, pady=(2, 8))
+        self.campaign_preview_canvas = tk.Canvas(
+            self.campaign_visual_page, background="#111827", height=410, highlightthickness=0)
+        self.campaign_preview_canvas.grid(row=1, column=0, sticky="nsew", padx=6)
+        self.add_tooltip(self.campaign_preview_canvas,
+                         "查看批次参考帧及已审核 ROI；取点坐标对应参考图像，图像或几何变化后需重新审核。")
+        self.campaign_preview_canvas.bind(
+            "<Configure>", lambda _event: self.campaign_page.render_roi_preview()
+            if hasattr(self, "campaign_page") else None)
+        self.workspace_notebook.add(self.campaign_visual_page, text="批次图像")
+        self.campaign_result_visual_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
+        self.campaign_result_visual_page.columnconfigure(0, weight=1)
+        self.campaign_result_visual_page.rowconfigure(1, weight=1)
+        ttk.Label(self.campaign_result_visual_page, text="已对齐的 Frame-strain 曲线与结果叠图").grid(
+            row=0, column=0, sticky="w", padx=10, pady=(8, 2))
+        campaign_results = ttk.Panedwindow(self.campaign_result_visual_page, orient=tk.HORIZONTAL)
+        campaign_results.grid(row=1, column=0, sticky="nsew", padx=6)
+        campaign_plot_frame = ttk.LabelFrame(campaign_results, text="Frame-strain")
+        campaign_overlay_frame = ttk.LabelFrame(campaign_results, text="DIC 叠图附件")
+        campaign_results.add(campaign_plot_frame, weight=2)
+        campaign_results.add(campaign_overlay_frame, weight=1)
+        campaign_plot_frame.columnconfigure(0, weight=1)
+        campaign_plot_frame.rowconfigure(0, weight=1)
+        self.campaign_result_canvas = tk.Canvas(campaign_plot_frame, background="#ffffff", height=390,
+                                                highlightthickness=0)
+        self.campaign_result_canvas.grid(row=0, column=0, sticky="nsew")
+        self.add_tooltip(self.campaign_result_canvas,
+                         "查看所选批次的 Frame 应变曲线；只绘制有效有限值，完整逐帧数据和质量原因见项目结果文件。")
+        self.campaign_result_canvas.bind(
+            "<Configure>", lambda _event: self.campaign_page._draw_result_curve()
+            if hasattr(self, "campaign_page") else None)
+        campaign_overlay_frame.columnconfigure(0, weight=1)
+        campaign_overlay_frame.rowconfigure(0, weight=1)
+        self.campaign_result_overlay_canvas = tk.Canvas(
+            campaign_overlay_frame, background="#111827", height=390, highlightthickness=0)
+        self.campaign_result_overlay_canvas.grid(row=0, column=0, sticky="nsew")
+        self.add_tooltip(self.campaign_result_overlay_canvas,
+                         "查看所选分析阶段输出的关键帧叠图；无叠图附件时显示空状态。")
+        self.campaign_result_overlay_canvas.bind(
+            "<Configure>", lambda _event: self.campaign_page._redraw_result_overlay()
+            if hasattr(self, "campaign_page") else None)
+        self.campaign_result_info_var = tk.StringVar(value="选择有结果的批次后显示可用曲线和叠图。")
+        ttk.Label(self.campaign_result_visual_page, textvariable=self.campaign_result_info_var).grid(
+            row=2, column=0, sticky="w", padx=10, pady=(2, 8))
+        self.workspace_notebook.add(self.campaign_result_visual_page, text="批次结果")
         self.workspace_notebook.bind("<<NotebookTabChanged>>", self._on_workspace_tab_changed)
         self.add_tooltip(self.workspace_notebook, self._workspace_help)
         self._build_image_section(self.image_page)
@@ -4162,8 +4223,12 @@ class MultiROIGUI:
                      else self.control_notebook.index("current"))
         except tk.TclError:
             return ""
-        return ("点击设置分析模式、参考图片、ROI 和计算参数；绘图操作在独立的图像窗口中进行。",
-                "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。")[index]
+        help_text = (
+            "点击设置分析模式、参考图片、ROI 和计算参数；绘图操作在独立的图像窗口中进行。",
+            "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。",
+            "管理多个采集批次的身份、ROI 审核、时间与载荷对齐，以及可恢复的项目运行。",
+        )
+        return help_text[index] if 0 <= index < len(help_text) else ""
 
     def show_control_window(self):
         self.root.deiconify()

@@ -152,6 +152,9 @@ def smoke_test() -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--campaign-io-worker":
+        from straintrace_campaign.delivery import worker_main
+        return int(worker_main(arguments[1:]))
     if "--smoke-test" in arguments:
         return smoke_test()
 

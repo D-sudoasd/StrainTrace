@@ -31,12 +31,12 @@ Documentation = "https://github.com/D-sudoasd/StrainTrace#readme"
 
 [tool.setuptools]
 py-modules = ["ezdic_core", "ezdic_cli", "ezdic_benchmark", "ezdic_cli_entrypoint", "ezdic_frozen_entrypoint", "dic_virtual_extensometer_gui_v7_multi_roi_range"]
-packages = ["benchmarks", "straintrace_data"]
+packages = ["benchmarks", "straintrace_data", "straintrace_campaign", "straintrace_campaign.adapters"]
 package-dir = {straintrace_data = "schemas"}
 
 [tool.setuptools.package-data]
 benchmarks = ["cases_v1.json"]
-straintrace_data = ["run_config_v1.json"]
+straintrace_data = ["run_config_v1.json", "campaign_config_v1.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

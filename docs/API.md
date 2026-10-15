@@ -2,6 +2,12 @@
 
 `straintrace --help` and `python -m ezdic_cli --help` expose the same interface.
 
+`straintrace campaign --help` adds a separate version-1 campaign interface for
+discovery, explicit ROI approval, resumable analysis, mechanics alignment and
+versioned delivery. The existing single-sequence configuration remains unchanged.
+See [campaign workflow](CAMPAIGN_WORKFLOW.md) for input identities, missing values,
+recorded versus derived clocks and imported-result preservation.
+
 - `validate-config --config run.json`: validate and print normalized version-1 JSON.
 - `run --config run.json --progress-json`: execute a permitted image sequence.
 - `verify-manifest --manifest PATH`: verify the recorded output bundle (see `--help` for syntax).

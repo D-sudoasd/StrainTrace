@@ -1127,6 +1127,8 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = subparsers.add_parser("benchmark", help="run the locked synthetic benchmark")
     benchmark.add_argument("--cases", type=Path, help="exact locked benchmark document")
     benchmark.add_argument("--output", type=Path, help="benchmark output directory")
+    from straintrace_campaign.cli import add_campaign_parser
+    add_campaign_parser(subparsers)
     return parser
 
 
@@ -1149,7 +1151,14 @@ def _benchmark_command(cases_path: Path | None, output_dir: Path | None) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--campaign-io-worker":
+        from straintrace_campaign.delivery import worker_main
+        return int(worker_main(arguments[1:]))
+    if arguments and arguments[0] == "campaign":
+        from straintrace_campaign.cli import main as campaign_main
+        return campaign_main(arguments[1:])
+    args = build_parser().parse_args(arguments)
     if args.command == "validate-config":
         try:
             raw = load_config(args.config)

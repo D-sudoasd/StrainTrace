@@ -93,6 +93,20 @@ jobs:
             if ($reported.ToLowerInvariant() -ne $observed) { throw "Benchmark code hash mismatch: $field" }
           }
 
+      - name: Install wheel and exercise installed campaign workflow
+        shell: pwsh
+        run: |
+          python -m build --wheel --outdir "$env:RUNNER_TEMP\campaign-wheel"
+          $wheel = Get-ChildItem "$env:RUNNER_TEMP\campaign-wheel\*.whl" | Select-Object -First 1
+          python -m venv --system-site-packages "$env:RUNNER_TEMP\campaign-installed"
+          $installedPython = "$env:RUNNER_TEMP\campaign-installed\Scripts\python.exe"
+          & $installedPython -m pip install --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Wheel installation failed." }
+          & $installedPython -I -c "import straintrace_campaign; import importlib.resources as r; assert r.files('straintrace_data').joinpath('campaign_config_v1.json').is_file(); print(straintrace_campaign.__file__)"
+          if ($LASTEXITCODE -ne 0) { throw "Installed package/schema check failed." }
+          python -B examples/campaign/create_demo.py --output "$env:RUNNER_TEMP\campaign-wheel-demo" --run --cli "$env:RUNNER_TEMP\campaign-installed\Scripts\straintrace.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Installed campaign workflow failed." }
+
       - name: Build onedir GUI and CLI bundle
         shell: pwsh
         run: python -B -m PyInstaller .\ezDIC.spec --clean --noconfirm
@@ -132,6 +146,8 @@ jobs:
           Remove-Item Env:EZDIC_FROZEN_SMOKE_MARKER
           & $cli --help
           if ($LASTEXITCODE -ne 0) { throw "Packaged CLI help failed with exit code $LASTEXITCODE" }
+          python -B examples/campaign/create_demo.py --output "$env:RUNNER_TEMP\campaign-frozen-demo" --run --cli $cli
+          if ($LASTEXITCODE -ne 0) { throw "Frozen campaign workflow failed." }
           $frozenBenchmarkRoot = Join-Path $env:RUNNER_TEMP "ezdic-frozen-benchmark"
           & $cli benchmark --output $frozenBenchmarkRoot
           if ($LASTEXITCODE -ne 0) { throw "Packaged CLI benchmark failed with exit code $LASTEXITCODE" }
