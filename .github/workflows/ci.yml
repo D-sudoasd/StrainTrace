@@ -29,6 +29,9 @@ jobs:
           dic_virtual_extensometer_gui_v7_multi_roi_range.py
           ezdic_core.py ezdic_cli.py ezdic_benchmark.py
           ezdic_frozen_entrypoint.py ezdic_cli_entrypoint.py
+          straintrace_agent/__init__.py straintrace_agent/api.py
+          straintrace_agent/cli.py straintrace_agent/fields.py
+          straintrace_agent/mechanics.py
           benchmarks/run_benchmark.py benchmarks/synthetic_cases.py
 
       - name: Run full pytest without repository cache output
@@ -102,10 +105,12 @@ jobs:
           $installedPython = "$env:RUNNER_TEMP\campaign-installed\Scripts\python.exe"
           & $installedPython -m pip install --no-deps $wheel.FullName
           if ($LASTEXITCODE -ne 0) { throw "Wheel installation failed." }
-          & $installedPython -I -c "import straintrace_campaign; import importlib.resources as r; assert r.files('straintrace_data').joinpath('campaign_config_v1.json').is_file(); print(straintrace_campaign.__file__)"
+          & $installedPython -I -c "import straintrace_campaign; import straintrace_agent; import importlib.resources as r; assert r.files('straintrace_data').joinpath('campaign_config_v1.json').is_file(); print(straintrace_campaign.__file__); print(straintrace_agent.__file__)"
           if ($LASTEXITCODE -ne 0) { throw "Installed package/schema check failed." }
           python -B examples/campaign/create_demo.py --output "$env:RUNNER_TEMP\campaign-wheel-demo" --run --cli "$env:RUNNER_TEMP\campaign-installed\Scripts\straintrace.exe"
           if ($LASTEXITCODE -ne 0) { throw "Installed campaign workflow failed." }
+          python -B examples/agent/create_demo.py --output "$env:RUNNER_TEMP\agent-wheel-demo" --run --cli "$env:RUNNER_TEMP\campaign-installed\Scripts\straintrace.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Installed Agent DIC workflow failed." }
 
       - name: Build onedir GUI and CLI bundle
         shell: pwsh
@@ -148,6 +153,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged CLI help failed with exit code $LASTEXITCODE" }
           python -B examples/campaign/create_demo.py --output "$env:RUNNER_TEMP\campaign-frozen-demo" --run --cli $cli
           if ($LASTEXITCODE -ne 0) { throw "Frozen campaign workflow failed." }
+          python -B examples/agent/create_demo.py --output "$env:RUNNER_TEMP\agent-frozen-demo" --run --cli $cli
+          if ($LASTEXITCODE -ne 0) { throw "Frozen Agent DIC workflow failed." }
           $frozenBenchmarkRoot = Join-Path $env:RUNNER_TEMP "ezdic-frozen-benchmark"
           & $cli benchmark --output $frozenBenchmarkRoot
           if ($LASTEXITCODE -ne 0) { throw "Packaged CLI benchmark failed with exit code $LASTEXITCODE" }
