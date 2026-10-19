@@ -74,8 +74,10 @@ def _band_limited_speckle(seed: int) -> np.ndarray:
 def _write_tiff(path: Path, image: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = np.rint(np.clip(image, 0, 255)).astype(np.uint8)
-    if not cv2.imwrite(str(path), encoded):
+    success, buffer = cv2.imencode(".tif", encoded)
+    if not success:
         raise RuntimeError(f"failed to write synthetic image: {path}")
+    path.write_bytes(buffer.tobytes())
 
 
 def _deformed(reference: np.ndarray, epsilon_x: float, shift_x_px: float) -> np.ndarray:
