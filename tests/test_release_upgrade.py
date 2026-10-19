@@ -74,6 +74,7 @@ def test_pyinstaller_spec_contains_two_entrypoints_and_runtime_data():
         "ezdic_core",
         "ezdic_cli",
         "ezdic_benchmark",
+        "straintrace_agent.mechanics",
         "schemas/run_config_v1.json",
         "README.md",
         "RELEASE_NOTES_v0.2.0-dev.md",
@@ -82,6 +83,17 @@ def test_pyinstaller_spec_contains_two_entrypoints_and_runtime_data():
         "CITATION.cff",
     ):
         assert token in text, token
+
+
+def test_frozen_cli_spawn_support_and_agent_source_build_guard():
+    entrypoint = (ROOT / "ezdic_cli_entrypoint.py").read_text(encoding="utf-8")
+    assert "multiprocessing.freeze_support()" in entrypoint
+    assert entrypoint.index("multiprocessing.freeze_support()") < entrypoint.index("raise SystemExit(main())")
+
+    build_script = (ROOT / "build_release.ps1").read_text(encoding="utf-8")
+    assert '$AgentSourceRoot = Join-Path $Root "straintrace_agent"' in build_script
+    assert 'Get-ChildItem -LiteralPath $AgentSourceRoot -Filter "*.py" -File -Recurse' in build_script
+    assert "$ModernSourceFiles += $AgentSourceFiles" in build_script
 
 
 def test_build_script_is_fail_closed_and_contains_real_release_gates():

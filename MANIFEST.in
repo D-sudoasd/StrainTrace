@@ -14,6 +14,9 @@ include scripts/check_joss_artifacts.py
 include scripts/validate_campaign_baseline.py
 recursive-include examples/campaign *.py
 include straintrace_campaign/CONTRACT.md
+recursive-include straintrace_agent *.py
+recursive-include tests/agent *.py
+recursive-include examples/agent *.py *.json *.csv
 
 recursive-include assets/readme *.svg *.png *.json
 

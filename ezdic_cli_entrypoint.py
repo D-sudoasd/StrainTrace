@@ -19,4 +19,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # PyInstaller's Windows spawn path re-enters this executable with private
+    # multiprocessing arguments; handle that before the CLI parses argv.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     raise SystemExit(main())
