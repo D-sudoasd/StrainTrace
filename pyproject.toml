@@ -31,7 +31,7 @@ Documentation = "https://github.com/D-sudoasd/StrainTrace#readme"
 
 [tool.setuptools]
 py-modules = ["ezdic_core", "ezdic_cli", "ezdic_benchmark", "ezdic_cli_entrypoint", "ezdic_frozen_entrypoint", "dic_virtual_extensometer_gui_v7_multi_roi_range"]
-packages = ["benchmarks", "straintrace_data", "straintrace_campaign", "straintrace_campaign.adapters"]
+packages = ["benchmarks", "straintrace_data", "straintrace_campaign", "straintrace_campaign.adapters", "straintrace_agent"]
 package-dir = {straintrace_data = "schemas"}
 
 [tool.setuptools.package-data]

@@ -10,6 +10,8 @@ A dual-mode desktop and headless workstation for image-based strain analysis. Ch
 
 **批次项目：**桌面与 `straintrace campaign` 共用采集身份、ROI 建议与人工审核、可恢复分析、时间／载荷对齐及版本化交付。已有接受结果可只读导入并复用，不必清空重算。见[中文批次指南](docs/CAMPAIGN_WORKFLOW.md)与[AI 阅读说明](docs/CAMPAIGN_AI_README.md)。
 
+**Agent 自动分析：**无 GUI 创建样品项目，自动检查纹理/ROI候选、固定参考二维 DIC、逐帧断点续算、载荷同步、虚拟标距、质量复核与可验证导出。见[Agent 工作流](docs/AGENT_WORKFLOW.md)与[命令和 Python 接口](docs/AGENT_INTERFACE.md)。
+
 [Windows / 源码启动](#windows-quick-start) · [桌面工作流](docs/UI_WORKBENCH.md) · [二维验证与参数](docs/2D_DIC_VALIDATION.md) · [输出约定](#full-field-output-contract) · [引用](#cite)
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465) [![MIT](https://img.shields.io/badge/License-MIT-455A64)](LICENSE.txt)

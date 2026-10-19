@@ -68,6 +68,13 @@ $ModernSourceFiles = @(
     "benchmarks\synthetic_cases.py",
     "ezDIC.spec"
 )
+$AgentSourceRoot = Join-Path $Root "straintrace_agent"
+if (Test-Path -LiteralPath $AgentSourceRoot -PathType Container) {
+    $AgentSourceFiles = @(Get-ChildItem -LiteralPath $AgentSourceRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
+        $_.FullName.Substring($Root.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1)
+    })
+    $ModernSourceFiles += $AgentSourceFiles
+}
 # A copied legacy fixture used by the historical launcher tests does not carry
 # the new core/schema files.  Only an actual modern source root enters the
 # strict branch; a partial modern root fails closed.
