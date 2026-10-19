@@ -516,7 +516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         receipt["next_command"] = "to run an end-to-end validation, use --run on the first invocation with a new empty --output directory"
     receipt_path = output / "DEMO_VALIDATION.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(json.dumps(receipt, indent=2, ensure_ascii=False))
+    print(json.dumps(receipt, indent=2, ensure_ascii=True))
     return 0
 
 

@@ -17,7 +17,9 @@ EXIT_QUALITY = 4
 
 
 def _emit(value: Any) -> None:
-    sys.stdout.write(json.dumps(api._json_safe(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+    # JSON escapes keep JSONL safe on Windows consoles using legacy code pages
+    # while json.loads still restores the original Unicode values.
+    sys.stdout.write(json.dumps(api._json_safe(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
     sys.stdout.flush()
 
 

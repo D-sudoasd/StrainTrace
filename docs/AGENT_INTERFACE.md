@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-此说明定义无 GUI 操作合同，供 Agent、脚本和批处理服务调用。CLI 输出 JSON；进度可通过 JSON Lines 事件读取。字段计算使用已有 ezdic_core；项目 API 流式读取图像并逐帧落盘，调用方不必模拟 GUI 或把整个序列留在内存中。
+此说明定义无 GUI 操作合同，供 Agent、脚本和批处理服务调用。CLI 输出 JSON；进度可通过 JSON Lines 事件读取。标准输出使用 ASCII 兼容的 Unicode 转义，JSON 解析后会恢复原字符串，兼容 Windows 旧代码页。字段计算使用已有 ezdic_core；项目 API 流式读取图像并逐帧落盘，调用方不必模拟 GUI 或把整个序列留在内存中。
 
 当前命令的通用形式：
 
