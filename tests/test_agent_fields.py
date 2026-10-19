@@ -126,6 +126,50 @@ def test_negative_jacobian_and_invalid_strain_mask():
     assert np.isnan(result["major"].ravel()[5])
 
 
+def test_folded_and_degenerate_affine_fields_mask_every_strain_extraction():
+    for F in (np.array([[-1.0, 0.0], [0.0, 1.0]]), np.array([[0.0, 0.0], [0.0, 1.0]])):
+        field = _affine_field(F)
+        principal = principal_strains(field)
+        assert not principal["valid"].any()
+        assert np.isnan(component_values(field, "Exx")).all()
+        assert np.isnan(component_values(field, "exx")).all()
+        assert np.isnan(component_values(field, "green_lagrange_gamma_xy")).all()
+        assert np.isnan(component_values(field, "small_strain_gamma_xy")).all()
+        assert summarize_roi(field, "Exx", (0, 3, 0, 3))["n_poi_valid"] == 0
+        sample = sample_path(field, [(1, 1)], "Exx", 0.0)[0]
+        assert sample["status"] == "invalid_poi"
+        assert sample["Exx"] is None
+        # A displacement can remain a useful DIC diagnostic when its local
+        # deformation gradient is folded; it is not a valid strain there.
+        displacement = sample_path(field, [(1, 1)], "u", 0.0)[0]
+        assert displacement["status"] == "valid"
+
+
+def test_nonpositive_jacobian_mask_is_shared_by_roi_path_color_limits_and_plot():
+    import matplotlib.pyplot as plt
+
+    from straintrace_agent.fields import common_color_limits, plot_field_map
+
+    field = _affine_field(np.eye(2), size=3)
+    field["P"] = field["P"].copy()
+    field["P"][0, 0, 1] = -2.0
+    field["Exx"] = np.array([1000.0, 1, 2, 3, 4, 5, 6, 7, 8])
+    field["Exy"] = np.array([1000.0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+    assert np.isnan(component_values(field, "Exx")[0, 0])
+    assert np.isnan(component_values(field, "green_lagrange_gamma_xy")[0, 0])
+    assert field["Exx"][0] == 1000.0  # Masking never edits the stored source field.
+    assert summarize_roi(field, "Exx", (0, 2, 0, 2))["n_poi_valid"] == 8
+    assert sample_path(field, [(0, 0)], "Exx", 0.0)[0]["status"] == "invalid_poi"
+    assert sample_path(field, [(0, 0)], "green_lagrange_gamma_xy", 0.0)[0]["status"] == "invalid_poi"
+    assert sample_path(field, [(0, 0)], "u", 0.0)[0]["status"] == "valid"
+    assert common_color_limits([field], "Exx") == pytest.approx((1.0, 8.0))
+
+    fig, _ax, artist = plot_field_map(field, "Exx")
+    assert len(artist.get_offsets()) == 8
+    plt.close(fig)
+
+
 def test_explicit_local_gradients_take_precedence_over_subset_P():
     field = _affine_field(np.eye(2))
     field["P"] = field["P"].copy()

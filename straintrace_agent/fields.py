@@ -77,6 +77,17 @@ def _finite_pair(value, name: str) -> tuple[float, float]:
     return float(pair[0]), float(pair[1])
 
 
+def _has_jacobian_support(field: Mapping) -> bool:
+    if "X" not in field or "Y" not in field:
+        return False
+    return (
+        all(key in field for key in ("dudx", "dudy", "dvdx", "dvdy"))
+        or "P" in field
+        or all(key in field for key in ("U", "V"))
+        or all(key in field for key in ("u", "v"))
+    )
+
+
 def _field_mask(field: Mapping, component: str, values: np.ndarray) -> np.ndarray:
     mask = np.isfinite(values)
     if component in _STRAIN_COMPONENTS:
@@ -84,6 +95,8 @@ def _field_mask(field: Mapping, component: str, values: np.ndarray) -> np.ndarra
             value = _array(field, key, required=False, dtype=bool)
             if value is not None:
                 mask &= value
+        if _has_jacobian_support(field):
+            mask &= ~nonpositive_jacobian_poi_mask(field)
     elif component in {"u", "v", "u_raw", "v_raw", "u_mm", "v_mm"}:
         value = _array(field, "valid", required=False, dtype=bool)
         if value is not None:
@@ -210,8 +223,8 @@ def principal_strains(
     (infinitesimal). The angle is measured from image +x (right); since image
     +y points down, positive angles appear clockwise on an image. Its direction
     is undefined for equal principal values and is returned as NaN there.
-    Values at invalid strain POIs, and at POIs belonging to a sampled cell with
-    negative det(F), are masked as NaN.
+    Values at invalid strain POIs, and at POIs with supported nonpositive
+    det(F), are masked as NaN.
     """
     if not np.isfinite(angle_tolerance) or angle_tolerance < 0:
         raise ValueError("angle_tolerance must be finite and nonnegative")
@@ -222,13 +235,6 @@ def principal_strains(
     angle = 0.5 * np.arctan2(2.0 * b, a - d)
     valid = _field_mask(field, "Exx" if measure in {"green_lagrange", "GL", "gl"} else "exx", a)
     valid &= np.isfinite(d) & np.isfinite(b)
-    has_derivatives = all(key in field for key in ("dudx", "dudy", "dvdx", "dvdy"))
-    has_p = "P" in field
-    has_displacements = all(key in field for key in ("U", "V")) or all(key in field for key in ("u", "v"))
-    if "X" in field and "Y" in field and (has_derivatives or has_p or has_displacements):
-        negative = negative_jacobian_poi_mask(field)
-        if negative.shape == valid.shape:
-            valid &= ~negative
     angle_defined = np.abs(major - minor) > angle_tolerance * np.maximum(1.0, np.maximum(np.abs(major), np.abs(minor)))
     valid &= np.isfinite(major) & np.isfinite(minor)
     major = np.where(valid, major, np.nan)
@@ -247,9 +253,12 @@ def principal_strains(
 
 
 def component_values(field: Mapping, component: str) -> np.ndarray:
-    """Return one field component, deriving explicit shear/principal options."""
+    """Return a component with scientific validity masks applied to strains."""
     if component in field and isinstance(field[component], (np.ndarray, list, tuple)):
-        return _array(field, component).astype(float, copy=False)
+        values = _array(field, component).astype(float, copy=False)
+        if component in _STRAIN_COMPONENTS:
+            values = np.where(_field_mask(field, component, values), values, np.nan)
+        return values
     aliases = {
         "principal_max": "major",
         "principal_min": "minor",
@@ -263,7 +272,8 @@ def component_values(field: Mapping, component: str) -> np.ndarray:
     }
     if component in {"green_lagrange_gamma_xy", "small_strain_gamma_xy"}:
         source = "Exy" if component.startswith("green") else "exy"
-        return 2.0 * _array(field, source).astype(float, copy=False)
+        values = 2.0 * _array(field, source).astype(float, copy=False)
+        return np.where(_field_mask(field, source, values), values, np.nan)
     if component in aliases:
         measure = "infinitesimal" if "infinitesimal" in component else "green_lagrange"
         return principal_strains(field, measure)[aliases[component]]
