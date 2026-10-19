@@ -198,6 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     except api.AgentError as exc:
         _emit({"event": "error", **exc.as_dict()})
+        if exc.code == "PLAN_REVIEW_REQUIRED":
+            return EXIT_QUALITY
         return EXIT_CONFIG if exc.code.startswith("CONFIG") or exc.code.startswith("CLI_") else EXIT_RUNTIME
     except Exception as exc:
         _emit({"event": "error", "error_code": "AGENT_RUNTIME_ERROR", "message": f"{type(exc).__name__}: {exc}", "path": "$"})

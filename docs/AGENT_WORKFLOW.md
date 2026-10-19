@@ -46,7 +46,7 @@ time_offset_s 的符号由用户按设备零点关系决定。与图像时刻对
     python -m ezdic_cli agent init --project outputs/sample_A --images experiment/sample_A_images --frame-interval-s 0.5 --loads-csv experiment/tensile_machine.csv --time-column Time_ms --load-time-unit ms --time-offset-s -0.125 --clock-confirmed --max-gap-s 0.75 --force-column Force_kN --force-unit kN --area-mm2 24.0 --displacement-column Crosshead_mm --displacement-unit mm --displacement-source crosshead --calibration-json experiment/calibration.json --roi 100,80,1200,700 --step-hint-px 12
     python -m ezdic_cli agent analyze --project outputs/sample_A --progress-json
 
-也可分步 inspect → plan → 检查候选参数/ROI → run。run 使用已保存计划；analyze 是 plan 与 run 的便捷组合。roi 参数是像素坐标中的候选矩形 x,y,width,height，不等同于经过实验确认的试样边界。自动计划只在有限候选设置中比较核心求解参数，质量不足时保留 review_required，不放宽已有质量阈值。真实数据仍应核实参考帧、ROI、遮罩、标距和实验条件。
+也可分步 inspect → plan → 检查候选参数/ROI → run。run 使用已保存计划；analyze 是 plan 与 run 的便捷组合。两者默认仅在 plan 状态为 ready 时计算；review_required 会返回 PLAN_REVIEW_REQUIRED（CLI 质量门退出码 4），不创建 run 或逐帧检查点。应先检查试算、ROI 和拒绝原因，补充有依据的配置并重新 plan。roi 参数是像素坐标中的候选矩形 x,y,width,height，不等同于经过实验确认的试样边界。自动计划只在有限候选设置中比较核心求解参数，质量不足时保留 review_required，不放宽已有质量阈值。真实数据仍应核实参考帧、ROI、遮罩、标距和实验条件。
 
 用户明确知道的标定与几何信息可通过 calibration-json、mask-file、roi、exclude 和 gauges-json 提供。其余参数不应伪装成实验事实。检查 plans/plan_v*.json 中的参考帧、候选矩形、试算结果和拒绝原因。
 

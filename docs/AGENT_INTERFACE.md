@@ -19,8 +19,8 @@ Python 源码 checkout 安装后可从 straintrace_agent 导入 api。CLI 是跨
 | init | 建立单样品项目、索引原始图像、记录实验元数据 | 需 --project 和 --images；需 frame-interval-s 或有时间列的 frame map |
 | inspect | 读取索引和项目状态 | 不运行 DIC |
 | plan | 选择可审查参考帧、ROI 候选和有限求解参数 | 写入 plans/plan_v*.json；plan 状态可为 ready 或 review_required |
-| run | 根据当前计划计算并续算 | --project 必需；可加 --progress-json、--field-csv、--no-plots |
-| analyze | 依次执行 plan 与 run | 同 run 选项；最少操作的一次性分析入口 |
+| run | 根据当前计划计算并续算 | --project 必需；仅 plan=ready 可计算，否则 PLAN_REVIEW_REQUIRED / CLI 退出码 4 |
+| analyze | 依次执行 plan 与 run | 同 run 选项；review_required 时保留计划但不启动逐帧 run |
 | status | 查询锁、当前 plan/run 和最后进度 | 不写入分析产物 |
 | verify | 校验输入、指纹、计划、检查点与产物 | valid 是完整性字段；scientific_ok 是独立数值质量门 |
 | plot | 从保存场重新生成稀疏热图 | 不重新运行 DIC |
@@ -53,7 +53,7 @@ Python 源码 checkout 安装后可从 straintrace_agent 导入 api。CLI 是跨
     init → inspect → plan → 检查 plan JSON → run
     status → verify → extract → plot/export
 
-对低风险批次也可直接调用 analyze。Agent 应先读 inspect 返回的 native_frames、unreadable_frames、time_range_s、physical_calibration_available、load_clock_confirmed 和 analysis_rectangle_status。不可读帧不是可静默丢弃的输入；本机 QC 结果也不是物理标定。若计划为 review_required，读取其 candidate_trials 和 rejection 原因，判断是可执行的候选还是应停止并反馈用户。
+对低风险批次也可直接调用 analyze。Agent 应先读 inspect 返回的 native_frames、unreadable_frames、time_range_s、physical_calibration_available、load_clock_confirmed 和 analysis_rectangle_status。不可读帧不是可静默丢弃的输入；本机 QC 结果也不是物理标定。若计划为 review_required，run/analyze 会在创建 run 和检查点前停止；读取 candidate_trials 和 rejection 原因，补充有依据的参数或 ROI 后重新 plan。软件不会把未通过的候选伪装为 ready。
 
 run/checkpoint 复用依赖当前输入指纹、plan、代码和环境匹配。配置或输入变更后应建立新计划；不要把旧 run 的检查点并入新配置。cancel 是可协作停止，不会删除已经写入的检查点。异常结束后用 status 核对锁；只有本机且确认 PID 死亡时才能执行 recover-lock --expected-pid。无需常驻轮询高频 status，可在进度事件或定时低频读取。
 

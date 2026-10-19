@@ -38,6 +38,7 @@ RUN_SCHEMA = "straintrace.agent-run/v1"
 IMAGE_SUFFIXES = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 _FRAME_TOKEN = re.compile(r"\d+")
 QUALITY_GATE_SCOPE = "existing ezdic_core correlation and strain validity thresholds; not experimental validation or scientific acceptance"
+_REPLACE_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 
 
 def _component_file_slug(component: str) -> str:
@@ -121,6 +122,18 @@ def _hash_json(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Replace a closed temporary file, retrying only bounded PermissionErrors."""
+    for attempt in range(len(_REPLACE_RETRY_DELAYS_S) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == len(_REPLACE_RETRY_DELAYS_S):
+                raise
+            time.sleep(_REPLACE_RETRY_DELAYS_S[attempt])
+
+
 def _atomic_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -129,7 +142,7 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         try:
             temporary.unlink()
@@ -754,7 +767,7 @@ def _load_image(path: str | os.PathLike[str]) -> np.ndarray:
         image = np.asarray(core.read_gray_image(path))
     except Exception as exc:
         raise AgentError("IMAGE_DECODE_FAILED", f"cannot decode image {path}: {exc}", path=str(path)) from exc
-    if image.ndim != 2 or image.size == 0 or not np.isfinite(np.asarray(image, dtype=float)).all():
+    if image.ndim != 2 or image.size == 0 or not np.isfinite(image).all():
         raise AgentError("IMAGE_INVALID", f"decoded image is empty or non-finite: {path}", path=str(path))
     return image
 
@@ -1198,7 +1211,7 @@ def _serialize_field(path: Path, field: Mapping[str, Any], metadata: Mapping[str
             np.savez_compressed(stream, **arrays)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         try:
             temporary.unlink()
@@ -1249,36 +1262,98 @@ def _frame_key(native_frame: int) -> str:
     return f"frame_native_{native_frame:08d}"
 
 
-def _checkpoint_valid(run_root: Path, native_frame: int, run_fingerprint: str, input_sha: str, code_sha: Mapping[str, str]) -> tuple[Path, dict[str, Any]] | None:
+def _checkpoint_valid(
+    run_root: Path, record: Mapping[str, Any], frame_position: int,
+    reference_native_frame: int, run_fingerprint: str, input_sha: str,
+    code_sha: Mapping[str, str],
+) -> tuple[Path, dict[str, Any]] | None:
+    native_frame = int(record["native_frame"])
     checkpoint = run_root / "checkpoints" / f"{_frame_key(native_frame)}.npz"
     metadata_path = checkpoint.with_suffix(".json")
     if not metadata_path.is_file():
         return None
+
+    def matches_expected_identity(metadata: Mapping[str, Any]) -> bool:
+        if metadata_path.name != f"{_frame_key(native_frame)}.json":
+            return False
+        if (metadata.get("native_frame") != native_frame
+                or metadata.get("frame_position") != frame_position
+                or metadata.get("source_path") != record.get("path")
+                or metadata.get("source_sha256") != record.get("sha256")
+                or metadata.get("reference_native_frame") != reference_native_frame
+                or metadata.get("run_fingerprint") != run_fingerprint
+                or metadata.get("input_fingerprint") != input_sha
+                or metadata.get("code_sha256") != code_sha):
+            return False
+        expected_time = record.get("time_s")
+        if expected_time is None:
+            if metadata.get("time_s") is not None:
+                return False
+        else:
+            try:
+                actual_time = float(metadata.get("time_s"))
+                if not math.isfinite(actual_time) or not math.isclose(actual_time, float(expected_time), rel_tol=0.0, abs_tol=1e-12):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        summary = metadata.get("summary_row")
+        if not isinstance(summary, Mapping):
+            return False
+        if (summary.get("native_frame") != native_frame
+                or summary.get("frame_position_1based") != frame_position
+                or summary.get("reference_native_frame") != reference_native_frame
+                or summary.get("status") != metadata.get("status")):
+            return False
+        summary_time = summary.get("time_s")
+        if expected_time is None:
+            if summary_time is not None:
+                return False
+        else:
+            try:
+                if not math.isclose(float(summary_time), float(expected_time), rel_tol=0.0, abs_tol=1e-12):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if metadata.get("status") == "failed":
+            return metadata.get("checkpoint") is None and summary.get("checkpoint") is None
+        return (metadata.get("status") in {"complete", "quality_failed"}
+                and metadata.get("checkpoint") == checkpoint.name
+                and summary.get("checkpoint") == f"checkpoints/{checkpoint.name}")
+
     try:
+        metadata = _read_json(metadata_path)
+        if not matches_expected_identity(metadata):
+            return None
+        if metadata.get("status") == "failed":
+            # Deterministic input failures remain reusable. Runtime failures
+            # are retried on resume so transient filesystem/solver errors can
+            # recover without discarding other valid frame checkpoints.
+            if metadata.get("retryable") is True:
+                return None
+            return metadata_path, metadata
         if not checkpoint.is_file():
-            metadata = _read_json(metadata_path)
-            if metadata.get("status") == "failed" and metadata.get("run_fingerprint") == run_fingerprint and metadata.get("input_fingerprint") == input_sha and metadata.get("code_sha256") == code_sha:
-                return metadata_path, metadata
             return None
         arrays, metadata = _load_field(checkpoint, metadata_path)
-        if metadata.get("run_fingerprint") != run_fingerprint or metadata.get("input_fingerprint") != input_sha or metadata.get("code_sha256") != code_sha:
-            return None
-        if not arrays:
+        if not matches_expected_identity(metadata) or not arrays:
             return None
         return checkpoint, metadata
     except AgentError:
         return None
 
 
-def _frame_failure(run_root: Path, record: Mapping[str, Any], run_fingerprint: str, input_sha: str, code_sha: Mapping[str, str], error: AgentError, *, frame_position: int | None = None, mechanics_row: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _frame_failure(run_root: Path, record: Mapping[str, Any], run_fingerprint: str, input_sha: str, code_sha: Mapping[str, str], error: AgentError, *, frame_position: int | None = None, reference_native_frame: int | None = None, retryable: bool = False, mechanics_row: Mapping[str, Any] | None = None) -> dict[str, Any]:
     native = int(record["native_frame"])
     path = run_root / "checkpoints" / f"{_frame_key(native)}.json"
-    row = {"frame_position_1based": frame_position, "native_frame": native, "time_s": record["time_s"], "status": "failed", "quality_status": "unavailable", "scientific_ok": False, "failure_code": error.code, "failure_reason": error.message, "checkpoint": None, "force_N": None, "stress_MPa": None, "mechanics_status": "not_evaluated", **dict(mechanics_row or {})}
+    row = {"frame_position_1based": frame_position, "native_frame": native, "time_s": record["time_s"], "reference_native_frame": reference_native_frame, "status": "failed", "quality_status": "unavailable", "scientific_ok": False, "failure_code": error.code, "failure_reason": error.message, "checkpoint": None, "force_N": None, "stress_MPa": None, "mechanics_status": "not_evaluated", **dict(mechanics_row or {})}
     payload = {
         "schema": "straintrace.agent-checkpoint/v1", "native_frame": native,
+        "frame_position": frame_position, "time_s": record.get("time_s"),
+        "reference_native_frame": reference_native_frame,
         "source_path": record["path"], "source_sha256": record["sha256"],
         "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha,
-        "code_sha256": code_sha, "status": "failed", "checkpoint": None, "error": error.as_dict(), "summary_row": row,
+        "code_sha256": code_sha, "status": "failed", "checkpoint": None,
+        "retryable": bool(retryable), "failure_class": "runtime" if retryable else "deterministic",
+        "error": error.as_dict(), "summary_row": row,
     }
     _atomic_json(path, payload)
     return row
@@ -1293,6 +1368,48 @@ def _load_run_pointer(root: Path) -> tuple[dict[str, Any], Path]:
     if not run_root.is_dir():
         raise AgentError("RUN_MISSING", f"current run directory is missing: {run_root}", path=str(run_root))
     return pointer, run_root
+
+
+def _require_current_run_binding(
+    root: Path, config: Mapping[str, Any], run_root: Path,
+    plan: Mapping[str, Any], run_state: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], str, dict[str, str]]:
+    """Reject derived-output writes when their run no longer binds current inputs."""
+    plan_copy = dict(plan)
+    saved_plan_sha = plan_copy.pop("plan_sha256", None)
+    if saved_plan_sha != _hash_json(plan_copy):
+        raise AgentError("RUN_PLAN_INVALID", "saved analysis plan checksum is invalid")
+    records, input_sha = _inventory_fresh(root, config)
+    if (plan.get("input_fingerprint") != input_sha
+            or run_state.get("input_fingerprint") != input_sha):
+        raise AgentError("RUN_STALE_INPUT", "raw images, load data, frame map, or mask changed since this run")
+    config_sha = _hash_json(config)
+    if plan.get("configuration_sha256") != config_sha:
+        raise AgentError("RUN_STALE_CONFIG", "project configuration changed since this run")
+    if run_root.joinpath("manifest.json").is_file():
+        manifest = _read_json(run_root / "manifest.json")
+    else:
+        raise AgentError("RUN_MANIFEST_MISSING", "the current run has no manifest", path=str(run_root / "manifest.json"))
+    if manifest.get("configuration_sha256") != config_sha:
+        raise AgentError("RUN_STALE_CONFIG", "run manifest does not match the current project configuration")
+    if manifest.get("plan_sha256") != saved_plan_sha:
+        raise AgentError("RUN_STALE_PLAN", "run manifest does not match the saved analysis plan")
+    if manifest.get("input_fingerprint") != input_sha:
+        raise AgentError("RUN_STALE_INPUT", "run manifest does not match current source inputs")
+    current_code = _code_fingerprint()
+    if plan.get("code_sha256") != current_code or run_state.get("code_sha256") != current_code or manifest.get("code_sha256") != current_code:
+        raise AgentError("RUN_STALE_CODE", "analysis code changed since this run")
+    import ezdic_core as core
+    current_environment = core.collect_environment()
+    if (plan.get("environment") != current_environment
+            or manifest.get("environment") != current_environment):
+        raise AgentError("RUN_STALE_ENVIRONMENT", "runtime packages or platform changed since this run")
+    expected_fingerprint = _run_fingerprint(config, plan, input_sha, current_code)
+    if (run_state.get("run_fingerprint") != expected_fingerprint
+            or manifest.get("run_fingerprint") != expected_fingerprint
+            or run_root.name != str(run_state.get("run_id"))):
+        raise AgentError("RUN_STALE_BINDING", "run identity does not match current inputs, configuration, and code")
+    return records, input_sha, current_code
 
 
 def run(
@@ -1318,6 +1435,17 @@ def run(
         current_environment = core.collect_environment()
         if plan.get("environment") != current_environment:
             raise AgentError("PLAN_STALE_ENVIRONMENT", "runtime packages or platform changed after planning; create a fresh plan")
+        if plan.get("status") != "ready":
+            raise AgentError(
+                "PLAN_REVIEW_REQUIRED",
+                "saved plan is not computationally ready; inspect its ROI, pilot, and parameter candidates before running",
+                details={
+                    "plan_status": plan.get("status"),
+                    "pilot_issue": plan.get("pilot_issue"),
+                    "analysis_rectangle_candidate_px": plan.get("analysis_rectangle_candidate_px"),
+                    "candidate_trials": plan.get("candidate_trials", []),
+                },
+            )
         _record_inventory(root, records, input_sha)
         run_fingerprint = _run_fingerprint(config, plan, input_sha, code_sha)
         run_id = f"run-{run_fingerprint[:20]}"
@@ -1362,7 +1490,10 @@ def run(
         completed = 0
         for position, record in enumerate(records, 1):
             native = int(record["native_frame"])
-            existing = _checkpoint_valid(run_root, native, run_fingerprint, input_sha, code_sha)
+            existing = _checkpoint_valid(
+                run_root, record, position, int(reference_record["native_frame"]),
+                run_fingerprint, input_sha, code_sha,
+            )
             if existing is not None:
                 meta = existing[1]
                 row = dict(meta.get("summary_row") or {})
@@ -1376,7 +1507,7 @@ def run(
                 _atomic_json(run_root / "run_state.json", {"schema": RUN_SCHEMA, "status": "cancelled", "run_id": run_id, "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha, "code_sha256": code_sha, "completed_frames": completed, "updated_unix_s": time.time()})
                 _write_progress(run_root, {"event": "run_cancelled", "completed_frames": completed, "remaining_frames": len(records) - position + 1}, progress)
                 _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, run_fingerprint, input_sha, code_sha, field_csv=False, plots=False)
-                return {"project": str(root), "run_id": run_id, "status": "cancelled", "completed_frames": completed, "total_frames": len(records), "run_dir": str(run_root)}
+                return {"project": str(root), "run_id": run_id, "status": "cancelled", "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed", "completed_frames": completed, "total_frames": len(records), "run_dir": str(run_root)}
             _write_progress(run_root, {"event": "frame_started", "native_frame": native, "position": position, "total": len(records)}, progress)
             try:
                 if record.get("status") != "pending":
@@ -1458,16 +1589,16 @@ def run(
                 _atomic_json(run_root / "run_state.json", {"schema": RUN_SCHEMA, "status": "cancelled", "run_id": run_id, "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha, "code_sha256": code_sha, "completed_frames": len(rows), "updated_unix_s": time.time()})
                 _write_progress(run_root, {"event": "run_cancelled", "completed_frames": len(rows), "remaining_frames": len(records) - position + 1}, progress)
                 _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, run_fingerprint, input_sha, code_sha, field_csv=False, plots=False)
-                return {"project": str(root), "run_id": run_id, "status": "cancelled", "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root)}
+                return {"project": str(root), "run_id": run_id, "status": "cancelled", "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed", "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root)}
             except AgentError as exc:
                 mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
-                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, exc, frame_position=position, mechanics_row=mechanics_row)
+                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, exc, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": exc.as_dict()}, progress)
             except Exception as exc:
                 error = AgentError("DIC_FRAME_ERROR", f"{type(exc).__name__}: {exc}", path=record["path"])
                 mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
-                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, error, frame_position=position, mechanics_row=mechanics_row)
+                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, error, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), retryable=True, mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": error.as_dict()}, progress)
         if _sha256(Path(reference_record["path"])) != reference_sha_before:
@@ -1498,7 +1629,7 @@ def _csv_atomic(path: Path, rows: Sequence[Mapping[str, Any]], columns: Sequence
                 writer.writerow(safe)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        _replace_with_retry(temp, path)
     finally:
         try:
             temp.unlink()
@@ -1541,6 +1672,16 @@ def _build_outputs(
     mechanics_status: Mapping[str, Any], run_fingerprint: str, input_sha: str,
     code_sha: Mapping[str, str], *, field_csv: bool, plots: bool,
 ) -> dict[str, Any]:
+    run_state = _read_json(run_root / "run_state.json")
+    expected_native_frames = [int(record["native_frame"]) for record in records]
+    try:
+        row_native_frames = [int(row["native_frame"]) for row in rows]
+    except (KeyError, TypeError, ValueError):
+        row_native_frames = []
+    native_frames_match_expected = row_native_frames == expected_native_frames
+    run_status = run_state.get("status", "unknown")
+    expected_frame_count = len(records)
+    completed_frame_count = len(rows)
     summary_columns = [
         "frame_position_1based", "native_frame", "time_s", "reference_native_frame", "status", "quality_status", "scientific_ok",
         "eligible_point_count", "correlation_valid_fraction", "strain_valid_fraction", "max_abs_local_exx",
@@ -1558,10 +1699,20 @@ def _build_outputs(
         "failure_code", "failure_reason", "checkpoint",
     ]
     _csv_atomic(run_root / "summary.csv", rows, summary_columns)
-    numerical_quality_passed = bool(rows) and all(row.get("scientific_ok") is True for row in rows)
+    numerical_quality_passed = (
+        run_status == "complete"
+        and expected_frame_count > 0
+        and completed_frame_count == expected_frame_count
+        and native_frames_match_expected
+        and all(row.get("status") == "complete" and row.get("scientific_ok") is True for row in rows)
+    )
     quality = {
         "schema": "straintrace.agent-quality/v1", "scientific_ok": numerical_quality_passed,
         "numerical_quality_passed": numerical_quality_passed,
+        "run_status": run_status,
+        "expected_frame_count": expected_frame_count,
+        "completed_frame_count": completed_frame_count,
+        "native_frames_match_expected": native_frames_match_expected,
         "scientific_ok_scope": QUALITY_GATE_SCOPE,
         "scientific_acceptance": "not_assessed", "experimental_uncertainty_calibrated": False,
         "quality_gate_scope": QUALITY_GATE_SCOPE,
@@ -1577,16 +1728,22 @@ def _build_outputs(
     _atomic_json(run_root / "quality.json", quality)
     gauge_csv = run_root / "gauges.csv"
     gauge_tmp = gauge_csv.with_name(f".{gauge_csv.name}.{uuid.uuid4().hex}.tmp")
-    with gauge_tmp.open("w", encoding="utf-8-sig", newline="") as stream:
-        gauge_writer = csv.DictWriter(stream, fieldnames=["frame_position_1based", "native_frame", "time_s", "gauge_name", "axis", "geometry_status", "status", "initial_length_px", "a_expected_poi_count", "b_expected_poi_count", "a_valid_poi_count", "b_valid_poi_count", "endpoint_policy", "engineering_strain", "true_strain"], extrasaction="ignore")
-        gauge_writer.writeheader()
-        for metadata in _iter_checkpoint_metadata(run_root):
-            summary = metadata.get("summary_row") or {}
-            for gauge_row in metadata.get("gauge_measurements") or []:
-                gauge_writer.writerow({"frame_position_1based": summary.get("frame_position_1based"), "native_frame": metadata.get("native_frame"), "time_s": metadata.get("time_s"), **gauge_row})
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(gauge_tmp, gauge_csv)
+    try:
+        with gauge_tmp.open("w", encoding="utf-8-sig", newline="") as stream:
+            gauge_writer = csv.DictWriter(stream, fieldnames=["frame_position_1based", "native_frame", "time_s", "gauge_name", "axis", "geometry_status", "status", "initial_length_px", "a_expected_poi_count", "b_expected_poi_count", "a_valid_poi_count", "b_valid_poi_count", "endpoint_policy", "engineering_strain", "true_strain"], extrasaction="ignore")
+            gauge_writer.writeheader()
+            for metadata in _iter_checkpoint_metadata(run_root):
+                summary = metadata.get("summary_row") or {}
+                for gauge_row in metadata.get("gauge_measurements") or []:
+                    gauge_writer.writerow({"frame_position_1based": summary.get("frame_position_1based"), "native_frame": metadata.get("native_frame"), "time_s": metadata.get("time_s"), **gauge_row})
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_with_retry(gauge_tmp, gauge_csv)
+    finally:
+        try:
+            gauge_tmp.unlink()
+        except FileNotFoundError:
+            pass
     if field_csv:
         import ezdic_core as core
         fields_dir = run_root / "fields_csv"
@@ -1599,7 +1756,7 @@ def _build_outputs(
             temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
             try:
                 core.dic_field_to_dataframe(field).to_csv(temporary, index=False)
-                os.replace(temporary, path)
+                _replace_with_retry(temporary, path)
             finally:
                 try:
                     temporary.unlink()
@@ -1618,7 +1775,9 @@ def _build_outputs(
         f"- Reference native frame: `{plan['reference_native_frame']}`",
         f"- Analysis rectangle candidate (px): `{plan['analysis_rectangle_candidate_px']}`",
         "- The rectangle is a texture-based analysis candidate; physical specimen geometry is not confirmed.",
-        f"- Frames with core quality pass: `{quality['passed_frame_count']}/{len(rows)}`",
+        f"- Run execution status: `{run_status}`",
+        f"- Frame coverage: `{completed_frame_count}/{expected_frame_count}` expected native frames; identity matches: `{native_frames_match_expected}`.",
+        f"- Core-quality frames among completed rows: `{quality['passed_frame_count']}/{completed_frame_count}`",
         f"- Core numerical quality gates: `{'PASS' if quality['numerical_quality_passed'] else 'NOT PASSED'}`",
         "- Scientific acceptance: not assessed; a numerical quality-gate pass is not experimental validation.",
         f"- Load alignment: `{mechanics_status.get('status')}`",
@@ -1643,6 +1802,10 @@ def _build_outputs(
     manifest = {
         "schema": "straintrace.agent-manifest/v1", "project_id": config["project_id"],
         "run_id": run_root.name, "run_fingerprint": run_fingerprint,
+        "run_status": run_status,
+        "expected_frame_count": expected_frame_count,
+        "completed_frame_count": completed_frame_count,
+        "native_frames_match_expected": native_frames_match_expected,
         "input_fingerprint": input_sha, "configuration_sha256": _hash_json(config),
         "plan_sha256": plan.get("plan_sha256"), "code_sha256": code_sha,
         "source_images": [{"native_frame": row["native_frame"], "path": row["path"], "sha256": row["sha256"], "time_s": row["time_s"]} for row in records],
@@ -1740,7 +1903,7 @@ def _plot_run_locked(root: Path, run_root: Path, config: Mapping[str, Any], plan
                 fig.savefig(temp_path, dpi=220, bbox_inches="tight", format="png")
                 import matplotlib.pyplot as plt
                 plt.close(fig)
-                os.replace(temp_path, path)
+                _replace_with_retry(temp_path, path)
                 generated.append(path.relative_to(run_root).as_posix())
             except ValueError as exc:
                 issues.append({"native_frame": meta.get("native_frame"), "component": component, "reason": str(exc)})
@@ -1853,7 +2016,7 @@ def _plot_standard_histories(run_root: Path) -> dict[str, Any]:
         temp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp.png")
         try:
             fig.savefig(temp, dpi=220, bbox_inches="tight", format="png")
-            os.replace(temp, path)
+            _replace_with_retry(temp, path)
         finally:
             plt.close(fig)
             try:
@@ -1904,6 +2067,7 @@ def plot(project: str | os.PathLike[str], *, plot_every: int | None = None) -> d
         pointer = _current_pointer(root)
         plan = _read_json(_plan_path(root, pointer))
         run_state = _read_json(run_root / "run_state.json")
+        _require_current_run_binding(root, config, run_root, plan, run_state)
         count = int(config.get("plot_every", 0) if plot_every is None else plot_every)
         if count < 0:
             raise AgentError("CONFIG_VALUE_ERROR", "plot_every must be >= 0", path="$.plot_every")
@@ -1920,11 +2084,7 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
         pointer, run_root = _load_run_pointer(root)
         plan = _read_json(_plan_path(root, pointer))
         run_state = _read_json(run_root / "run_state.json")
-        input_sha = str(run_state.get("input_fingerprint") or "")
-        if not input_sha:
-            # The manifest is authoritative if the state predates this field.
-            input_sha = str(_read_json(run_root / "manifest.json").get("input_fingerprint") or "")
-        records = _read_json(root / "inventory.json").get("frames", [])
+        records, input_sha, current_code = _require_current_run_binding(root, config, run_root, plan, run_state)
         rows = []
         mechanics, mechanics_status = _load_mechanics(config)
         displacement_reference_alignment = None
@@ -1951,7 +2111,7 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
             row.update(_mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment))
             row["engineering_strain"] = None
             rows.append(row)
-        output = _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, str(run_state["run_fingerprint"]), input_sha, run_state.get("code_sha256") or _code_fingerprint(), field_csv=field_csv, plots=False)
+        output = _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, str(run_state["run_fingerprint"]), input_sha, current_code, field_csv=field_csv, plots=False)
         return {"run_id": run_root.name, "status": run_state.get("status"),
                 "scientific_ok": output["quality"]["scientific_ok"],
                 "numerical_quality_passed": output["quality"]["numerical_quality_passed"],
@@ -1972,10 +2132,11 @@ def extract(
     root = _project_root(project)
     config = _read_config(root)
     with _project_lock(root, purpose="extract"):
-        _, run_root = _load_run_pointer(root)
+        pointer, run_root = _load_run_pointer(root)
+        plan = _read_json(_plan_path(root, pointer))
         state = _read_json(run_root / "run_state.json")
+        records, _, _ = _require_current_run_binding(root, config, run_root, plan, state)
         output: dict[str, Any] = {"run_id": run_root.name, "component": component, "coordinate_system": coordinate_system}
-        records = _read_json(root / "inventory.json").get("frames", [])
         checkpoint_root = run_root / "checkpoints"
         metadata_by_native = {int(meta["native_frame"]): meta for meta in _iter_checkpoint_metadata(run_root)}
         dest = run_root / "extractions"
@@ -2042,9 +2203,34 @@ def extract(
         return output
 
 
+def _current_plan_if_fresh(root: Path, config: Mapping[str, Any]) -> dict[str, Any] | None:
+    pointer = _current_pointer(root)
+    if not pointer.get("current_plan"):
+        return None
+    plan = _read_json(_plan_path(root, pointer))
+    plan_body = dict(plan)
+    saved_sha = plan_body.pop("plan_sha256", None)
+    if saved_sha != _hash_json(plan_body):
+        raise AgentError("PLAN_CHECKSUM_MISMATCH", "saved analysis plan checksum is invalid")
+    _, input_sha = _inventory_fresh(root, config)
+    import ezdic_core as core
+    return plan if (
+        plan.get("configuration_sha256") == _hash_json(config)
+        and plan.get("input_fingerprint") == input_sha
+        and plan.get("code_sha256") == _code_fingerprint()
+        and plan.get("environment") == core.collect_environment()
+    ) else None
+
+
 def analyze(project: str | os.PathLike[str], *, progress: Callable[[dict[str, Any]], None] | None = None, field_csv: bool = False, make_plots: bool = True) -> dict[str, Any]:
-    plan = plan_project(project, progress=progress)
-    result = run(project, progress=progress, field_csv=field_csv, make_plots=make_plots)
+    root = _project_root(project)
+    config = _read_config(root)
+    plan = _current_plan_if_fresh(root, config)
+    if plan is None:
+        plan = plan_project(root, progress=progress)
+    elif progress:
+        progress({"event": "plan_reused", "plan_id": plan.get("plan_id"), "status": plan.get("status")})
+    result = run(root, progress=progress, field_csv=field_csv, make_plots=make_plots)
     return {"plan": plan, "run": result}
 
 
@@ -2109,6 +2295,10 @@ def verify(project: str | os.PathLike[str]) -> dict[str, Any]:
     current_environment = core.collect_environment()
     if state.get("run_fingerprint") != _run_fingerprint(config, plan or {}, input_sha, current_code):
         issues.append({"code": "RUN_FINGERPRINT_STALE"})
+    if manifest.get("run_status") != state.get("status"):
+        issues.append({"code": "RUN_STATUS_MISMATCH"})
+    if manifest.get("expected_frame_count") != len(records):
+        issues.append({"code": "EXPECTED_FRAME_COUNT_MISMATCH", "expected": len(records), "actual": manifest.get("expected_frame_count")})
     if manifest.get("input_fingerprint") != input_sha:
         issues.append({"code": "INPUT_FINGERPRINT_MISMATCH"})
     if manifest.get("code_sha256") != current_code:
@@ -2170,15 +2360,40 @@ def verify(project: str | os.PathLike[str]) -> dict[str, Any]:
         issues.append({"code": "FRAME_RECEIPT_COUNT_MISMATCH", "expected": len(records), "actual": len(receipt_paths)})
     if checkpoint_count != manifest.get("checkpoint_count"):
         issues.append({"code": "CHECKPOINT_COUNT_MISMATCH", "expected": manifest.get("checkpoint_count"), "actual": checkpoint_count})
+    summary_native_matches_expected = False
+    summary_quality_passed = False
     try:
         summary_table = pd.read_csv(run_root / "summary.csv")
         if len(summary_table) != len(records):
             issues.append({"code": "SUMMARY_FRAME_COUNT_MISMATCH", "expected": len(records), "actual": len(summary_table)})
+        if "native_frame" in summary_table:
+            summary_native_frames = [int(value) for value in summary_table["native_frame"].tolist()]
+            summary_native_matches_expected = summary_native_frames == [int(row["native_frame"]) for row in records]
+        if not summary_native_matches_expected:
+            issues.append({"code": "SUMMARY_FRAME_IDENTITY_MISMATCH"})
+        if "status" in summary_table and "scientific_ok" in summary_table:
+            summary_quality_passed = bool(
+                len(summary_table)
+                and summary_table["status"].eq("complete").all()
+                and summary_table["scientific_ok"].eq(True).all()
+            )
+        if manifest.get("completed_frame_count") != len(summary_table):
+            issues.append({"code": "COMPLETED_FRAME_COUNT_MISMATCH", "expected": len(summary_table), "actual": manifest.get("completed_frame_count")})
     except Exception as exc:
         issues.append({"code": "SUMMARY_INVALID", "message": str(exc)})
-    numerical_quality_passed = manifest.get("numerical_quality_passed", manifest.get("scientific_ok") is True)
-    return {"project": str(root), "valid": not issues, "scientific_ok": manifest.get("scientific_ok") is True,
-            "numerical_quality_passed": numerical_quality_passed is True,
+    numerical_quality_passed = (
+        not issues
+        and state.get("status") == "complete"
+        and manifest.get("run_status") == "complete"
+        and manifest.get("expected_frame_count") == len(records)
+        and manifest.get("completed_frame_count") == len(records)
+        and manifest.get("native_frames_match_expected") is True
+        and summary_native_matches_expected
+        and summary_quality_passed
+        and manifest.get("numerical_quality_passed", manifest.get("scientific_ok") is True) is True
+    )
+    return {"project": str(root), "valid": not issues, "scientific_ok": numerical_quality_passed,
+            "numerical_quality_passed": numerical_quality_passed,
             "quality_gate_scope": manifest.get("quality_gate_scope", QUALITY_GATE_SCOPE),
             "scientific_acceptance": manifest.get("scientific_acceptance", "not_assessed"),
             "experimental_uncertainty_calibrated": manifest.get("experimental_uncertainty_calibrated", False),

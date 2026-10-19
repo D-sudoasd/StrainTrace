@@ -1,13 +1,15 @@
 """Failure continuation, resumability, and time/units gates for Agent runs."""
 
 import json
+import shutil
 
 import cv2
 import numpy as np
 import pandas as pd
+import pytest
 
 import ezdic_core as core
-from straintrace_agent import init_project, plan_project, run, verify
+from straintrace_agent import AgentError, export, extract, init_project, plan_project, run, verify
 from straintrace_agent.api import _interpolate_bounded_detail
 
 
@@ -81,11 +83,151 @@ def test_cancelled_run_resumes_matching_checkpoint(tmp_path):
 
     interrupted = run(project, make_plots=False, progress=cancel_after_first_frame)
     assert interrupted["status"] == "cancelled"
+    assert interrupted["numerical_quality_passed"] is False
+    run_root = project / "runs" / interrupted["run_id"]
+    quality = json.loads((run_root / "quality.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert quality["run_status"] == manifest["run_status"] == "cancelled"
+    assert quality["expected_frame_count"] == manifest["expected_frame_count"] == 3
+    assert quality["completed_frame_count"] == manifest["completed_frame_count"] == 1
+    assert quality["numerical_quality_passed"] is manifest["numerical_quality_passed"] is False
+    assert verify(project)["numerical_quality_passed"] is False
+
+    # A valid frame-1 payload placed under the frame-2 filenames must not be
+    # reused as frame 2. Resume should retain frame 1 and recalculate frame 2.
+    checkpoint_dir = run_root / "checkpoints"
+    shutil.copyfile(checkpoint_dir / "frame_native_00000001.npz", checkpoint_dir / "frame_native_00000002.npz")
+    shutil.copyfile(checkpoint_dir / "frame_native_00000001.json", checkpoint_dir / "frame_native_00000002.json")
     resumed_events = []
     resumed = run(project, make_plots=False, progress=resumed_events.append)
     assert resumed["status"] == "complete"
     assert any(event.get("event") == "frame_reused" and event.get("native_frame") == 1 for event in resumed_events)
+    assert not any(event.get("event") == "frame_reused" and event.get("native_frame") == 2 for event in resumed_events)
+    assert any(event.get("event") == "frame_complete" and event.get("native_frame") == 2 for event in resumed_events)
+    frame_two = json.loads((checkpoint_dir / "frame_native_00000002.json").read_text(encoding="utf-8"))
+    assert frame_two["native_frame"] == frame_two["summary_row"]["native_frame"] == 2
     assert verify(project)["valid"] is True
+    assert verify(project)["numerical_quality_passed"] is True
+
+
+def test_runtime_frame_failure_retries_on_resume_and_reuses_other_checkpoints(tmp_path, monkeypatch):
+    image_dir = tmp_path / "raw"
+    _images(image_dir)
+    project = tmp_path / "sample"
+    _init(project, image_dir)
+    plan_project(project)
+
+    original = core.run_2d_dic
+    target = core.read_gray_image(str(image_dir / "frame_0002.png"))
+    injected = False
+
+    def fail_once_on_frame_two(reference, deformed, *args, **kwargs):
+        nonlocal injected
+        if not injected and np.array_equal(deformed, target):
+            injected = True
+            raise PermissionError("[WinError 5] transient checkpoint access")
+        return original(reference, deformed, *args, **kwargs)
+
+    monkeypatch.setattr(core, "run_2d_dic", fail_once_on_frame_two)
+    first = run(project, make_plots=False)
+    assert first["status"] == "partial"
+    run_root = project / "runs" / first["run_id"]
+    failed_receipt = json.loads((run_root / "checkpoints" / "frame_native_00000002.json").read_text(encoding="utf-8"))
+    assert failed_receipt["status"] == "failed"
+    assert failed_receipt["retryable"] is True
+    assert failed_receipt["failure_class"] == "runtime"
+
+    monkeypatch.setattr(core, "run_2d_dic", original)
+    events = []
+    resumed = run(project, make_plots=False, progress=events.append)
+    assert resumed["status"] == "complete"
+    assert {event["native_frame"] for event in events if event.get("event") == "frame_reused"} == {1, 4}
+    assert any(event.get("event") == "frame_complete" and event.get("native_frame") == 2 for event in events)
+    assert verify(project)["numerical_quality_passed"] is True
+
+
+def test_review_required_plan_blocks_run_analyze_and_cli_before_full_frame_work(tmp_path, monkeypatch, capsys):
+    image_dir = tmp_path / "low_texture"
+    image_dir.mkdir()
+    reference = core.generate_synthetic_speckle(112, 112, seed=31)
+    frames = (
+        reference,
+        np.zeros((112, 112), dtype=np.uint8),
+        core.warp_image_deformation_gradient(reference, [[1.005, 0], [0, 1]]),
+    )
+    for native, frame in enumerate(frames, 1):
+        assert cv2.imwrite(str(image_dir / f"frame_{native:04d}.png"), np.asarray(frame, dtype=np.uint8))
+    project = tmp_path / "low_texture_project"
+    init_project(project, image_dir, frame_interval_s=0.5, step_hint_px=8)
+    plan = plan_project(project)
+    assert plan["status"] == "review_required"
+
+    dic_calls = []
+
+    def forbid_full_frame_dic(*_args, **_kwargs):
+        dic_calls.append(True)
+        raise AssertionError("full-frame DIC must not run for a review_required plan")
+
+    monkeypatch.setattr(core, "run_2d_dic", forbid_full_frame_dic)
+    with pytest.raises(AgentError) as error:
+        run(project, make_plots=False)
+    assert error.value.code == "PLAN_REVIEW_REQUIRED"
+    assert error.value.details["plan_status"] == "review_required"
+    with pytest.raises(AgentError) as error:
+        from straintrace_agent import analyze
+        analyze(project, make_plots=False)
+    assert error.value.code == "PLAN_REVIEW_REQUIRED"
+
+    from straintrace_agent.cli import EXIT_QUALITY, main
+    assert main(["run", "--project", str(project), "--no-plots"]) == EXIT_QUALITY
+    cli_error = json.loads(capsys.readouterr().out.strip())
+    assert cli_error["error_code"] == "PLAN_REVIEW_REQUIRED"
+    assert dic_calls == []
+    assert not list((project / "runs").glob("run-*"))
+    assert not list((project / "runs").rglob("*.npz"))
+
+
+def test_export_and_extract_reject_changed_inputs_before_writing(tmp_path):
+    image_dir = tmp_path / "raw"
+    _images(image_dir)
+    loads = tmp_path / "loads.csv"
+    pd.DataFrame({"time_s": [0.0, 1.0, 2.0], "force_N": [10.0, 20.0, 30.0]}).to_csv(loads, index=False)
+    project = tmp_path / "load-project"
+    _init(project, image_dir, loads=loads, clock_confirmed=True)
+    plan_project(project)
+    result = run(project, make_plots=False)
+    run_root = project / "runs" / result["run_id"]
+    summary_before = (run_root / "summary.csv").read_bytes()
+    manifest_before = (run_root / "manifest.json").read_bytes()
+
+    pd.DataFrame({"time_s": [0.0, 1.0, 2.0], "force_N": [10.0, 20.0, 99.0]}).to_csv(loads, index=False)
+    with pytest.raises(AgentError) as error:
+        export(project)
+    assert error.value.code == "RUN_STALE_INPUT"
+    assert (run_root / "summary.csv").read_bytes() == summary_before
+    assert (run_root / "manifest.json").read_bytes() == manifest_before
+
+    calibrated_project = tmp_path / "calibrated-project"
+    init_project(
+        calibrated_project, image_dir, frame_interval_s=0.5, step_hint_px=8,
+        calibration={"mm_per_px": 0.05, "origin_px": [0, 0], "origin_mm": [0, 0], "axis_sign": [1, 1]},
+    )
+    plan_project(calibrated_project)
+    calibrated_run = run(calibrated_project, make_plots=False)
+    calibrated_root = calibrated_project / "runs" / calibrated_run["run_id"]
+    calibrated_summary_before = (calibrated_root / "summary.csv").read_bytes()
+    calibrated_manifest_before = (calibrated_root / "manifest.json").read_bytes()
+    config_path = calibrated_project / "project.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["calibration"]["mm_per_px"] = 0.06
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    with pytest.raises(AgentError) as error:
+        extract(calibrated_project, roi=[20, 80, 20, 80], coordinate_system="calibrated")
+    assert error.value.code == "RUN_STALE_CONFIG"
+    assert not (calibrated_root / "extractions").exists()
+    assert (calibrated_root / "summary.csv").read_bytes() == calibrated_summary_before
+    assert (calibrated_root / "manifest.json").read_bytes() == calibrated_manifest_before
 
 
 def test_confirmed_mechanics_units_offset_and_unconfirmed_clock(tmp_path):

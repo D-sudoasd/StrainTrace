@@ -1,12 +1,13 @@
 """End-to-end automatic image-folder analysis on a deterministic affine sequence."""
 
+import hashlib
 import json
 
 import cv2
 import numpy as np
 
 import ezdic_core as core
-from straintrace_agent import extract, init_project, plan_project, run, verify
+from straintrace_agent import analyze, extract, init_project, plan_project, run, verify
 
 
 def _write_affine_sequence(image_dir):
@@ -63,14 +64,6 @@ def test_auto_directory_to_traceable_outputs_without_gui(tmp_path):
     report = (run_root / "report.md").read_text(encoding="utf-8")
     assert "`time_force.png`: unavailable" in report
     assert "Scientific acceptance: not assessed" in report
-    history = json.loads((run_root / "plots" / "history_summary.json").read_text(encoding="utf-8"))
-    history_by_name = {item["plot"]: item for item in history["plots"]}
-    assert history_by_name["time_force.png"]["status"] == "unavailable"
-    assert "confirmed clock" in history_by_name["time_force.png"]["reason"]
-    assert "no full-field mean" in history_by_name["time_dic_virtual_gauge_engineering_strain.png"]["reason"]
-    report = (run_root / "report.md").read_text(encoding="utf-8")
-    assert "`time_force.png`: unavailable" in report
-    assert "Scientific acceptance: not assessed" in report
 
     roi = [20, 80, 20, 80]
     gl = extract(project, component="Exx", roi=roi)
@@ -83,3 +76,46 @@ def test_auto_directory_to_traceable_outputs_without_gui(tmp_path):
     assert checked["valid"] is True, checked["issues"]
     assert checked["numerical_quality_passed"] is True
     assert checked["scientific_acceptance"] == "not_assessed"
+
+    checkpoint_dir = run_root / "checkpoints"
+    checkpoint_hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in checkpoint_dir.glob("*.npz")}
+    repeated_events = []
+    repeated = analyze(project, field_csv=True, make_plots=True, progress=repeated_events.append)
+    assert repeated["plan"]["plan_id"] == plan["plan_id"]
+    assert repeated["run"]["run_id"] == result["run_id"]
+    assert len(list((project / "plans").glob("plan_v*.json"))) == 1
+    assert any(event.get("event") == "plan_reused" for event in repeated_events)
+    assert {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in checkpoint_dir.glob("*.npz")} == checkpoint_hashes
+
+
+def test_analyze_replans_after_config_or_image_identity_changes(tmp_path, monkeypatch):
+    image_dir = tmp_path / "raw"
+    _write_affine_sequence(image_dir)
+    project = tmp_path / "sample-project"
+    init_project(project, image_dir, frame_interval_s=0.5, step_hint_px=8)
+    first_plan = plan_project(project)
+
+    import straintrace_agent.api as api
+    monkeypatch.setattr(api, "run", lambda *_args, **_kwargs: {"status": "mocked"})
+    reused = analyze(project)
+    assert reused["plan"]["plan_id"] == first_plan["plan_id"]
+    assert len(list((project / "plans").glob("plan_v*.json"))) == 1
+
+    config_path = project / "project.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["step_hint_px"] = 9
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    changed_config = analyze(project)
+    assert changed_config["plan"]["plan_id"] != first_plan["plan_id"]
+    assert len(list((project / "plans").glob("plan_v*.json"))) == 2
+
+    image_path = image_dir / "frame_0002.png"
+    old_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    success, encoded = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    assert success
+    image_path.write_bytes(encoded.tobytes())
+    assert hashlib.sha256(image_path.read_bytes()).hexdigest() != old_hash
+    changed_input = analyze(project)
+    assert changed_input["plan"]["plan_id"] != changed_config["plan"]["plan_id"]
+    assert len(list((project / "plans").glob("plan_v*.json"))) == 3

@@ -34,6 +34,7 @@ def test_quality_gate_is_not_reported_as_scientific_acceptance(tmp_path):
     root = tmp_path / "project"
     run_root = root / "runs" / "run-test"
     (run_root / "checkpoints").mkdir(parents=True)
+    (run_root / "run_state.json").write_text(json.dumps({"status": "complete", "run_id": "run-test"}), encoding="utf-8")
     records = [{"native_frame": 1, "path": "frame_0001.tif", "sha256": "source-hash", "time_s": 0.0}]
     rows = [{"frame_position_1based": 1, "native_frame": 1, "time_s": 0.0, "status": "complete", "quality_status": "pass", "scientific_ok": True}]
 
