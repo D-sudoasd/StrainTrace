@@ -62,6 +62,19 @@ CSV uses a UTF-8 BOM for convenient spreadsheet/Origin import, writes missing va
 
 `plot_position_time` consumes its `fields` iterable one frame at a time, so callers can load and release each full field rather than holding an entire experiment in memory. Pass `None` for a missing frame, and pass the acquisition times in seconds in the same order. Each supported path location becomes a scatter point at cumulative path distance and its actual time. There are no connecting lines; missing frames, invalid nearest POIs, and large time gaps stay empty. The returned summary counts missing frames, invalid nearest POIs, distance rejections, and plotted samples. For long runs, write path CSV rows incrementally instead of retaining all row dictionaries.
 
+The plot still retains all selected scatter samples until rendering: its memory grows with the number of frames times the number of path queries. It is not a bounded-memory renderer. In particular, `agent extract --path-json` also creates this plot; avoid that combined command for millions of path samples. For a complete large extraction, stream `sample_path` rows directly to `write_rows_csv`, without calling the plotting helper. Plot an explicitly identified smaller set separately and retain the complete CSV. Do not silently interpolate, average or discard the underlying measurements to fit a figure into memory.
+
+```python
+def path_rows():
+    # Load each available checkpoint lazily; identities come from the inventory.
+    for native_frame, time_s, field in fields_with_identity:
+        for row in sample_path(field, points, ["Exx"], max_distance=2.5):
+            yield {"native_frame": native_frame, "time_s": time_s, **row}
+
+write_rows_csv(path_rows(), "complete_available_path_samples.csv")
+# Keep the inventory and explicit failed/missing-frame ledger alongside this CSV.
+```
+
 ```python
 fig, ax, artist, summary = plot_position_time(
     fields=iter(frame_fields),  # each field is loaded before it is yielded
