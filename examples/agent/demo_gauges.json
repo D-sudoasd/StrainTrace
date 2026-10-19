@@ -1,0 +1,9 @@
+[
+  {
+    "name": "synthetic_x_gauge",
+    "axis": "x",
+    "a_roi_px": [48, 68, 20, 24],
+    "b_roi_px": [124, 68, 20, 24],
+    "geometry_status": "synthetic_ground_truth"
+  }
+]

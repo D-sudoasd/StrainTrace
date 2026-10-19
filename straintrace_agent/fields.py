@@ -218,8 +218,11 @@ def principal_strains(
 ) -> dict[str, np.ndarray]:
     """Return in-plane principal strains and the major-axis orientation.
 
-    ``Exy`` and ``exy`` are tensor shear components. The corresponding
-    engineering shears are ``2*Exy`` (Green-Lagrange) and ``2*exy``
+    The supplied strain components and returned principal-axis angles remain
+    in the native image tensor basis (x right, y down), regardless of whether
+    spatial coordinates have also been calibrated. ``Exy`` and ``exy`` are
+    tensor shear components. The corresponding engineering shears are
+    ``2*Exy`` (Green-Lagrange) and ``2*exy``
     (infinitesimal). The angle is measured from image +x (right); since image
     +y points down, positive angles appear clockwise on an image. Its direction
     is undefined for equal principal values and is returned as NaN there.
@@ -311,7 +314,9 @@ def calibrate_field(field: Mapping, calibration: Mapping) -> dict[str, np.ndarra
 
     Required calibration keys are ``mm_per_px``, ``origin_px``, ``origin_mm``,
     and ``axis_sign``. The two signs must each be +1 or -1; no origin or axis
-    convention is inferred. The source field mapping is never modified.
+    convention is inferred. This derives physical positions and displacement
+    only; it does not transform strain components or principal angles out of
+    the image tensor basis. The source field mapping is never modified.
     """
     required = ("mm_per_px", "origin_px", "origin_mm", "axis_sign")
     missing = [key for key in required if key not in calibration]
@@ -646,7 +651,11 @@ def plot_field_map(
             ax.invert_yaxis()
     ax.set_aspect("equal", adjustable="box")
     if colorbar:
-        figure.colorbar(artist, ax=ax, label=f"{component} ({component_unit(component)})")
+        label = f"{component} ({component_unit(component)}"
+        if component in _STRAIN_COMPONENTS:
+            label += "; image tensor basis: +x right, +y down"
+        label += ")"
+        figure.colorbar(artist, ax=ax, label=label)
     return figure, ax, artist
 
 

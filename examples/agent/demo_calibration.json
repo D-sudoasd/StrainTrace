@@ -1,0 +1,6 @@
+{
+  "mm_per_px": 0.05,
+  "origin_px": [0.0, 0.0],
+  "origin_mm": [0.0, 0.0],
+  "axis_sign": [1, -1]
+}
