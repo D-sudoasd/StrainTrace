@@ -110,6 +110,63 @@ def test_cancelled_run_resumes_matching_checkpoint(tmp_path):
     assert verify(project)["numerical_quality_passed"] is True
 
 
+def test_run_rejects_modified_plan_before_creating_run_or_running_dic(tmp_path, monkeypatch):
+    image_dir = tmp_path / "raw"
+    _images(image_dir)
+    project = tmp_path / "sample"
+    _init(project, image_dir)
+    plan = plan_project(project)
+    pointer_path = project / "CURRENT.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    plan_path = project / pointer["current_plan"]
+    edited_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    edited_plan["selected_parameters"]["step_px"] = int(plan["selected_parameters"]["step_px"]) + 1
+    # Deliberately preserve the old plan_sha256 to emulate an out-of-band edit.
+    plan_path.write_text(json.dumps(edited_plan, indent=2), encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(core, "run_2d_dic", lambda *_args, **_kwargs: calls.append(True))
+    with pytest.raises(AgentError) as error:
+        run(project, make_plots=False)
+
+    assert error.value.code == "PLAN_CHECKSUM_MISMATCH"
+    assert calls == []
+    assert json.loads(pointer_path.read_text(encoding="utf-8"))["current_run"] is None
+    assert not list((project / "runs").glob("run-*"))
+    assert not list((project / "runs").rglob("*.npz"))
+
+
+def test_checkpoint_solver_parameters_are_verified_and_recomputed_on_mismatch(tmp_path):
+    image_dir = tmp_path / "raw"
+    _images(image_dir)
+    project = tmp_path / "sample"
+    _init(project, image_dir)
+    plan = plan_project(project)
+    initial = run(project, make_plots=False)
+    run_root = project / "runs" / initial["run_id"]
+    receipt_path = run_root / "checkpoints" / "frame_native_00000002.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["parameters"] == plan["selected_parameters"]
+    receipt["parameters"]["step_px"] = int(plan["selected_parameters"]["step_px"]) + 1
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+    invalid = verify(project)
+    assert invalid["valid"] is False
+    assert invalid["numerical_quality_passed"] is False
+    assert any(issue["code"] == "CHECKPOINT_PARAMETER_MISMATCH" and issue.get("native_frame") == 2 for issue in invalid["issues"])
+
+    events = []
+    resumed = run(project, make_plots=False, progress=events.append)
+    assert resumed["status"] == "complete"
+    assert {event["native_frame"] for event in events if event.get("event") == "frame_reused"} == {1, 4}
+    assert any(event.get("event") == "frame_complete" and event.get("native_frame") == 2 for event in events)
+    repaired = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert repaired["parameters"] == plan["selected_parameters"]
+    checked = verify(project)
+    assert checked["valid"] is True
+    assert checked["numerical_quality_passed"] is True
+
+
 def test_runtime_frame_failure_retries_on_resume_and_reuses_other_checkpoints(tmp_path, monkeypatch):
     image_dir = tmp_path / "raw"
     _images(image_dir)

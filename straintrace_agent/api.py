@@ -39,6 +39,7 @@ IMAGE_SUFFIXES = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 _FRAME_TOKEN = re.compile(r"\d+")
 QUALITY_GATE_SCOPE = "existing ezdic_core correlation and strain validity thresholds; not experimental validation or scientific acceptance"
 _REPLACE_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
+_CORE_SOLVER_PARAMETER_KEYS = ("subset_size_px", "step_px", "solver", "strain_window_poi", "search_radius_px")
 
 
 def _component_file_slug(component: str) -> str:
@@ -120,6 +121,25 @@ def _sha256(path: Path) -> str:
 
 def _hash_json(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _validate_plan_checksum(plan: Mapping[str, Any]) -> str:
+    plan_body = dict(plan)
+    saved_sha = plan_body.pop("plan_sha256", None)
+    if saved_sha != _hash_json(plan_body):
+        raise AgentError("PLAN_CHECKSUM_MISMATCH", "saved analysis plan checksum is invalid")
+    return str(saved_sha)
+
+
+def _solver_parameters_match(recorded: Any, expected: Any) -> bool:
+    if not isinstance(recorded, Mapping) or not isinstance(expected, Mapping):
+        return False
+    for key in _CORE_SOLVER_PARAMETER_KEYS:
+        if key not in recorded or key not in expected:
+            return False
+        if type(recorded[key]) is not type(expected[key]) or recorded[key] != expected[key]:
+            return False
+    return True
 
 
 def _replace_with_retry(source: Path, destination: Path) -> None:
@@ -1265,7 +1285,7 @@ def _frame_key(native_frame: int) -> str:
 def _checkpoint_valid(
     run_root: Path, record: Mapping[str, Any], frame_position: int,
     reference_native_frame: int, run_fingerprint: str, input_sha: str,
-    code_sha: Mapping[str, str],
+    code_sha: Mapping[str, str], expected_parameters: Mapping[str, Any],
 ) -> tuple[Path, dict[str, Any]] | None:
     native_frame = int(record["native_frame"])
     checkpoint = run_root / "checkpoints" / f"{_frame_key(native_frame)}.npz"
@@ -1283,7 +1303,8 @@ def _checkpoint_valid(
                 or metadata.get("reference_native_frame") != reference_native_frame
                 or metadata.get("run_fingerprint") != run_fingerprint
                 or metadata.get("input_fingerprint") != input_sha
-                or metadata.get("code_sha256") != code_sha):
+                or metadata.get("code_sha256") != code_sha
+                or not _solver_parameters_match(metadata.get("parameters"), expected_parameters)):
             return False
         expected_time = record.get("time_s")
         if expected_time is None:
@@ -1341,7 +1362,7 @@ def _checkpoint_valid(
         return None
 
 
-def _frame_failure(run_root: Path, record: Mapping[str, Any], run_fingerprint: str, input_sha: str, code_sha: Mapping[str, str], error: AgentError, *, frame_position: int | None = None, reference_native_frame: int | None = None, retryable: bool = False, mechanics_row: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _frame_failure(run_root: Path, record: Mapping[str, Any], run_fingerprint: str, input_sha: str, code_sha: Mapping[str, str], error: AgentError, *, frame_position: int | None = None, reference_native_frame: int | None = None, retryable: bool = False, parameters: Mapping[str, Any] | None = None, mechanics_row: Mapping[str, Any] | None = None) -> dict[str, Any]:
     native = int(record["native_frame"])
     path = run_root / "checkpoints" / f"{_frame_key(native)}.json"
     row = {"frame_position_1based": frame_position, "native_frame": native, "time_s": record["time_s"], "reference_native_frame": reference_native_frame, "status": "failed", "quality_status": "unavailable", "scientific_ok": False, "failure_code": error.code, "failure_reason": error.message, "checkpoint": None, "force_N": None, "stress_MPa": None, "mechanics_status": "not_evaluated", **dict(mechanics_row or {})}
@@ -1352,6 +1373,7 @@ def _frame_failure(run_root: Path, record: Mapping[str, Any], run_fingerprint: s
         "source_path": record["path"], "source_sha256": record["sha256"],
         "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha,
         "code_sha256": code_sha, "status": "failed", "checkpoint": None,
+        "parameters": dict(parameters or {}),
         "retryable": bool(retryable), "failure_class": "runtime" if retryable else "deterministic",
         "error": error.as_dict(), "summary_row": row,
     }
@@ -1376,9 +1398,7 @@ def _require_current_run_binding(
 ) -> tuple[list[dict[str, Any]], str, dict[str, str]]:
     """Reject derived-output writes when their run no longer binds current inputs."""
     plan_copy = dict(plan)
-    saved_plan_sha = plan_copy.pop("plan_sha256", None)
-    if saved_plan_sha != _hash_json(plan_copy):
-        raise AgentError("RUN_PLAN_INVALID", "saved analysis plan checksum is invalid")
+    saved_plan_sha = _validate_plan_checksum(plan_copy)
     records, input_sha = _inventory_fresh(root, config)
     if (plan.get("input_fingerprint") != input_sha
             or run_state.get("input_fingerprint") != input_sha):
@@ -1424,6 +1444,7 @@ def run(
         pointer = _current_pointer(root)
         plan_path = _plan_path(root, pointer)
         plan = _read_json(plan_path)
+        _validate_plan_checksum(plan)
         code_sha = _code_fingerprint()
         if plan.get("input_fingerprint") != input_sha:
             raise AgentError("PLAN_STALE_INPUT", "source image, load, frame-map, or mask identity changed; create a fresh plan")
@@ -1492,7 +1513,7 @@ def run(
             native = int(record["native_frame"])
             existing = _checkpoint_valid(
                 run_root, record, position, int(reference_record["native_frame"]),
-                run_fingerprint, input_sha, code_sha,
+                run_fingerprint, input_sha, code_sha, parameters,
             )
             if existing is not None:
                 meta = existing[1]
@@ -1592,13 +1613,13 @@ def run(
                 return {"project": str(root), "run_id": run_id, "status": "cancelled", "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed", "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root)}
             except AgentError as exc:
                 mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
-                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, exc, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), mechanics_row=mechanics_row)
+                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, exc, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), parameters=parameters, mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": exc.as_dict()}, progress)
             except Exception as exc:
                 error = AgentError("DIC_FRAME_ERROR", f"{type(exc).__name__}: {exc}", path=record["path"])
                 mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
-                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, error, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), retryable=True, mechanics_row=mechanics_row)
+                row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, error, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), retryable=True, parameters=parameters, mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": error.as_dict()}, progress)
         if _sha256(Path(reference_record["path"])) != reference_sha_before:
@@ -2208,10 +2229,7 @@ def _current_plan_if_fresh(root: Path, config: Mapping[str, Any]) -> dict[str, A
     if not pointer.get("current_plan"):
         return None
     plan = _read_json(_plan_path(root, pointer))
-    plan_body = dict(plan)
-    saved_sha = plan_body.pop("plan_sha256", None)
-    if saved_sha != _hash_json(plan_body):
-        raise AgentError("PLAN_CHECKSUM_MISMATCH", "saved analysis plan checksum is invalid")
+    _validate_plan_checksum(plan)
     _, input_sha = _inventory_fresh(root, config)
     import ezdic_core as core
     return plan if (
@@ -2333,6 +2351,8 @@ def verify(project: str | os.PathLike[str]) -> dict[str, Any]:
             issues.append({"code": "RECEIPT_SOURCE_MISMATCH", "native_frame": native})
         if metadata.get("run_fingerprint") != state.get("run_fingerprint") or metadata.get("input_fingerprint") != input_sha or metadata.get("code_sha256") != current_code:
             issues.append({"code": "RECEIPT_STALE", "native_frame": native})
+        if not _solver_parameters_match(metadata.get("parameters"), (plan or {}).get("selected_parameters")):
+            issues.append({"code": "CHECKPOINT_PARAMETER_MISMATCH", "native_frame": native})
         receipt_record = manifest_receipts.get(metadata_path.name)
         if not receipt_record or receipt_record.get("sha256") != _sha256(metadata_path):
             issues.append({"code": "RECEIPT_CHECKSUM_MISMATCH", "native_frame": native})
