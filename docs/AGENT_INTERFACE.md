@@ -38,6 +38,8 @@ Python 源码 checkout 安装后可从 straintrace_agent 导入 api。CLI 是跨
 
 自动入口、空间定义与报告包的完整说明见[实验文件夹分析指南](AUTONOMOUS_ANALYSIS.md)。
 
+Python 包级 `straintrace_agent.report` 是可调用的报告入口，实现模块为 `straintrace_agent.reporting`。分步编排需要绑定计算身份时，可调用 `api.report(project, expected_run_id=run_result["run_id"])`；项目已切换运行会明确返回 `AUTOMATION_STALE_RUN`。`auto` 已执行此检查；取消时返回 `status="cancelled"` 和保存的部分报告。
+
 查看各子命令的精确 flags 可运行 agent <command> --help。当前 init 关键参数：
 
     --project PATH --images DIR

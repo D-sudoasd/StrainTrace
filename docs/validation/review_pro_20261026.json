@@ -1,0 +1,177 @@
+{
+  "schema": "straintrace.review-pro/v1",
+  "date": "2026-10-26",
+  "verdict": "APPROVE",
+  "base": "5f812ef9a0a0f7ce2391400a889c25ad15dae153",
+  "reviewed_head": "e38f35286bc92208082e20cb10b2870e35c00516",
+  "spec_source": {
+    "kind": "argument",
+    "ref": "Original StrainTrace upgrade requirements supplied by the user in this conversation"
+  },
+  "active_stacks": [],
+  "external_premises": [],
+  "concerns": [
+    "correctness",
+    "backend",
+    "api-contract",
+    "security",
+    "performance",
+    "frontend",
+    "tests",
+    "spec",
+    "a11y",
+    "craft"
+  ],
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "High",
+      "owner": "backend",
+      "issue": "cross-run automatic delivery",
+      "status": "resolved"
+    },
+    {
+      "id": "B2",
+      "severity": "Medium",
+      "owner": "backend",
+      "issue": "cancelled automatic analysis",
+      "status": "resolved"
+    },
+    {
+      "id": "B3",
+      "severity": "Medium",
+      "owner": "backend",
+      "issue": "report and manifest commit recovery",
+      "status": "resolved"
+    },
+    {
+      "id": "A1",
+      "severity": "Medium",
+      "owner": "api-contract",
+      "issue": "public report import order",
+      "status": "resolved"
+    },
+    {
+      "id": "S1",
+      "severity": "Medium",
+      "owner": "security",
+      "issue": "unregistered checkpoint links",
+      "status": "resolved"
+    },
+    {
+      "id": "P1",
+      "severity": "Medium",
+      "owner": "performance",
+      "issue": "duplicate checkpoint hashing",
+      "status": "resolved"
+    },
+    {
+      "id": "F1",
+      "severity": "High",
+      "owner": "frontend",
+      "issue": "displayed project and write target",
+      "status": "resolved"
+    },
+    {
+      "id": "F2",
+      "severity": "High",
+      "owner": "frontend",
+      "issue": "preview and actual reference identity",
+      "status": "resolved"
+    },
+    {
+      "id": "F3",
+      "severity": "Medium",
+      "owner": "frontend",
+      "issue": "busy selection and edited row",
+      "status": "resolved"
+    },
+    {
+      "id": "F4",
+      "severity": "Medium",
+      "owner": "frontend",
+      "issue": "discarded edits and Run state",
+      "status": "resolved"
+    },
+    {
+      "id": "K1",
+      "severity": "High",
+      "owner": "a11y",
+      "issue": "keyboard focus outside viewport",
+      "status": "resolved"
+    },
+    {
+      "id": "T1",
+      "severity": "Medium",
+      "owner": "tests",
+      "issue": "stress objective support independent of DIC gate",
+      "status": "resolved"
+    }
+  ],
+  "validation": {
+    "full_regression": {
+      "passed": 553,
+      "skipped": 1,
+      "seconds": 339.55,
+      "scope": "before final automatic-reference preview correction"
+    },
+    "schema_rerun": {
+      "passed": 1,
+      "seconds": 1.29,
+      "isolated_jsonschema": "4.26.0"
+    },
+    "final_agent_regression": {
+      "passed": 127,
+      "seconds": 89.1
+    },
+    "new_gui_regressions": {
+      "passed": 12,
+      "seconds": 8.03
+    },
+    "cli": {
+      "passed": true,
+      "command_count": 14,
+      "inputs_unchanged": true
+    },
+    "locked_benchmark": {
+      "report": "ezdic-benchmark-report-v6",
+      "cases": "ezdic-benchmark-cases-v4",
+      "passed": true,
+      "thresholds_changed": false
+    },
+    "installed_wheel": {
+      "auto_status": "complete",
+      "integrity_valid": true
+    },
+    "frozen": {
+      "auto_status": "complete",
+      "integrity_valid": true,
+      "gui_smoke": "passed"
+    },
+    "source_wheel_frozen_comparison": {
+      "array_comparisons": 84,
+      "maximum_absolute_difference": 0.0
+    },
+    "checkpoint_hash_io": {
+      "input_bytes": 67108864,
+      "before_bytes_read": 134217728,
+      "after_bytes_read": 67108864,
+      "scope": "one verify_report call; no fixed wall-clock speedup claimed"
+    }
+  },
+  "source_sha256": {
+    "straintrace_agent/__init__.py": "a10a3373d124429189c28950edb46bd4a30239b289369a2afac78eb37df59894",
+    "straintrace_agent/api.py": "b78875a3b13733d2b755dc506ef7abcd5c3a3fc17e5b4f637059f0a4eb883917",
+    "straintrace_agent/cli.py": "3a2fc63ed4d23559ffe7d76403daa4d41f1c21a9b57af474930e437415beb9c4",
+    "straintrace_agent/discovery.py": "b883a0cabe9e1e2dcd4a800ce646183e414471083b3c333e1668b8716264a577",
+    "straintrace_agent/fields.py": "f8c4bb80f0ab3945fd08ac6d7d2d4fdebc478e2308169bfdf11028961276fa39",
+    "straintrace_agent/gui.py": "a79df2e354b567948353f6a26884b22bad4753a55dc54b19af785ae580ac3434",
+    "straintrace_agent/mechanics.py": "333b794ea0ad5b8aa384ed7f7bf0278129b080cfaf3806f7418e3c5ef16aa776",
+    "straintrace_agent/regions.py": "ef9d88d778eeec1d8830bfa065ef41b38e4ea39b1e43ee3d668ad989dfdb2c86",
+    "straintrace_agent/reporting.py": "6de5380bbc75f7ed50fe2b9c14301f64f67e91088320daa6c2132c5f5e97c098"
+  },
+  "limits": [
+    "Synthetic and public-image software regression, not experimental uncertainty calibration.",
+    "Tk keyboard checks used withdrawn real widgets and event traversal, not a screen-reader certification."
+  ]
+}

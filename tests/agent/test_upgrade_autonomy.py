@@ -182,7 +182,7 @@ def test_unavailable_reprocessing_support_is_preserved_in_portable_report(tmp_pa
     html = (output / "report/index.html").read_text(encoding="utf-8")
     assert "本次后处理" in html
     assert "attention_required" in html
-    from straintrace_agent.report import verify_report
+    from straintrace_agent.reporting import verify_report
     relocated = tmp_path / "relocated-report"
     shutil.copytree(output / "report", relocated)
     assert verify_report(relocated)["valid"] is True

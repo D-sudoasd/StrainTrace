@@ -42,16 +42,19 @@ def _snapshot(api, project):
     status = api.status(project)
     inventory = _read_json(project / "inventory.json").get("frames", [])
     plan = _read_json(_project_file(project, status["current_plan"])) if status.get("current_plan") else None
-    native = (plan or {}).get("reference_native_frame", config.get("reference_native_frame"))
-    record = next((r for r in inventory if r.get("native_frame") == native), None)
-    record = record or next((r for r in inventory if r.get("status") == "pending"), None)
-    image = None
-    if record:
-        import ezdic_core as core
-        import numpy as np
-        gray = core.read_gray_image(record["path"])
-        gray8 = core.normalize_to_uint8(gray)
-        image = Image.fromarray(np.asarray(gray8)).convert("RGB")
+    if plan is None:
+        # Use the planner's reference selection and its already loaded image.
+        record, gray, _selection = api._automatic_reference(config, inventory)
+    else:
+        native = plan.get("reference_native_frame")
+        if native is None:
+            raise ValueError("当前计划未指定参考原生帧；请重新生成计划。")
+        record = api._reference_record({"reference_native_frame": native}, inventory)
+        gray = api._load_image(record["path"])
+    import ezdic_core as core
+    import numpy as np
+    gray8 = core.normalize_to_uint8(gray)
+    image = Image.fromarray(np.asarray(gray8)).convert("RGB")
     run_dir = _project_file(project, status["current_run"]) if status.get("current_run") else None
     artifacts = {}
     if run_dir:
@@ -174,13 +177,21 @@ class AgentPage(ttk.Frame):
         window = canvas.create_window((0, 0), window=content, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
         content.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
-        self._help(canvas, f"{title}可上下滚动；底部保存、计划、运行和状态保持可见。")
+        self._help(canvas, f"{title}可上下滚动；Tab / Shift+Tab 自动显示焦点控件，Alt+PageUp / PageDown 翻页。底部操作和状态保持可见。")
         self._help(scrollbar, "拖动滚动条查看此页其余设置。")
         self.tabs.add(outer, text=title)
-        content._outer, content._canvas = outer, canvas
+        content._outer, content._canvas, content._canvas_window = outer, canvas, window
         return content
 
     def _bind_scrolling(self, widget, canvas):
+        def reveal(_event):
+            widget.after_idle(lambda: self._reveal_control(widget, canvas))
+        for event in ("<FocusIn>", "<<TraverseIn>>"):
+            widget.bind(event, reveal, add="+")
+        for event, direction in (("<Alt-Prior>", -1), ("<Alt-Next>", 1)):
+            widget.bind(event, lambda _event, d=direction: canvas.yview_scroll(d, "pages") or "break", add="+")
+        widget.bind("<Alt-Home>", lambda _event: canvas.yview_moveto(0) or "break", add="+")
+        widget.bind("<Alt-End>", lambda _event: canvas.yview_moveto(1) or "break", add="+")
         if not isinstance(widget, (tk.Text, ttk.Treeview)):
             def scroll(event):
                 delta = getattr(event, "delta", 0)
@@ -191,6 +202,27 @@ class AgentPage(ttk.Frame):
                 widget.bind(event, scroll)
         for child in widget.winfo_children():
             self._bind_scrolling(child, canvas)
+
+    @staticmethod
+    def _reveal_control(widget, canvas):
+        if not widget.winfo_exists() or not canvas.winfo_exists():
+            return
+        top = canvas.canvasy(0)
+        height = canvas.winfo_height()
+        control_top, ancestor = 0, widget
+        while ancestor.master is not canvas:
+            control_top += ancestor.winfo_y()
+            ancestor = ancestor.master
+        control_top += canvas.coords(ancestor._canvas_window)[1]
+        control_bottom = control_top + widget.winfo_height()
+        target = None
+        if control_top < top:
+            target = control_top - 4
+        elif control_bottom > top + height:
+            target = control_top - 4 if widget.winfo_height() > height else control_bottom - height + 4
+        bounds = canvas.bbox("all")
+        if target is not None and bounds and bounds[3] > bounds[1]:
+            canvas.yview_moveto(max(0, target - bounds[1]) / (bounds[3] - bounds[1]))
 
     def apply_theme(self):
         if self.app is not None:
@@ -204,6 +236,7 @@ class AgentPage(ttk.Frame):
         self.source_var = self._var()
         self.interval_var, self.map_var = self._var(), self._var()
         self.reference_var, self.step_var, self.mask_var = self._var(), self._var(), self._var()
+        self.reference_var.trace_add("write", lambda *_: self._show_geometry_reference())
         self.analysis_roi_var = self._var()
         self.objective_var = self._var(next(iter(OBJECTIVES)))
         self._entry(p, "实验 / 图像目录", self.source_var, 0, "选择实验目录，可自动发现图像序列和 experiment.json；有多个序列时需选定一组。")
@@ -258,6 +291,8 @@ class AgentPage(ttk.Frame):
         self._button(p, "图像中编辑 ↗", self.show_image, "在参考图像上直接拖动矩形后，点应用到列表。", 10, 1)
         self.geometry_hint = tk.StringVar(self, value="先选择类型，填写坐标或在图像中画框，再应用到列表。")
         ttk.Label(p, textvariable=self.geometry_hint, wraplength=390).grid(row=11, column=0, columnspan=2, sticky="ew", padx=3, pady=5)
+        self.geometry_reference_var = tk.StringVar(self, value="打开项目后显示坐标对应的参考原生帧。")
+        ttk.Label(p, textvariable=self.geometry_reference_var, wraplength=390).grid(row=12, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
 
     def _build_results(self):
         p = self.results_page
@@ -344,6 +379,8 @@ class AgentPage(ttk.Frame):
         if self.config and Path(self.source_var.get()).resolve() != Path(self.config["image_dir"]).resolve():
             raise ValueError("当前项目的原始图像目录固定。分析其他序列请新建项目。")
         changes = self._changes()
+        if self._reference_changed() and changes["roi_override_px"] != self.config.get("roi_override_px"):
+            raise ValueError("参考帧已修改；请先还原计算区域并保存设置，显示新参考图后再编辑坐标。")
         changes["frame_interval_s"] = float(self.interval_var.get()) if self.interval_var.get().strip() else None
         changes["frame_map_csv"] = self.map_var.get().strip() or None
         if changes["frame_interval_s"] is not None or changes["frame_map_csv"]:
@@ -355,7 +392,33 @@ class AgentPage(ttk.Frame):
     def _get_project(self):
         if not self.project_dir:
             raise ValueError("请先新建或打开自动分析项目。")
+        if not self.project_var.get().strip() or Path(self.project_var.get().strip()).expanduser().resolve() != self.project_dir.resolve():
+            raise ValueError("项目目录已修改；请先打开或新建该目录中的项目，再操作项目设置或结果。")
         return self.project_dir
+
+    def _reference_changed(self):
+        reference = self.reference_var.get().strip()
+        try:
+            value = int(reference) if reference else None
+        except ValueError:
+            return True
+        return value != self.config.get("reference_native_frame")
+
+    def _show_geometry_reference(self):
+        if self._loading or not hasattr(self, "geometry_reference_var"):
+            return
+        self._drag = None
+        if self._reference_changed():
+            self.geometry_reference_var.set("参考帧设置已修改；先保存设置显示新参考图，再绘制或应用坐标。")
+        elif self._record is not None:
+            self.geometry_reference_var.set(f"当前坐标参考原生帧 {self._record['native_frame']}；请按此图像填写坐标。")
+
+    def _require_geometry_reference(self):
+        self._get_project()
+        if self._reference_changed():
+            raise ValueError("参考帧已修改；请先保存设置以显示新参考图，再编辑坐标。")
+        if self._image is None or self._record is None:
+            raise ValueError("请先打开项目并显示参考图，再编辑坐标。")
 
     def _guard(self, action):
         try:
@@ -555,6 +618,7 @@ class AgentPage(ttk.Frame):
             self.status_var.set("项目已读取；可编辑 ROI / 标距和参数，再生成计划。")
         if self.config.get("time_basis") == "frame_index":
             self.status_var.set(self.status_var.get() + " 无物理时间，结果按原生帧号显示。")
+        self._show_geometry_reference()
         self._render_image()
         self._update_actions()
 
@@ -687,6 +751,7 @@ class AgentPage(ttk.Frame):
             self._editor_dirty = False
         finally:
             self._loading = was_loading
+        self._update_actions()
 
     def _refresh_tree(self):
         self.geometry_tree.delete(*self.geometry_tree.get_children())
@@ -699,7 +764,12 @@ class AgentPage(ttk.Frame):
 
     def _select_item(self, _event=None):
         selection = self.geometry_tree.selection()
-        if not selection or self._busy:
+        if self._busy:
+            expected = (str(self._selected),) if self._selected is not None else ()
+            if selection != expected:
+                self.geometry_tree.selection_set(expected)
+            return
+        if not selection:
             return
         index = int(selection[0])
         item, self._selected = self.items[index], index
@@ -724,9 +794,12 @@ class AgentPage(ttk.Frame):
             self._editor_dirty = False
         finally:
             self._loading = False
+        self._update_actions()
 
     def apply_item(self):
         def apply():
+            if self.project_dir is not None:
+                self._require_geometry_reference()
             kind, name = self.kind_var.get(), self.name_var.get().strip()
             prior = copy.deepcopy(self.items[self._selected]["value"]) if self._selected is not None and self.items[self._selected]["kind"] == kind else {}
             if kind != KINDS[2] and not name:
@@ -775,10 +848,20 @@ class AgentPage(ttk.Frame):
 
     def use_candidate_roi(self):
         if self.plan:
+            try:
+                self._require_geometry_reference()
+            except ValueError as exc:
+                self._error(exc)
+                return
             self.analysis_roi_var.set(self._format(self.plan.get("analysis_rectangle_candidate_px", [])))
             self._render_image()
 
     def use_candidate_gauges(self):
+        try:
+            self._require_geometry_reference()
+        except ValueError as exc:
+            self._error(exc)
+            return
         candidates = (self.plan or {}).get("automatic_gauge_candidates", [])
         if not candidates:
             self.status_var.set("请先生成计划，查看自动标距候选。")
@@ -859,10 +942,12 @@ class AgentPage(ttk.Frame):
         return None
 
     def _draw_start(self, event):
+        self._drag = None
         if not self._busy:
-            reference = self.reference_var.get().strip()
-            if reference and reference != str((self._record or {}).get("native_frame")):
-                self.status_var.set("参考帧已修改；请先保存设置以显示新参考图，再编辑坐标。")
+            try:
+                self._require_geometry_reference()
+            except ValueError as exc:
+                self.status_var.set(str(exc))
                 return
             self._drag = self._image_point(event)
 
@@ -878,6 +963,11 @@ class AgentPage(ttk.Frame):
     def _draw_end(self, event):
         end, start, self._drag = self._image_point(event), self._drag, None
         if start is None or end is None or self._busy:
+            return
+        try:
+            self._require_geometry_reference()
+        except ValueError as exc:
+            self.status_var.set(str(exc))
             return
         x0, x1 = sorted((start[0], end[0]))
         y0, y1 = sorted((start[1], end[1]))
@@ -897,6 +987,7 @@ class AgentPage(ttk.Frame):
 
     def open_artifact(self, name):
         def open_path():
+            self._get_project()
             path = self.run_dir if name == "folder" else self.artifacts.get(name)
             if path is None or not Path(path).exists():
                 raise ValueError("当前运行没有此文件；请先完成分析或检查失败原因。")

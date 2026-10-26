@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -101,11 +102,49 @@ def _safe_file(root: Path, relative: str) -> Path:
     if not relative or rel.is_absolute() or ".." in rel.parts or "\\" in relative or ":" in relative:
         raise ValueError(f"Unsafe package path: {relative!r}")
     path = root.joinpath(*rel.parts)
+    for part in [path, *path.parents]:
+        try:
+            attributes = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(attributes.st_mode) or getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"Symlink or reparse point in package path: {relative!r}")
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError(f"Path escapes package: {relative!r}")
-    if any(part.is_symlink() for part in [path, *path.parents] if part != root.parent):
-        raise ValueError(f"Symlink in package path: {relative!r}")
     return path
+
+
+def _checkpoint_expectations(source: Mapping[str, Any]) -> dict[str, str]:
+    """Only manifest-registered sidecars and their bound arrays are report inputs."""
+    receipts = source.get("checkpoint_receipts") or {}
+    if not isinstance(receipts, Mapping):
+        raise ValueError("Invalid source checkpoint receipts")
+    expected = {}
+    for name, receipt in sorted(receipts.items()):
+        if (not isinstance(name, str) or PurePosixPath(name).name != name or not name.endswith(".json")
+                or "\\" in name or ":" in name or not isinstance(receipt, Mapping)):
+            raise ValueError(f"Unsafe source checkpoint receipt: {name!r}")
+        sidecar_sha = receipt.get("sha256")
+        if not isinstance(sidecar_sha, str) or re.fullmatch(r"[0-9a-f]{64}", sidecar_sha) is None:
+            raise ValueError(f"Source checkpoint receipt lacks SHA-256: {name}")
+        expected[f"checkpoints/{name}"] = sidecar_sha
+        checkpoint_sha = receipt.get("checkpoint_sha256")
+        if receipt.get("status") == "failed" and checkpoint_sha is None:
+            continue
+        if not isinstance(checkpoint_sha, str) or re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha) is None:
+            raise ValueError(f"Source checkpoint receipt lacks NPZ SHA-256: {name}")
+        expected[f"checkpoints/{PurePosixPath(name).with_suffix('.npz')}"] = checkpoint_sha
+    return expected
+
+
+def _has_external_checkpoint_source(source: Mapping[str, Any], plan: Mapping[str, Any]) -> bool:
+    postprocessing = source.get("postprocessing")
+    return (isinstance(postprocessing, Mapping) and postprocessing.get("schema") == "straintrace.reprocess/v1"
+            and bool(postprocessing.get("source_run")) and postprocessing.get("solver_recomputed") is False
+            and plan.get("analysis_kind") == "saved_field_postprocessing"
+            and bool(plan.get("source_plan_sha256"))
+            and plan.get("source_plan_sha256") == postprocessing.get("source_plan_sha256")
+            and postprocessing.get("checkpoint_receipts") == source.get("checkpoint_receipts"))
 
 
 def _native(value: Any) -> str:
@@ -549,22 +588,22 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
     warnings = _preview(stage, geometry, source)
     _write_json(stage / "data" / "geometry.json", geometry)
     source_files = []
-    receipts = source.get("checkpoint_receipts") or {}
-    for path in sorted((run_root / "checkpoints").glob("*")):
-        if path.suffix not in {".npz", ".json"} or not path.is_file():
-            continue
-        relative = "checkpoints/" + path.name
-        receipt = receipts.get(path.with_suffix(".json").name) or {}
-        expected = receipt.get("checkpoint_sha256" if path.suffix == ".npz" else "sha256")
+    for relative, expected in sorted(_checkpoint_expectations(source).items()):
+        path = _safe_file(run_root, relative)
+        if not path.is_file():
+            if _has_external_checkpoint_source(source, plan):
+                source_files.append({"source_relative_path": relative, "bytes": None, "sha256": expected,
+                                     "included": False, "availability": "external"})
+                continue
+            raise ValueError(f"Registered checkpoint is missing: {relative}")
         record = {"source_relative_path": relative, "bytes": path.stat().st_size, "sha256": expected, "included": include_checkpoints}
         if include_checkpoints:
             destination = stage / "data" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, destination)
             copied_digest = _sha256(destination)
-            if expected and copied_digest != expected:
+            if copied_digest != expected:
                 raise ValueError(f"Checkpoint disagrees with source manifest: {path.name}")
-            record["sha256"] = copied_digest
             record["package_path"] = f"data/{relative}"
         source_files.append(record)
     frames = _frame_axis(source, tables["summary"])
@@ -591,7 +630,7 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
     (stage / "index.html").write_text(_html(data), encoding="utf-8")
     module_path = Path(__file__)
     if not module_path.is_file():
-        module_path = Path(getattr(sys, "_MEIPASS", "")) / "sources" / "straintrace_agent" / "report.py"
+        module_path = Path(getattr(sys, "_MEIPASS", "")) / "sources" / "straintrace_agent" / "reporting.py"
     if not module_path.is_file():
         raise ValueError("Report verifier source is unavailable in this distribution")
     shutil.copyfile(module_path, stage / "verify_report.py")
@@ -605,7 +644,7 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
         "provenance/project.json and plan.json preserve exact configuration and reference identities.\n"
         "CSV tables preserve all saved rows; blank cells are unavailable values.\n"
         "NPZ arrays (when included) must be opened with numpy.load(path, allow_pickle=False).\n"
-        "To regenerate this report, call straintrace_agent.report.build_report on the saved run directory.\n",
+        "To regenerate this report, call straintrace_agent.reporting.build_report on the saved run directory.\n",
         encoding="utf-8")
     files = {path.relative_to(stage).as_posix(): {"sha256": _sha256(path), "bytes": path.stat().st_size}
              for path in sorted(stage.rglob("*")) if path.is_file()}
@@ -625,7 +664,9 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
     raw image sequences remain externally referenced by path and SHA-256.
     Existing output directories are replaced only if they carry this schema.
     """
-    root = Path(run_root).resolve()
+    input_root = Path(run_root).absolute()
+    _safe_file(input_root, "checkpoints")
+    root = input_root.resolve()
     # Reject mismatched input snapshots before creating a staging directory.
     _validate_snapshot_binding(config, plan, _json(root / "manifest.json"))
     output = Path(output_dir).resolve() if output_dir else root / "report"
@@ -680,12 +721,15 @@ def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
                     "provenance/project.json", "provenance/plan.json", "provenance/source_manifest.json", "verify_report.py", "README.txt"}
         for missing in sorted(required - expected_files.keys()):
             errors.append(f"Required file not listed: {missing}")
+        digests = {}
         for relative, expected in expected_files.items():
             file = _safe_file(root, relative)
             if not file.is_file():
                 errors.append(f"Missing file: {relative}")
-            elif file.stat().st_size != expected["bytes"] or _sha256(file) != expected["sha256"]:
-                errors.append(f"Checksum mismatch: {relative}")
+            else:
+                digests[relative] = _sha256(file)
+                if file.stat().st_size != expected["bytes"] or digests[relative] != expected["sha256"]:
+                    errors.append(f"Checksum mismatch: {relative}")
             checked += 1
         actual = {file.relative_to(root).as_posix() for file in root.rglob("*") if file.is_file()}
         for extra in sorted(actual - set(expected_files) - {"manifest.json"}):
@@ -723,16 +767,31 @@ def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
         if data["field_maps"] != _json(root / "data/field_maps.json"):
             errors.append("Field map index/report-data mismatch")
         for entry in data["field_maps"]["selected"]:
-            file = _safe_file(root, entry["package_path"])
-            if entry["sha256"] != source.get("artifacts", {}).get(entry["source_relative_path"]) or _sha256(file) != entry["sha256"]:
+            _safe_file(root, entry["package_path"])
+            if entry["sha256"] != source.get("artifacts", {}).get(entry["source_relative_path"]) or digests.get(entry["package_path"]) != entry["sha256"]:
                 errors.append(f"Field map source checksum mismatch: {entry['source_relative_path']}")
         if (root / "index.html").read_text(encoding="utf-8") != _html(data):
             errors.append("HTML/report-data mismatch")
+        checkpoint_expectations = _checkpoint_expectations(source)
+        if {record["source_relative_path"] for record in data["checkpoint_files"]} != set(checkpoint_expectations):
+            errors.append("Checkpoint inventory/source receipt mismatch")
         for record in data["checkpoint_files"]:
+            relative = record["source_relative_path"]
+            expected_sha = checkpoint_expectations.get(relative)
+            if expected_sha is None or record["sha256"] != expected_sha:
+                errors.append(f"Checkpoint source receipt mismatch: {relative}")
+            external = record.get("availability") == "external"
+            if external and (not _has_external_checkpoint_source(source, plan) or record["bytes"] is not None
+                             or "package_path" in record or f"data/{relative}" in expected_files):
+                errors.append(f"Checkpoint external source mismatch: {relative}")
+            if record["included"] != (data["include_checkpoints"] and not external):
+                errors.append(f"Checkpoint inclusion mismatch: {relative}")
             if record["included"]:
-                file = _safe_file(root, record["package_path"])
-                if not file.is_file() or _sha256(file) != record["sha256"]:
-                    errors.append(f"Checkpoint source checksum mismatch: {record['source_relative_path']}")
+                package_path = record["package_path"]
+                _safe_file(root, package_path)
+                if (package_path != f"data/{relative}" or digests.get(package_path) != expected_sha
+                        or expected_files.get(package_path, {}).get("bytes") != record["bytes"]):
+                    errors.append(f"Checkpoint source checksum mismatch: {relative}")
         return {"valid": not errors, "path": str(root), "checked_files": checked, "errors": errors,
                 "include_checkpoints": data["include_checkpoints"], "external_sources_checked": False,
                 "scientific_acceptance": "not_assessed"}

@@ -242,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit(result)
             return EXIT_OK if result["status"] in {"complete", "reused"} else EXIT_QUALITY
         elif args.command == "verify-report":
-            from .report import verify_report
+            from .reporting import verify_report
             result = verify_report(args.report)
             _emit(result)
             return EXIT_OK if result.get("valid") is True else EXIT_QUALITY

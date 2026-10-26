@@ -3,6 +3,7 @@ import csv
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from straintrace_agent.report import build_report, verify_report
+from straintrace_agent.reporting import build_report, verify_report
 from straintrace_agent.api import _hash_json
 
 
@@ -170,7 +171,7 @@ def test_report_preserves_csv_precision_gaps_chinese_and_geometry(saved_run):
 
 
 def test_curve_does_not_bridge_missing_or_nonconsecutive_frames(saved_run):
-    from straintrace_agent.report import _curve_svg
+    from straintrace_agent.reporting import _curve_svg
     run, config, plan = saved_run
     receipt = build_report(run, config=config, plan=plan)
     data = json.loads(Path(receipt["report_data"]).read_text(encoding="utf-8"))
@@ -205,6 +206,162 @@ def test_full_package_is_portable_and_verifiable_without_installed_package(saved
     assert checked["valid"] and checked["include_checkpoints"]
     assert checked["external_sources_checked"] is False
     assert receipt["verification"]["scientific_acceptance"] == "not_assessed"
+
+
+def test_report_copies_only_manifest_registered_checkpoint_files(saved_run, tmp_path):
+    run, config, plan = saved_run
+    registered = {path.name for path in (run / "checkpoints").iterdir()}
+    (run / "checkpoints/private.json").write_text('{"private": true}', encoding="utf-8")
+    (run / "checkpoints/private.npz").write_bytes(b"unregistered arrays")
+    private = tmp_path / "external-private.json"
+    private.write_text('{"external_private": true}', encoding="utf-8")
+    # Windows may require Developer Mode for file symlinks. The directory
+    # junction test below exercises real reparse points without that privilege.
+    try:
+        (run / "checkpoints/external-private.json").symlink_to(private)
+    except OSError:
+        pass
+    receipt = build_report(run, config=config, plan=plan, include_checkpoints=True)
+    data = json.loads(Path(receipt["report_data"]).read_text(encoding="utf-8"))
+    assert {path.name for path in (run / "report/data/checkpoints").iterdir()} == registered
+    assert {Path(row["source_relative_path"]).name for row in data["checkpoint_files"]} == registered
+    assert (run / "report/data/checkpoints/frame_native_00000003.json").is_file()
+    assert not (run / "report/data/checkpoints/frame_native_00000003.npz").exists()
+    assert private.read_text(encoding="utf-8") == '{"external_private": true}'
+
+
+@pytest.mark.parametrize("linked_part", ["directory", "sidecar", "npz"])
+def test_report_rejects_registered_checkpoint_links(saved_run, tmp_path, linked_part):
+    run, config, plan = saved_run
+    if linked_part == "directory":
+        checkpoint_dir = run / "checkpoints"
+        external = tmp_path / "external-checkpoints"
+        checkpoint_dir.rename(external)
+        if os.name == "nt":
+            result = subprocess.run(["cmd", "/c", "mklink", "/J", str(checkpoint_dir), str(external)],
+                                    capture_output=True, text=True, check=False)
+            assert result.returncode == 0, result.stdout + result.stderr
+        else:
+            checkpoint_dir.symlink_to(external, target_is_directory=True)
+    else:
+        suffix = ".json" if linked_part == "sidecar" else ".npz"
+        path = run / "checkpoints" / ("frame_native_00000001" + suffix)
+        external = tmp_path / ("external-private" + suffix)
+        path.rename(external)
+        try:
+            path.symlink_to(external)
+        except OSError as exc:
+            pytest.skip(f"File symlinks unavailable: {exc}")
+    with pytest.raises(ValueError, match="Symlink or reparse point"):
+        build_report(run, config=config, plan=plan, include_checkpoints=True)
+    assert not (run / "report").exists()
+
+
+@pytest.mark.parametrize("missing", ["sha256", "checkpoint_sha256"])
+def test_report_rejects_incomplete_source_checkpoint_receipts(saved_run, missing):
+    run, config, plan = saved_run
+    path = run / "manifest.json"
+    source = json.loads(path.read_text(encoding="utf-8"))
+    source["checkpoint_receipts"]["frame_native_00000001.json"][missing] = None
+    _json(path, source)
+    with pytest.raises(ValueError, match="lacks.*SHA-256"):
+        build_report(run, config=config, plan=plan, include_checkpoints=True)
+
+
+def test_report_rejects_missing_registered_checkpoint_in_solver_run(saved_run):
+    run, config, plan = saved_run
+    (run / "checkpoints/frame_native_00000001.npz").unlink()
+    with pytest.raises(ValueError, match="Registered checkpoint is missing"):
+        build_report(run, config=config, plan=plan)
+
+
+@pytest.mark.parametrize("include_checkpoints", [False, True])
+def test_derived_report_preserves_external_checkpoint_receipts_without_copying(saved_run, include_checkpoints):
+    run, config, plan = saved_run
+    extraction = run / "extractions/derived"
+    extraction.mkdir(parents=True)
+    for name in ("summary.csv", "gauges.csv", "regions.csv", "quality.json", "manifest.json"):
+        shutil.copyfile(run / name, extraction / name)
+    original_plan_sha = plan["plan_sha256"]
+    plan.update(source_plan_sha256=original_plan_sha, analysis_kind="saved_field_postprocessing")
+    source = json.loads((extraction / "manifest.json").read_text(encoding="utf-8"))
+    source["postprocessing"] = {"schema": "straintrace.reprocess/v1", "source_run": run.name,
+                                "source_plan_sha256": original_plan_sha, "solver_recomputed": False,
+                                "checkpoint_receipts": source["checkpoint_receipts"]}
+    _json(extraction / "manifest.json", source)
+    _seal_snapshots(extraction, config, plan)
+    receipt = build_report(extraction, config=config, plan=plan, include_checkpoints=include_checkpoints)
+    data = json.loads(Path(receipt["report_data"]).read_text(encoding="utf-8"))
+    assert receipt["verification"]["valid"]
+    assert data["source_manifest"]["checkpoint_receipts"] == source["checkpoint_receipts"]
+    assert len(data["checkpoint_files"]) == 7
+    assert all(row["availability"] == "external" and row["bytes"] is None and not row["included"]
+               for row in data["checkpoint_files"])
+    assert not (extraction / "report/data/checkpoints").exists()
+    assert data["included_array_count"] == 0
+    if include_checkpoints:
+        assert any("没有可复制的 NPZ" in warning for warning in data["warnings"])
+
+
+def test_verifier_binds_resigned_checkpoint_records_to_source_receipts(saved_run):
+    from straintrace_agent.reporting import _html
+    run, config, plan = saved_run
+    build_report(run, config=config, plan=plan, include_checkpoints=True)
+    package = run / "report"
+    data_path = package / "data/report_data.json"
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    record = next(row for row in data["checkpoint_files"] if row["source_relative_path"].endswith(".npz"))
+    path = package / record["package_path"]
+    with path.open("ab") as stream:
+        stream.write(b"changed checkpoint")
+    record.update(sha256=_digest(path), bytes=path.stat().st_size)
+    _json(data_path, data)
+    (package / "index.html").write_text(_html(data), encoding="utf-8")
+    _resign_package_files(package)
+    checked = verify_report(package)
+    assert not checked["valid"]
+    assert f"Checkpoint source receipt mismatch: {record['source_relative_path']}" in checked["errors"]
+    result = subprocess.run([sys.executable, "-I", str(package / "verify_report.py"), str(package)],
+                            capture_output=True, text=True, encoding="utf-8", check=False)
+    assert result.returncode == 1
+    assert "Checkpoint source receipt mismatch" in result.stdout
+
+
+def test_verifier_hashes_checkpoint_arrays_once_per_call_and_rechecks_tampering(saved_run, monkeypatch):
+    import straintrace_agent.reporting as reporting
+    run, config, plan = saved_run
+    (run / "plots").mkdir()
+    field_map = run / "plots/frame_native_00000001_Exx.png"
+    Image.new("RGB", (32, 24), "white").save(field_map)
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    source["artifacts"][field_map.relative_to(run).as_posix()] = _digest(field_map)
+    _json(run / "manifest.json", source)
+    build_report(run, config=config, plan=plan, include_checkpoints=True)
+    package = run / "report"
+    original_sha256 = reporting._sha256
+    reads = {}
+
+    def counting_sha256(path):
+        if path.suffix == ".npz" or path.parent.name == "plots":
+            reads[path.name] = reads.get(path.name, 0) + 1
+        return original_sha256(path)
+
+    monkeypatch.setattr(reporting, "_sha256", counting_sha256)
+    assert verify_report(package)["valid"]
+    assert reads and set(reads.values()) == {1}
+    assert "00_frame_native_00000001_Exx.png" in reads
+    path = next((package / "data/checkpoints").glob("*.npz"))
+    # Same byte count and restored timestamp must not permit cross-call reuse.
+    timestamp = path.stat()
+    payload = bytearray(path.read_bytes())
+    payload[-1] ^= 1
+    path.write_bytes(payload)
+    os.utime(path, ns=(timestamp.st_atime_ns, timestamp.st_mtime_ns))
+    reads.clear()
+    checked = verify_report(package)
+    assert not checked["valid"]
+    assert set(reads.values()) == {1}
+    assert any("Checkpoint source checksum mismatch" in error for error in checked["errors"])
 
 
 def test_tampering_and_resigned_csv_disagreement_are_detected(saved_run):
@@ -276,7 +433,7 @@ def test_independent_verifier_rejects_unsafe_manifest_paths(saved_run):
 
 
 def test_frame_index_mode_never_labels_unknown_time_as_seconds(saved_run):
-    from straintrace_agent.report import _curve_svg
+    from straintrace_agent.reporting import _curve_svg
     run, config, plan = saved_run
     config["time_basis"] = "frame_index"
     config["loads"] = None

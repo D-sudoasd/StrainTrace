@@ -1893,9 +1893,7 @@ def _build_outputs(
     _atomic_json(run_root / "manifest.json", manifest)
     _write_region_outputs(run_root, config, plan, run_fingerprint)
     _refresh_manifest_artifacts(run_root)
-    from .report import build_report
-    portable_report = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=False)
-    _refresh_manifest_artifacts(run_root)
+    portable_report = _build_report_transaction(run_root, config, plan, include_checkpoints=False)
     return {"quality": quality, "artifacts": {"summary": str(run_root / "summary.csv"), "gauges": str(gauge_csv), "regions": str(run_root / "regions.csv"), "geometry": str(run_root / "geometry.json"), "quality": str(run_root / "quality.json"), "manifest": str(run_root / "manifest.json"), "report": str(run_root / "report.md"), "report_html": portable_report["report_html"], "plots": str(run_root / "plots")}}
 
 
@@ -1911,6 +1909,63 @@ def _refresh_manifest_artifacts(run_root: Path) -> None:
             files.extend(path for path in directory.rglob("*") if path.is_file())
     manifest["artifacts"] = {path.relative_to(run_root).as_posix(): _sha256(path) for path in sorted(set(files)) if path.is_file()}
     _atomic_json(manifest_path, manifest)
+
+
+def _build_report_transaction(
+    run_root: Path, config: Mapping[str, Any], plan: Mapping[str, Any], *, include_checkpoints: bool,
+) -> dict[str, Any]:
+    """Commit the report and its outer hashes together, retaining rollback data."""
+    from . import reporting
+
+    run_root = run_root.resolve()
+    target = reporting._safe_file(run_root, "report")
+    if target.exists() and _read_json(target / "manifest.json").get("schema") != reporting.PACKAGE_SCHEMA:
+        raise AgentError("REPORT_OUTPUT_UNOWNED", "refusing to replace an unrecognized report directory", path=str(target))
+    candidate = run_root / f".report-candidate-{uuid.uuid4().hex}"
+    backup = run_root / f".report-backup-{uuid.uuid4().hex}"
+    manifest_path = run_root / "manifest.json"
+    previous_manifest = manifest_path.read_bytes()
+    committed = False
+    try:
+        result = reporting.build_report(
+            run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv",
+            output_dir=candidate, include_checkpoints=include_checkpoints,
+        )
+        if target.exists():
+            os.replace(target, backup)
+        try:
+            os.replace(candidate, target)
+            try:
+                _refresh_manifest_artifacts(run_root)
+            except BaseException:
+                os.replace(target, candidate)
+                if backup.exists():
+                    os.replace(backup, target)
+                _atomic_bytes(manifest_path, previous_manifest)
+                raise
+        except BaseException:
+            if backup.exists() and not target.exists():
+                os.replace(backup, target)
+            raise
+        committed = True
+
+        def relocate(value: Any) -> Any:
+            if isinstance(value, str) and value.startswith(str(candidate)):
+                return str(target) + value[len(str(candidate)):]
+            if isinstance(value, dict):
+                return {key: relocate(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [relocate(item) for item in value]
+            return value
+
+        return relocate(result)
+    finally:
+        # These unique staging paths are owned by this operation. Validate the
+        # complete path before recursive cleanup; retain a failed rollback.
+        for path in (candidate, backup) if committed else (candidate,):
+            safe_path = reporting._safe_file(run_root, path.name)
+            if safe_path.exists():
+                shutil.rmtree(safe_path)
 
 
 def _plot_selection(run_root: Path, frame_metas: Sequence[Mapping[str, Any]], plot_every: int) -> list[Mapping[str, Any]]:
@@ -2187,9 +2242,7 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
             row["engineering_strain"] = row.get("dic_virtual_gauge_engineering_strain")
             rows.append(row)
         output = _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, str(run_state["run_fingerprint"]), input_sha, current_code, field_csv=field_csv, plots=False)
-        from .report import build_report
-        output["portable_report"] = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=True)
-        _refresh_manifest_artifacts(run_root)
+        output["portable_report"] = _build_report_transaction(run_root, config, plan, include_checkpoints=True)
         return {"run_id": run_root.name, "status": run_state.get("status"),
                 "scientific_ok": output["quality"]["scientific_ok"],
                 "numerical_quality_passed": output["quality"]["numerical_quality_passed"],
@@ -2606,7 +2659,7 @@ def reprocess(project: str | os.PathLike[str], *, regions: Sequence[Mapping[str,
             saved = _read_json(destination / "reprocess.json")
             if saved != receipt:
                 raise AgentError("REPROCESS_IDENTITY_CONFLICT", "existing extraction has a different identity")
-            from .report import verify_report
+            from .reporting import verify_report
             report_check = verify_report(destination / "report")
             if not report_check.get("valid"):
                 raise AgentError("REPROCESS_ARTIFACT_INVALID", "saved extraction report failed verification", details=report_check)
@@ -2663,7 +2716,7 @@ def reprocess(project: str | os.PathLike[str], *, regions: Sequence[Mapping[str,
                     "postprocessing_quality": postprocessing_quality,
                     "source_configuration_sha256": source_manifest["configuration_sha256"], "plan_sha256": derived_plan["plan_sha256"]}
         _atomic_json(extraction / "manifest.json", manifest)
-        from .report import build_report
+        from .reporting import build_report
         portable_report = build_report(extraction, config=derived_config, plan=derived_plan, regions_csv=extraction / "regions.csv")
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(extraction, destination)
@@ -2780,43 +2833,69 @@ def auto_analyze(folder: str | os.PathLike[str], project: str | os.PathLike[str]
         result["status"] = "review_required"
         return result
     result["run"] = run(root, progress=progress, field_csv=field_csv, make_plots=make_plots)
-    result["report"] = report(root, include_checkpoints=True)
-    result["verification"] = verify(root)
-    complete = result["run"].get("status") == "complete" and result["run"].get("numerical_quality_passed") is True and result["verification"].get("valid") is True
-    result["status"] = "complete" if complete else "attention_required"
-    if config.get("regions"):
-        region_table = pd.read_csv(Path(result["run"]["run_dir"]) / "regions.csv")
-        if region_table.empty or not region_table["status"].eq("valid").all():
-            result.update(status="attention_required", region_issue="One or more requested regions lack valid measurement support.")
-    if discovery["objective"] in {"virtual_gauge", "stress_strain"}:
+    if result["run"].get("status") == "cancelled":
+        result["status"] = "cancelled"
         run_root = Path(result["run"]["run_dir"])
-        table = pd.read_csv(run_root / "summary.csv")
-        gauge_table = pd.read_csv(run_root / "gauges.csv")
-        expected = {(int(frame), gauge["name"]) for frame in table["native_frame"] for gauge in config["gauges"]}
-        actual = list(zip(gauge_table["native_frame"].astype(int), gauge_table["gauge_name"]))
-        available = (len(actual) == len(expected) and set(actual) == expected and gauge_table["status"].eq("valid").all()
-                     and np.isfinite(pd.to_numeric(gauge_table["engineering_strain"], errors="coerce")).all())
-        if discovery["objective"] == "stress_strain":
-            available = available and "stress_MPa" in table and np.isfinite(pd.to_numeric(table["stress_MPa"], errors="coerce")).all()
-        if not available:
-            result.update(status="attention_required", objective_issue="One or more frames lack the requested supported gauge or stress measurement.")
-    _atomic_json(root / "automation.json", {"schema": "straintrace.automation/v1", "objective": discovery["objective"],
-                                           "status": result["status"], "run_id": result["run"].get("run_id"),
-                                           "verification_valid": result["verification"].get("valid"), "scientific_acceptance": "not_assessed"})
+        result["report"] = {"report_html": str(run_root / "report" / "index.html"), "partial": True}
+        return result
+    expected_run = str(result["run"]["run_id"])
+    result["report"] = report(root, include_checkpoints=True, expected_run_id=expected_run)
+    # A writer can change CURRENT between the independently locked steps.
+    # Bind verification, goal checks and the final receipt to this same run.
+    with _project_lock(root, purpose="auto_finalize"):
+        _require_expected_run(root, expected_run)
+        result["verification"] = verify(root)
+        complete = result["run"].get("status") == "complete" and result["run"].get("numerical_quality_passed") is True and result["verification"].get("valid") is True
+        result["status"] = "complete" if complete else "attention_required"
+        if config.get("regions"):
+            region_table = pd.read_csv(Path(result["run"]["run_dir"]) / "regions.csv")
+            if region_table.empty or not region_table["status"].eq("valid").all():
+                result.update(status="attention_required", region_issue="One or more requested regions lack valid measurement support.")
+        if discovery["objective"] in {"virtual_gauge", "stress_strain"}:
+            run_root = Path(result["run"]["run_dir"])
+            table = pd.read_csv(run_root / "summary.csv")
+            gauge_table = pd.read_csv(run_root / "gauges.csv")
+            expected = {(int(frame), gauge["name"]) for frame in table["native_frame"] for gauge in config["gauges"]}
+            actual = list(zip(gauge_table["native_frame"].astype(int), gauge_table["gauge_name"]))
+            available = (len(actual) == len(expected) and set(actual) == expected and gauge_table["status"].eq("valid").all()
+                         and np.isfinite(pd.to_numeric(gauge_table["engineering_strain"], errors="coerce")).all())
+            if discovery["objective"] == "stress_strain":
+                available = available and "stress_MPa" in table and np.isfinite(pd.to_numeric(table["stress_MPa"], errors="coerce")).all()
+            if not available:
+                result.update(status="attention_required", objective_issue="One or more frames lack the requested supported gauge or stress measurement.")
+        _atomic_json(root / "automation.json", {"schema": "straintrace.automation/v1", "objective": discovery["objective"],
+                                               "status": result["status"], "run_id": expected_run,
+                                               "verification_valid": result["verification"].get("valid"), "scientific_acceptance": "not_assessed"})
     return result
 
 
-def report(project: str | os.PathLike[str], *, include_checkpoints: bool = True) -> dict[str, Any]:
+def _require_expected_run(root: Path, expected_run_id: str) -> None:
+    _, run_root = _load_run_pointer(root)
+    if run_root.name != expected_run_id:
+        raise AgentError("AUTOMATION_STALE_RUN", "the current project run changed during automatic analysis; retry with the intended configuration",
+                         details={"expected_run_id": expected_run_id, "current_run_id": run_root.name})
+
+
+def report(project: str | os.PathLike[str], *, include_checkpoints: bool = True, expected_run_id: str | None = None) -> dict[str, Any]:
     """Rebuild the portable report package from a verified current run."""
     root = _project_root(project)
     with _project_lock(root, purpose="report"):
+        if expected_run_id is not None:
+            _require_expected_run(root, expected_run_id)
         checked = verify(root)
-        if not checked.get("valid"):
+        # A killed report commit can leave only its regenerated output hashes
+        # stale. Rebuild those outputs after every underlying source still
+        # passes verification; never waive a source or checkpoint failure.
+        issues = checked.get("issues") or []
+        report_only = bool(issues) and all(
+            issue.get("code") in {"ARTIFACT_MISSING", "ARTIFACT_CHECKSUM_MISMATCH"}
+            and isinstance(issue.get("path"), str) and issue["path"].startswith("report/")
+            for issue in issues
+        )
+        if not checked.get("valid") and not report_only:
             raise AgentError("REPORT_SOURCE_INVALID", "current run verification failed", details=checked.get("issues"))
         config = _read_config(root)
         pointer, run_root = _load_run_pointer(root)
         plan = _read_json(_plan_path(root, pointer))
-        from .report import build_report
-        result = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=include_checkpoints)
-        _refresh_manifest_artifacts(run_root)
-        return result
+        result = _build_report_transaction(run_root, config, plan, include_checkpoints=include_checkpoints)
+        return {"run_id": run_root.name, **result}
