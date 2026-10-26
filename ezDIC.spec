@@ -40,6 +40,7 @@ root_datas = [
     (source_file("docs/AGENT_FIELD_ANALYSIS.md"), "docs"),
     (source_file("docs/AGENT_WORKFLOW.md"), "docs"),
     (source_file("docs/AGENT_INTERFACE.md"), "docs"),
+    (source_file("docs/AUTONOMOUS_ANALYSIS.md"), "docs"),
     (source_file("docs/UI_WORKBENCH.md"), "docs"),
     (source_file("docs/validation/dic_research_20261007.json"), "docs/validation"),
     (source_file("assets/validation/plate-hole-Eyy.png"), "assets/validation"),
@@ -97,6 +98,10 @@ common_hiddenimports = [
     "straintrace_agent.cli",
     "straintrace_agent.fields",
     "straintrace_agent.mechanics",
+    "straintrace_agent.discovery",
+    "straintrace_agent.regions",
+    "straintrace_agent.report",
+    "straintrace_agent.gui",
 ]
 # The source workflow uses Tk and Matplotlib's Agg/Tk backends.  A developer
 # machine may have multiple optional Qt bindings installed; excluding them

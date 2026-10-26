@@ -3278,6 +3278,7 @@ class MultiROIGUI:
         self.workflow_guide_frame.configure(padding=(12, 6 if compact else 10))
         self.run_frame.configure(padding=(12, 4 if compact else 6))
         self.run_frame.grid_configure(pady=(6 if compact else 10, 0))
+        self._on_control_tab_changed()
 
     def add_tooltip(self, widget, text, choices=None):
         provider = lambda event: self._control_help(widget, text, event)
@@ -3367,6 +3368,7 @@ class MultiROIGUI:
             "点击查看分析得到的曲线或彩色结果图。完成分析后，可在这里放大、移动或保存图表。",
             "点击查看 campaign 项目的首、中、末参考帧、自由段和引伸计取点；编辑仍在控制台批次项目页进行。",
             "查看当前批次的 frame-strain 曲线及已生成的图像叠图。",
+            "查看自动分析项目的固定参考图；拖动绘制计算区域、统计 ROI、排除区和虚拟标距端点。",
         )
         return help_text[index] if 0 <= index < len(help_text) else ""
 
@@ -3981,6 +3983,8 @@ class MultiROIGUI:
             self._update_preflight_text()
         if hasattr(self, "controls_canvas"):
             self.controls_canvas.configure(bg=self.card_bg, highlightbackground=self.border_color)
+        if hasattr(self, "agent_page"):
+            self.agent_page.apply_theme()
         self._draw_image_empty_state()
 
         # 刷新结果预览器（matplotlib）
@@ -4124,6 +4128,10 @@ class MultiROIGUI:
 
         self.campaign_page = CampaignPage(self.control_notebook, app=self)
         self.control_notebook.add(self.campaign_page, text="批次项目")
+        from straintrace_agent.gui import AgentPage
+
+        self.agent_page = AgentPage(self.control_notebook, app=self)
+        self.control_notebook.add(self.agent_page, text="自动分析")
         self.add_tooltip(self.control_notebook, self._control_workspace_help)
 
         self.visual_window = tk.Toplevel(self.root)
@@ -4209,12 +4217,20 @@ class MultiROIGUI:
         ttk.Label(self.campaign_result_visual_page, textvariable=self.campaign_result_info_var).grid(
             row=2, column=0, sticky="w", padx=10, pady=(2, 8))
         self.workspace_notebook.add(self.campaign_result_visual_page, text="批次结果")
+        self.agent_page.attach_visual(self.workspace_notebook)
         self.workspace_notebook.bind("<<NotebookTabChanged>>", self._on_workspace_tab_changed)
         self.add_tooltip(self.workspace_notebook, self._workspace_help)
         self._build_image_section(self.image_page)
         self._build_scrollable_controls(self.settings_page)
+        self.control_notebook.bind("<<NotebookTabChanged>>", self._on_control_tab_changed)
         ttk.Label(visual_frame, textvariable=self.status_var, style="AppHint.TLabel",
                   wraplength=700, justify=tk.LEFT).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+
+    def _on_control_tab_changed(self, _event=None):
+        """The automatic project owns its source and run controls."""
+        automatic = self.control_notebook.select() == str(self.agent_page)
+        for frame in (self.project_frame, self.run_frame):
+            frame.grid_remove() if automatic else frame.grid()
 
     def _control_workspace_help(self, event=None):
         try:
@@ -4227,6 +4243,7 @@ class MultiROIGUI:
             "点击设置分析模式、参考图片、ROI 和计算参数；绘图操作在独立的图像窗口中进行。",
             "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。",
             "管理多个采集批次的身份、ROI 审核、时间与载荷对齐，以及可恢复的项目运行。",
+            "发现实验输入，人工编辑多个统计 ROI、虚拟标距与参数，生成计划并运行；查看质量状态和报告。",
         )
         return help_text[index] if 0 <= index < len(help_text) else ""
 
@@ -7167,6 +7184,12 @@ class MultiROIGUI:
         self.update_workflow_action_states()
 
     def start_processing(self):
+        if self.control_notebook.select() == str(self.agent_page):
+            self.agent_page.run_project()
+            return
+        if getattr(getattr(self, "agent_page", None), "_busy", False):
+            messagebox.showinfo("正在处理", "自动分析任务仍在运行，请等待完成后再启动手动分析。")
+            return
         if self.is_processing:
             messagebox.showinfo("正在处理", "程序正在处理，请等待当前任务完成。")
             return

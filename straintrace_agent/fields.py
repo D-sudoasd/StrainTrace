@@ -415,7 +415,23 @@ def summarize_roi(
         if row["status"] == "valid":
             n_valid += 1
             samples.append(row["value"])
+    return {
+        "component": component,
+        "unit": component_unit(component),
+        "roi": _validate_roi(roi),
+        "coordinate_system": coordinate_system,
+        "n_poi_total": n_total,
+        "n_poi_valid": n_valid,
+        **_summarize_samples(samples, component),
+        "source": "original_poi",
+        "interpolation": "none",
+    }
+
+
+def _summarize_samples(samples: Sequence[float], component: str) -> dict:
+    """Shared spatial statistics for single and multiple original-POI regions."""
     data = np.asarray(samples, dtype=float)
+    n_valid = data.size
     is_angle = component in {
         "principal_angle_deg", "principal_angle_GL_deg", "principal_angle_infinitesimal_deg",
     }
@@ -436,12 +452,6 @@ def summarize_roi(
         minimum = float(np.min(data))
         maximum = float(np.max(data))
     return {
-        "component": component,
-        "unit": component_unit(component),
-        "roi": _validate_roi(roi),
-        "coordinate_system": coordinate_system,
-        "n_poi_total": n_total,
-        "n_poi_valid": n_valid,
         "mean": mean,
         "median": median,
         "sd_sample": sd_sample,
@@ -450,8 +460,6 @@ def summarize_roi(
         "mean_axial_deg": mean if is_angle else None,
         "sd_axial_circular_deg": sd_axial,
         "statistic_kind": "axial_circular" if is_angle else "linear_sample",
-        "source": "original_poi",
-        "interpolation": "none",
         "sd_interpretation": (
             "axial_circular_spatial_scatter_not_SE_or_measurement_uncertainty"
             if is_angle else "spatial_point_scatter_not_SE_or_measurement_uncertainty"
@@ -672,6 +680,8 @@ def plot_position_time(
     coordinate_system: str = "image",
     position_unit: str | None = None,
     max_time_gap_s: float | None = None,
+    axis_label: str | None = None,
+    axis_unit: str = "s",
 ):
     """Scatter a sampled component over path position and explicit frame time.
 
@@ -685,10 +695,18 @@ def plot_position_time(
     Returns ``(figure, axes, artist, summary)``. Coordinates in ``path_points``
     use the selected coordinate system; horizontal position is cumulative
     distance along the path.
+
+    With ``axis_unit='frame'``, the second iterable contains explicit native
+    frame numbers and the ordinate is labeled "Native frame". No seconds or
+    acquisition duration are inferred; time-gap arguments are unavailable.
     """
     from itertools import zip_longest
     import matplotlib.pyplot as plt
 
+    if axis_unit not in {"s", "frame"}:
+        raise ValueError("axis_unit must be 's' or 'frame'")
+    if axis_unit == "frame" and max_time_gap_s is not None:
+        raise ValueError("max_time_gap_s requires an axis in seconds")
     if max_time_gap_s is not None and (not np.isfinite(max_time_gap_s) or max_time_gap_s <= 0):
         raise ValueError("max_time_gap_s must be positive and finite when supplied")
     points = np.asarray(path_points, dtype=float)
@@ -722,6 +740,8 @@ def plot_position_time(
             if field is None:
                 n_missing += 1
             continue
+        if axis_unit == "frame" and (time_value < 0 or time_value != int(time_value)):
+            raise ValueError("native frame numbers must be nonnegative integers")
         if last_time is not None and time_value < last_time:
             raise ValueError("times_s must be nondecreasing in acquisition order")
         if last_time is not None:
@@ -766,15 +786,18 @@ def plot_position_time(
     artist = ax.scatter(positions, plot_times, c=values, cmap=cmap, vmin=vmin, vmax=vmax,
                         s=12, marker="s", linewidths=0, rasterized=True)
     ax.set_xlabel(f"Position along path ({position_unit or ('px' if coordinate_system == 'image' else 'mm')})")
-    ax.set_ylabel("Time (s)")
+    label = axis_label or ("Time (s)" if axis_unit == "s" else "Native frame")
+    ax.set_ylabel(label)
     if n_sampled:
         figure.colorbar(artist, ax=ax, label=f"{component} ({component_unit(component)})")
     summary = {
         "frames": n_frames,
         "missing_frames": n_missing,
-        "untimed_frames": n_untimed,
-        "large_time_gaps": large_time_gaps,
-        "max_observed_time_gap_s": max_observed_time_gap,
+        "untimed_frames": n_untimed if axis_unit == "s" else None,
+        "large_time_gaps": large_time_gaps if axis_unit == "s" else None,
+        "max_observed_time_gap_s": max_observed_time_gap if axis_unit == "s" else None,
+        "axis_unit": axis_unit, "axis_label": label,
+        "missing_axis_values": n_untimed, "max_observed_axis_gap": max_observed_time_gap,
         "sampled_values": n_sampled,
         "invalid_nearest_poi": n_invalid,
         "outside_distance_tolerance": n_outside,

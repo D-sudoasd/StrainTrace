@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--project", type=Path, required=True)
     init.add_argument("--images", type=Path, required=True)
     init.add_argument("--frame-interval-s", type=float)
+    init.add_argument("--time-basis", choices=("physical_time", "frame_index"), default="physical_time")
     init.add_argument("--frame-map-csv", type=Path)
     init.add_argument("--reference-native-frame", type=int)
     init.add_argument("--loads-csv", type=Path)
@@ -86,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--roi", help="analysis rectangle as x,y,width,height in px")
     init.add_argument("--exclude", action="append", default=[], help="exclusion rectangle x,y,width,height; repeatable")
     init.add_argument("--gauges-json", type=Path, help="JSON array of virtual-gauge endpoint queries")
+    init.add_argument("--regions-json", type=Path, help="JSON array of named region statistics definitions")
     init.add_argument("--calibration-json", type=Path, help="explicit mm_per_px/origin_px/origin_mm/axis_sign object")
     init.add_argument("--step-hint-px", type=int)
     init.add_argument("--plot-every", type=int, default=0, help="plot every Nth frame, capped at 24 frames; default selects first/middle/last/load/strain stages")
@@ -128,6 +130,28 @@ def build_parser() -> argparse.ArgumentParser:
     recover = sub.add_parser("recover-lock", help="explicitly recover a confirmed dead local lock owner")
     recover.add_argument("--project", type=Path, required=True)
     recover.add_argument("--expected-pid", type=int, required=True)
+    for name in ("discover", "auto"):
+        command = sub.add_parser(name, help="discover an experiment folder" if name == "discover" else "discover, analyze, verify and package one experiment sequence")
+        command.add_argument("--folder", type=Path, required=True)
+        command.add_argument("--objective", default="full_field")
+        command.add_argument("--options-json", type=Path)
+        if name == "auto":
+            command.add_argument("--project", type=Path, required=True)
+            command.add_argument("--no-plots", action="store_true")
+            command.add_argument("--field-csv", action="store_true")
+            command.add_argument("--progress-json", action="store_true")
+    update = sub.add_parser("update", help="validate a configuration revision and retain previous runs")
+    update.add_argument("--project", type=Path, required=True)
+    update.add_argument("--changes-json", type=Path, required=True)
+    report = sub.add_parser("report", help="generate a portable report and data package")
+    report.add_argument("--project", type=Path, required=True)
+    report.add_argument("--include-checkpoints", action="store_true")
+    reprocess = sub.add_parser("reprocess", help="recompute region/gauge summaries from original saved POIs")
+    reprocess.add_argument("--project", type=Path, required=True)
+    reprocess.add_argument("--regions-json", type=Path)
+    reprocess.add_argument("--gauges-json", type=Path)
+    verify_report = sub.add_parser("verify-report", help="verify a portable report independently of raw images")
+    verify_report.add_argument("--report", type=Path, required=True)
     return parser
 
 
@@ -143,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             result = api.init_project(
                 args.project, args.images, frame_interval_s=args.frame_interval_s,
+                time_basis=args.time_basis,
                 frame_map_csv=args.frame_map_csv, reference_native_frame=args.reference_native_frame,
                 loads_csv=args.loads_csv, load_time_column=args.time_column,
                 load_time_unit=args.load_time_unit, load_time_offset_s=args.time_offset_s,
@@ -154,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 roi_override_px=_parse_rect(args.roi, "roi") if args.roi else None,
                 exclusions_px=[_parse_rect(item, "exclude") for item in args.exclude],
                 gauges=_json_file(args.gauges_json, list, "gauges JSON"),
+                regions=_json_file(args.regions_json, list, "regions JSON"),
                 calibration=_json_file(args.calibration_json, dict, "calibration JSON"),
                 step_hint_px=args.step_hint_px, plot_every=args.plot_every,
             )
@@ -195,6 +221,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit(api.cancel(args.project))
         elif args.command == "recover-lock":
             _emit(api.recover_lock(args.project, expected_pid=args.expected_pid))
+        elif args.command == "discover":
+            result = api.discover_experiment(args.folder, objective=args.objective, options=_json_file(args.options_json, dict, "options JSON"))
+            _emit(result)
+            return EXIT_OK if result["status"] == "ready" else EXIT_QUALITY
+        elif args.command == "auto":
+            result = api.auto_analyze(args.folder, args.project, objective=args.objective,
+                                      options=_json_file(args.options_json, dict, "options JSON"),
+                                      progress=_progress(args.progress_json), field_csv=args.field_csv, make_plots=not args.no_plots)
+            _emit(result)
+            return EXIT_OK if result["status"] == "complete" else EXIT_QUALITY
+        elif args.command == "update":
+            _emit(api.update_project(args.project, _json_file(args.changes_json, dict, "changes JSON")))
+        elif args.command == "report":
+            result = api.report(args.project, include_checkpoints=args.include_checkpoints)
+            _emit(result)
+            return EXIT_OK if result.get("verification", {}).get("valid") is True else EXIT_QUALITY
+        elif args.command == "reprocess":
+            result = api.reprocess(args.project, regions=_json_file(args.regions_json, list, "regions JSON"), gauges=_json_file(args.gauges_json, list, "gauges JSON"))
+            _emit(result)
+            return EXIT_OK if result["status"] in {"complete", "reused"} else EXIT_QUALITY
+        elif args.command == "verify-report":
+            from .report import verify_report
+            result = verify_report(args.report)
+            _emit(result)
+            return EXIT_OK if result.get("valid") is True else EXIT_QUALITY
         else:
             raise api.AgentError("CLI_COMMAND_UNSUPPORTED", f"unsupported agent command: {args.command}")
         return EXIT_OK

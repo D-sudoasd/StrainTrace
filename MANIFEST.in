@@ -12,6 +12,7 @@ include RELEASE_NOTES*.md
 recursive-include docs/joss *.md *.json
 include scripts/check_joss_artifacts.py
 include scripts/validate_campaign_baseline.py
+include scripts/validate_agent_upgrade.py
 recursive-include examples/campaign *.py
 include straintrace_campaign/CONTRACT.md
 recursive-include straintrace_agent *.py

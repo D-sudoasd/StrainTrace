@@ -107,21 +107,22 @@ def _interpolate_bounded(time_s: float, times: Sequence[float], values: Sequence
     return _interpolate_bounded_detail(time_s, times, values, max_gap_s, source_rows).get("value")
 
 def _mechanics_at(
-    time_s: float, mechanics: Mapping[str, Any] | None, config: Mapping[str, Any], *,
+    time_s: float | None, mechanics: Mapping[str, Any] | None, config: Mapping[str, Any], *,
     displacement_reference_mm: float | None = None,
     displacement_reference_alignment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     loads = config.get("loads")
-    if not loads:
+    if not loads or time_s is None:
+        unavailable = "time_unavailable" if loads else "not_provided"
         return {
-            "force_N": None, "stress_MPa": None, "mechanics_status": "not_provided",
+            "force_N": None, "stress_MPa": None, "mechanics_status": unavailable,
             "machine_displacement_mm": None, "machine_engineering_strain": None, "machine_true_strain": None,
-            "machine_displacement_source": None, "force_alignment_kind": "not_provided",
+            "machine_displacement_source": loads.get("displacement_source") if loads else None, "force_alignment_kind": unavailable,
             "force_bracket_left_time_s": None, "force_bracket_right_time_s": None,
             "force_bracket_left_source_row": None, "force_bracket_right_source_row": None,
-            "displacement_alignment_kind": "not_provided", "displacement_bracket_left_time_s": None,
+            "displacement_alignment_kind": unavailable, "displacement_bracket_left_time_s": None,
             "displacement_bracket_right_time_s": None, "displacement_bracket_left_source_row": None,
-            "displacement_bracket_right_source_row": None, "displacement_reference_alignment_kind": "not_provided",
+            "displacement_bracket_right_source_row": None, "displacement_reference_alignment_kind": unavailable,
         }
     if not loads.get("clock_confirmed"):
         return {
@@ -196,10 +197,15 @@ def _mechanics_at(
 def _resolve_gauge_geometry(
     gauges: Sequence[Mapping[str, Any]], roi: Sequence[int], image_shape: Sequence[int],
     subset_size: int, step: int, specimen_mask: np.ndarray | None,
+    *, calibration: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Bind gauge endpoints to a fixed set of reference POIs once per plan."""
     import ezdic_core as core
     X, Y = core.build_poi_grid(roi, subset_size, step, image_shape)
+    scale = None
+    if calibration is not None:
+        from .fields import calibrate_field
+        scale = float(calibrate_field({"X": X, "Y": Y}, calibration)["calibration"]["mm_per_px"])
     eligible = np.ones(X.shape, dtype=bool)
     if specimen_mask is not None and X.size:
         from scipy import ndimage
@@ -207,6 +213,9 @@ def _resolve_gauge_geometry(
         eligible = supported[np.rint(Y).astype(int), np.rint(X).astype(int)]
     out = []
     for gauge in gauges:
+        if gauge["axis"] not in {"x", "y", "distance"}:
+            raise ValueError("gauge axis must be x, y, or distance")
+        min_zncc = _gauge_zncc_threshold(gauge.get("min_zncc"))
         endpoints = {}
         for side in ("a", "b"):
             roi_key, point_key = f"{side}_roi_px", f"{side}_point_px"
@@ -216,20 +225,22 @@ def _resolve_gauge_geometry(
                 indices = np.flatnonzero(selected.ravel()).astype(int).tolist()
             else:
                 target_x, target_y = (float(value) for value in gauge[point_key])
-                support_indices = np.flatnonzero(eligible.ravel())
-                if support_indices.size:
-                    distances = np.hypot(X.ravel()[support_indices] - target_x, Y.ravel()[support_indices] - target_y)
+                if X.size:
+                    # Geometry chooses the original POI first. A mask hole
+                    # must not move an endpoint onto a different material point.
+                    distances = np.hypot(X.ravel() - target_x, Y.ravel() - target_y)
                     nearest = int(np.argmin(distances))
-                    indices = [int(support_indices[nearest])] if float(distances[nearest]) <= float(gauge.get("max_distance_px", 0.0)) else []
+                    indices = [nearest] if eligible.ravel()[nearest] and float(distances[nearest]) <= float(gauge.get("max_distance_px", 0.0)) else []
                 else:
                     indices = []
             if indices:
                 endpoints[side] = {
                     "poi_indices": indices,
                     "reference_xy": [float(np.mean(X.ravel()[indices])), float(np.mean(Y.ravel()[indices]))],
+                    "reference_points_px": np.column_stack((X.ravel()[indices], Y.ravel()[indices])).tolist(),
                 }
             else:
-                endpoints[side] = {"poi_indices": [], "reference_xy": None}
+                endpoints[side] = {"poi_indices": [], "reference_xy": None, "reference_points_px": []}
         valid = endpoints["a"]["reference_xy"] is not None and endpoints["b"]["reference_xy"] is not None
         initial_length = None
         direction = None
@@ -246,36 +257,103 @@ def _resolve_gauge_geometry(
                 initial_length = math.hypot(dx, dy)
                 direction = [dx / initial_length, dy / initial_length] if initial_length > 0 else None
             valid = bool(initial_length and initial_length > 0 and direction is not None)
+        overlapping = bool(set(endpoints["a"]["poi_indices"]) & set(endpoints["b"]["poi_indices"]))
+        valid = valid and not overlapping
         out.append({
             "name": gauge["name"], "axis": gauge["axis"],
             "geometry_status": gauge.get("geometry_status", "user_defined"),
             "a": endpoints["a"], "b": endpoints["b"],
             "initial_length_px": float(initial_length) if valid else None,
+            "initial_length_mm": float(initial_length) * scale if valid and scale is not None else None,
+            "mm_per_px": scale, "calibration_status": "available" if scale is not None else "unavailable",
+            "measurement_kind": "euclidean_distance" if gauge["axis"] == "distance" else "projected_separation",
+            "loading_axis": None, "min_zncc": min_zncc,
+            "reference_grid_shape": list(X.shape),
             "direction": direction if valid else None,
-            "reference_status": "resolved" if valid else "reference_support_missing",
+            "reference_status": "overlapping_endpoint_support" if overlapping else "resolved" if valid else "reference_support_missing",
             "endpoint_policy": "fixed_reference_poi_set_all_pois_must_be_valid",
         })
     return out
 
-def _measure_gauges(field: Mapping[str, Any], reference_gauges: Sequence[Mapping[str, Any]], *, quality_ok: bool) -> list[dict[str, Any]]:
+def _gauge_zncc_threshold(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError("gauge min_zncc must be finite and between -1 and 1")
+    threshold = float(value)
+    if not math.isfinite(threshold) or not -1 <= threshold <= 1:
+        raise ValueError("gauge min_zncc must be finite and between -1 and 1")
+    return threshold
+
+
+def _measure_gauges(
+    field: Mapping[str, Any], reference_gauges: Sequence[Mapping[str, Any]], *,
+    quality_ok: bool, min_zncc: float | None = None,
+) -> list[dict[str, Any]]:
+    """Measure fixed endpoint material points without interpolation or rebinding.
+
+    ``distance`` uses the current Euclidean separation and is invariant under
+    rigid rotation. Explicit x/y gauges measure projected separation along
+    that image axis; they are not rotation-invariant material line strains.
+    """
     valid = np.asarray(field.get("valid", []), dtype=bool).ravel()
     u = np.asarray(field.get("u_raw", field.get("u", [])), dtype=float).ravel()
     v = np.asarray(field.get("v_raw", field.get("v", [])), dtype=float).ravel()
+    global_threshold = _gauge_zncc_threshold(min_zncc)
+    supported_base = valid.copy()
+    if u.size != valid.size or v.size != valid.size:
+        supported_base[:] = False
+    else:
+        supported_base &= np.isfinite(u) & np.isfinite(v)
+    if reference_gauges and "X" in field and "Y" in field:
+        from .fields import _has_jacobian_support, nonpositive_jacobian_poi_mask
+        shape = np.asarray(field["X"]).shape
+        if len(shape) == 2 and min(shape) >= 2 and _has_jacobian_support(field):
+            foldover = nonpositive_jacobian_poi_mask(field).ravel()
+            if foldover.size == supported_base.size:
+                supported_base &= ~foldover
+    zncc = np.asarray(field.get("zncc", []), dtype=float).ravel()
     result = []
     for gauge in reference_gauges:
+        thresholds = [value for value in (global_threshold, _gauge_zncc_threshold(gauge.get("min_zncc"))) if value is not None]
+        threshold = max(thresholds) if thresholds else None
+        supported = supported_base.copy()
+        if threshold is not None:
+            if zncc.size == valid.size:
+                supported &= np.isfinite(zncc) & (zncc >= threshold)
+            else:
+                supported[:] = False
         a_indices = np.asarray(gauge["a"]["poi_indices"], dtype=int)
         b_indices = np.asarray(gauge["b"]["poi_indices"], dtype=int)
-        a_ok = bool(a_indices.size and a_indices.max() < valid.size and valid[a_indices].all() and np.isfinite(u[a_indices]).all() and np.isfinite(v[a_indices]).all())
-        b_ok = bool(b_indices.size and b_indices.max() < valid.size and valid[b_indices].all() and np.isfinite(u[b_indices]).all() and np.isfinite(v[b_indices]).all())
+        def count_supported(indices):
+            in_range = indices.size and indices.min() >= 0 and indices.max() < supported.size
+            return int(supported[indices].sum()) if in_range else 0
+        a_count, b_count = count_supported(a_indices), count_supported(b_indices)
+        a_ok = bool(a_indices.size and a_count == a_indices.size)
+        b_ok = bool(b_indices.size and b_count == b_indices.size)
+        geometry_matches = True
+        if "X" in field and "Y" in field and gauge.get("reference_grid_shape") is not None:
+            X, Y = np.asarray(field["X"]), np.asarray(field["Y"])
+            geometry_matches = list(X.shape) == gauge["reference_grid_shape"] and X.shape == Y.shape
+            if geometry_matches:
+                for side, indices in (("a", a_indices), ("b", b_indices)):
+                    expected = gauge[side].get("reference_points_px")
+                    if expected and indices.size and indices.min() >= 0 and indices.max() < X.size:
+                        geometry_matches &= bool(np.allclose(np.column_stack((X.ravel()[indices], Y.ravel()[indices])), expected, rtol=0, atol=1e-9))
         base = {
             "gauge_name": gauge["name"], "axis": gauge["axis"], "geometry_status": gauge.get("geometry_status"),
             "a_expected_poi_count": int(a_indices.size), "b_expected_poi_count": int(b_indices.size),
-            "a_valid_poi_count": int(valid[a_indices].sum()) if a_indices.size and a_indices.max() < valid.size else 0,
-            "b_valid_poi_count": int(valid[b_indices].sum()) if b_indices.size and b_indices.max() < valid.size else 0,
+            "a_valid_poi_count": a_count, "b_valid_poi_count": b_count,
             "initial_length_px": gauge.get("initial_length_px"), "endpoint_policy": gauge.get("endpoint_policy"),
+            "initial_length_mm": gauge.get("initial_length_mm"),
+            "calibration_status": gauge.get("calibration_status", "unavailable"),
+            "measurement_kind": gauge.get("measurement_kind", "euclidean_distance" if gauge["axis"] == "distance" else "projected_separation"),
+            "loading_axis": gauge.get("loading_axis"), "min_zncc": threshold,
+            "current_length_px": None, "extension_px": None, "current_length_mm": None, "extension_mm": None,
         }
-        if gauge.get("reference_status") != "resolved" or not a_ok or not b_ok:
-            result.append({**base, "status": "invalid_endpoint_support", "engineering_strain": None, "true_strain": None})
+        if gauge.get("reference_status") != "resolved" or not a_ok or not b_ok or not geometry_matches:
+            result.append({**base, "status": "invalid_endpoint_support", "engineering_strain": None, "true_strain": None,
+                           "reasons": ["reference_grid_mismatch" if not geometry_matches else "fixed_endpoint_support_missing_or_quality_rejected"]})
             continue
         a_u, a_v = float(np.mean(u[a_indices])), float(np.mean(v[a_indices]))
         b_u, b_v = float(np.mean(u[b_indices])), float(np.mean(v[b_indices]))
@@ -288,7 +366,17 @@ def _measure_gauges(field: Mapping[str, Any], reference_gauges: Sequence[Mapping
         else:
             engineering = float(np.dot(np.array([du, dv]), np.asarray(gauge["direction"], dtype=float)) / length)
         true = math.log1p(engineering) if engineering > -1.0 else None
-        result.append({**base, "status": "valid" if quality_ok else "quality_rejected", "engineering_strain": engineering if quality_ok else None, "true_strain": true if quality_ok else None})
+        finite_length = math.isfinite(engineering) and engineering > -1.0
+        accepted = bool(quality_ok and finite_length)
+        extension = engineering * length
+        scale = gauge.get("mm_per_px")
+        result.append({**base,
+                       "status": "valid" if accepted else "quality_rejected" if not quality_ok else "invalid_deformed_length",
+                       "reasons": [] if accepted else ["frame_quality_rejected" if not quality_ok else "nonpositive_or_nonfinite_deformed_length"],
+                       "engineering_strain": engineering if accepted else None, "true_strain": true if accepted else None,
+                       "current_length_px": length + extension if accepted else None, "extension_px": extension if accepted else None,
+                       "current_length_mm": (length + extension) * scale if accepted and scale is not None else None,
+                       "extension_mm": extension * scale if accepted and scale is not None else None})
     return result
 
 def _gauge_group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -313,20 +401,24 @@ def _gauge_group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 def _auto_gauge_candidates(roi: Sequence[int], subset: int, step: int) -> list[dict[str, Any]]:
     x, y, width, height = (int(value) for value in roi)
-    length = int(round(width * 0.6))
-    if length < subset * 2 or height < subset * 2:
+    horizontal = width >= height
+    along, across = (width, height) if horizontal else (height, width)
+    length = int(round(along * 0.6))
+    if length < subset * 2 or across < subset * 2:
         return []
     radius = max(1, int(round((subset + 2 * step) / 2)))
     result = []
     for index, fraction in enumerate((0.3, 0.5, 0.7), 1):
-        center_y = min(y + height - radius - 1, max(y + radius, y + int(round(height * fraction))))
-        a_x = x + int(round(width * 0.2))
-        b_x = a_x + length
+        center = min(across - radius - 1, max(radius, int(round(across * fraction))))
+        start = int(round(along * 0.2))
+        a_x, a_y = (x + start, y + center) if horizontal else (x + center, y + start)
+        b_x, b_y = (a_x + length, a_y) if horizontal else (a_x, a_y + length)
         result.append({
-            "name": f"auto_candidate_{index}", "axis": "x",
-            "a_roi_px": [max(0, a_x - radius), max(0, center_y - radius), 2 * radius + 1, 2 * radius + 1],
-            "b_roi_px": [max(0, b_x - radius), max(0, center_y - radius), 2 * radius + 1, 2 * radius + 1],
+            "name": f"auto_candidate_{index}", "axis": "distance",
+            "a_roi_px": [max(0, a_x - radius), max(0, a_y - radius), 2 * radius + 1, 2 * radius + 1],
+            "b_roi_px": [max(0, b_x - radius), max(0, b_y - radius), 2 * radius + 1, 2 * radius + 1],
             "geometry_status": "automatic_candidate_unconfirmed_physical_specimen",
+            "loading_axis": None,
             "estimated_initial_length_px": length,
         })
     return result

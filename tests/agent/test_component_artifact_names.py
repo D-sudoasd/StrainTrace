@@ -4,7 +4,7 @@ import json
 
 import ezdic_core
 
-from straintrace_agent.api import _build_outputs, _component_file_slug
+from straintrace_agent.api import _build_outputs, _component_file_slug, _hash_json
 
 
 def test_component_artifacts_have_unique_casefolded_names():
@@ -37,10 +37,13 @@ def test_quality_gate_is_not_reported_as_scientific_acceptance(tmp_path):
     (run_root / "run_state.json").write_text(json.dumps({"status": "complete", "run_id": "run-test"}), encoding="utf-8")
     records = [{"native_frame": 1, "path": "frame_0001.tif", "sha256": "source-hash", "time_s": 0.0}]
     rows = [{"frame_position_1based": 1, "native_frame": 1, "time_s": 0.0, "status": "complete", "quality_status": "pass", "scientific_ok": True}]
+    config = {"project_id": "test", "loads": None, "mask_sha256": None}
+    plan = {"reference_native_frame": 1, "analysis_rectangle_candidate_px": [10, 10, 40, 40],
+            "selected_parameters": {}, "configuration_sha256": _hash_json(config)}
+    plan["plan_sha256"] = _hash_json(plan)
 
     result = _build_outputs(
-        root, run_root, {"project_id": "test", "loads": None, "mask_sha256": None},
-        {"reference_native_frame": 1, "analysis_rectangle_candidate_px": [10, 10, 40, 40], "selected_parameters": {}},
+        root, run_root, config, plan,
         records, rows, {}, "run-fingerprint", "input-fingerprint", {}, field_csv=False, plots=False,
     )
 

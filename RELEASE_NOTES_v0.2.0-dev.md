@@ -8,6 +8,23 @@ or publication claim is made by this note.
 
 ## Scope of this iteration
 
+### 26 October 2026: autonomous analysis and traceable comparisons
+
+The Agent workflow now connects experiment-folder discovery and explicit analysis
+objectives to bounded DIC planning, named region summaries, multiple virtual
+gauges, saved-field reprocessing, and a portable offline report. The desktop
+provides an Agent project workbench for reviewing and editing geometry and
+parameters. Reports retain failed rows, coordinate definitions, source hashes,
+configuration snapshots, and optional original NPZ checkpoints for independent
+inspection. Missing physical calibration or clock information is not invented.
+
+Fractional subset centers now use matching reference/target sample coordinates.
+Optional displacement smoothing preserves affine fields and shares finite support
+between both displacement components. Analytic regressions cover rigid rotations,
+missing support, noninteger centers, and the distinction between gauge distance
+and image-axis projection. See [the workflow guide](docs/AUTONOMOUS_ANALYSIS.md)
+and [the numerical evidence](docs/2D_DIC_VALIDATION.md).
+
 ### October 2026 2D DIC reliability update
 
 Cached quintic B-spline sampling and fourth-order reference gradients replace

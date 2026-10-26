@@ -207,7 +207,7 @@ def _validate_rect(value: Sequence[Any], field: str) -> list[int]:
 def _validate_gauge(value: Mapping[str, Any], index: int) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise AgentError("CONFIG_TYPE_ERROR", "gauge must be an object", path=f"$.gauges[{index}]")
-    allowed = {"name", "axis", "a_point_px", "b_point_px", "a_roi_px", "b_roi_px", "max_distance_px", "geometry_status"}
+    allowed = {"name", "axis", "a_point_px", "b_point_px", "a_roi_px", "b_roi_px", "max_distance_px", "geometry_status", "min_zncc"}
     _ensure_known_fields(value, allowed, path=f"$.gauges[{index}]")
     name = value.get("name")
     axis = value.get("axis")
@@ -226,6 +226,11 @@ def _validate_gauge(value: Mapping[str, Any], index: int) -> dict[str, Any]:
         else:
             result[roi_key] = _validate_rect(value[roi_key], f"gauges[{index}].{roi_key}")
     result["max_distance_px"] = _positive_number(value.get("max_distance_px", 0.0), f"gauges[{index}].max_distance_px", allow_zero=True)
+    if "min_zncc" in value:
+        threshold = value["min_zncc"]
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)) or not -1 <= threshold <= 1:
+            raise AgentError("GAUGE_CONFIG", "min_zncc must be finite in [-1, 1]", path=f"$.gauges[{index}].min_zncc")
+        result["min_zncc"] = float(threshold)
     return result
 
 
@@ -241,13 +246,20 @@ def _project_root(project: str | os.PathLike[str]) -> Path:
 
 def _read_config(project: Path) -> dict[str, Any]:
     config = _read_json(project / "project.json")
+    return _validate_project_config(config, project)
+
+
+def _validate_project_config(config: Mapping[str, Any], project: Path) -> dict[str, Any]:
+    """Validate a candidate configuration before replacing persisted state."""
+    config = dict(config)
     allowed = {
         "schema", "project_id", "image_dir", "frame_interval_s", "frame_map_csv",
         "reference_native_frame", "loads", "calibration", "regions", "paths", "gauges",
         "mask_file", "mask_sha256", "roi_override_px", "exclusions_px", "step_hint_px", "plot_every",
+        "time_basis",
     }
     _ensure_known_fields(config, allowed)
-    missing_root_fields = sorted(allowed - set(config))
+    missing_root_fields = sorted(allowed - set(config) - {"time_basis"})
     if missing_root_fields:
         raise AgentError("CONFIG_REQUIRED_FIELD", f"missing project configuration field: {missing_root_fields[0]}", path=f"$.{missing_root_fields[0]}")
     if config.get("schema") != PROJECT_SCHEMA:
@@ -338,6 +350,7 @@ def _read_config(project: Path) -> dict[str, Any]:
         mask_file=config.get("mask_file"), roi_override_px=config.get("roi_override_px"),
         exclusions_px=config.get("exclusions_px", []), step_hint_px=config.get("step_hint_px"),
         plot_every=config.get("plot_every", 0),
+        time_basis=config.get("time_basis", "physical_time"),
     )
     validated["project_id"] = config["project_id"]
     if loads:
@@ -375,6 +388,9 @@ def _explicit_frame_map(path: Path, image_root: Path, image_paths: Sequence[Path
     if file_col is None or frame_col is None:
         raise AgentError("FRAME_MAP_COLUMNS", "frame map requires path/filename and native_frame columns", path=str(path))
     known = {item.resolve(strict=False) for item in image_paths}
+    by_basename: dict[str, list[Path]] = {}
+    for image_path in known:
+        by_basename.setdefault(image_path.name.casefold(), []).append(image_path)
     by_key: dict[str, dict[str, Any]] = {}
     for row_index, row in table.iterrows():
         raw_path = str(row[file_col]).strip()
@@ -386,7 +402,7 @@ def _explicit_frame_map(path: Path, image_root: Path, image_paths: Sequence[Path
         candidate = candidate.resolve(strict=False)
         if candidate not in known:
             # A basename is accepted only if unique in the image directory.
-            matches = [item for item in known if item.name.casefold() == Path(raw_path).name.casefold()]
+            matches = by_basename.get(Path(raw_path).name.casefold(), [])
             if len(matches) != 1:
                 raise AgentError("FRAME_MAP_PATH_UNKNOWN", f"frame map row does not identify one source image: {raw_path}", path=str(path))
             candidate = matches[0]
@@ -424,11 +440,12 @@ def _native_frame_from_name(path: Path) -> int:
 
 
 def _scan_inventory(config: Mapping[str, Any], *, read_dimensions: bool = True) -> list[dict[str, Any]]:
+    from .discovery import source_files
     image_root = Path(str(config["image_dir"])).expanduser().resolve(strict=False)
     if not image_root.is_dir():
         raise AgentError("IMAGE_DIRECTORY_MISSING", f"image directory does not exist: {image_root}", path="$.image_dir")
     mask_path = Path(str(config["mask_file"])).resolve(strict=False) if config.get("mask_file") else None
-    paths = sorted((p.resolve(strict=False) for p in image_root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES and (mask_path is None or p.resolve(strict=False) != mask_path)), key=lambda p: str(p).casefold())
+    paths = sorted((p.resolve(strict=False) for p in source_files(image_root) if p.suffix.lower() in IMAGE_SUFFIXES and (mask_path is None or p.resolve(strict=False) != mask_path)), key=lambda p: str(p).casefold())
     if not paths:
         raise AgentError("NO_IMAGES", f"no supported DIC images found in {image_root}", path="$.image_dir")
     explicit: dict[str, dict[str, Any]] | None = None
@@ -474,10 +491,12 @@ def _scan_inventory(config: Mapping[str, Any], *, read_dimensions: bool = True) 
     if any(right <= left for left, right in zip(native_order, native_order[1:])):
         raise AgentError("FRAME_ID_ORDER", "native frame numbers must be strictly increasing")
     if times_explicit:
+        if config.get("time_basis") == "frame_index":
+            raise AgentError("CONFIG_TIME_BASIS_CONFLICT", "frame_index cannot discard explicitly recorded frame times", path="$.time_basis")
         times = [item.get("time_s") for item in records]
         if any(value is None for value in times) or any(float(b) <= float(a) for a, b in zip(times, times[1:])):
             raise AgentError("FRAME_TIME_ORDER", "explicit frame times must be complete and strictly increasing")
-    else:
+    elif config.get("time_basis") != "frame_index":
         interval = config.get("frame_interval_s")
         if interval is None:
             raise AgentError("FRAME_TIME_REQUIRED", "provide a positive frame_interval_s or explicit frame-map time_s values", path="$.frame_interval_s")
@@ -510,12 +529,14 @@ def _config_from_arguments(
     gauges: Sequence[Mapping[str, Any]] | None, mask_file: str | os.PathLike[str] | None,
     roi_override_px: Sequence[int] | None, exclusions_px: Sequence[Sequence[int]] | None,
     step_hint_px: int | None, plot_every: int,
+    time_basis: str = "physical_time",
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "schema": PROJECT_SCHEMA,
         "project_id": uuid.uuid4().hex,
         "image_dir": str(Path(image_dir).expanduser().resolve(strict=False)),
         "frame_interval_s": frame_interval_s,
+        "time_basis": time_basis,
         "frame_map_csv": str(Path(frame_map_csv).expanduser().resolve(strict=False)) if frame_map_csv else None,
         "reference_native_frame": reference_native_frame,
         "loads": None,
@@ -532,6 +553,10 @@ def _config_from_arguments(
     }
     if reference_native_frame is not None and (type(reference_native_frame) is not int or reference_native_frame < 0):
         raise AgentError("CONFIG_VALUE_ERROR", "reference_native_frame must be a nonnegative integer", path="$.reference_native_frame")
+    if not isinstance(time_basis, str) or time_basis not in {"physical_time", "frame_index"}:
+        raise AgentError("CONFIG_TIME_BASIS", "time_basis must be physical_time or frame_index", path="$.time_basis")
+    if time_basis == "frame_index" and (frame_interval_s is not None or loads_csv is not None):
+        raise AgentError("CONFIG_TIME_BASIS_CONFLICT", "frame_index requires null frame_interval_s and no load table; time-dependent measurements require physical_time", path="$.time_basis")
     if frame_interval_s is not None:
         config["frame_interval_s"] = _positive_number(frame_interval_s, "frame_interval_s")
     if loads_csv is not None:
@@ -626,6 +651,13 @@ def _config_from_arguments(
     for index, rect in enumerate(config["exclusions_px"]):
         config["exclusions_px"][index] = _validate_rect(rect, f"exclusions_px[{index}]")
     config["gauges"] = [_validate_gauge(gauge, index) for index, gauge in enumerate(config["gauges"])]
+    if len({gauge["name"].casefold() for gauge in config["gauges"]}) != len(config["gauges"]):
+        raise AgentError("GAUGE_CONFIG", "gauge names must be unique", path="$.gauges")
+    from .regions import normalize_regions
+    try:
+        config["regions"] = normalize_regions(config["regions"])
+    except ValueError as exc:
+        raise AgentError("CONFIG_REGION_INVALID", str(exc), path="$.regions") from exc
     if step_hint_px is not None and (type(step_hint_px) is not int or step_hint_px < 1):
         raise AgentError("CONFIG_VALUE_ERROR", "step_hint_px must be a positive integer", path="$.step_hint_px")
     if type(plot_every) is not int or plot_every < 0:
@@ -652,6 +684,7 @@ def init_project(
     exclusions_px: Sequence[Sequence[int]] | None = None,
     step_hint_px: int | None = None,
     plot_every: int = 0,
+    time_basis: str = "physical_time",
 ) -> dict[str, Any]:
     """Create a new sample project and hash every source image once."""
     root = _project_root(project)
@@ -677,13 +710,14 @@ def init_project(
         mask_file=mask_file, roi_override_px=roi_override_px, exclusions_px=exclusions_px,
         step_hint_px=step_hint_px,
         plot_every=plot_every,
+        time_basis=time_basis,
     )
     records = _scan_inventory(config)
     root.mkdir(parents=True, exist_ok=True)
     (root / "plans").mkdir(exist_ok=True)
     (root / "runs").mkdir(exist_ok=True)
     _atomic_json(root / "project.json", config)
-    _, input_fingerprint = _inventory_fresh(root, config)
+    input_fingerprint = _inventory_fingerprint(config, records)
     _record_inventory(root, records, input_fingerprint)
     _atomic_json(root / "CURRENT.json", {"schema": PROJECT_SCHEMA, "project_id": config["project_id"], "current_plan": None, "current_run": None})
     return {"project": str(root), "project_id": config["project_id"], "frame_count": len(records), "readable_count": sum(row["status"] == "pending" for row in records), "inventory_sha256": _hash_json(records)}
@@ -704,6 +738,7 @@ def inspect_project(project: str | os.PathLike[str]) -> dict[str, Any]:
         "time_range_s": [frames[0].get("time_s"), frames[-1].get("time_s")] if frames else None,
         "image_shape_yx": next((row.get("shape_yx") for row in frames if row.get("shape_yx")), None),
         "frame_interval_s": config.get("frame_interval_s"),
+        "time_basis": config.get("time_basis", "physical_time"),
         "load_data_configured": config.get("loads") is not None,
         "load_clock_confirmed": bool((config.get("loads") or {}).get("clock_confirmed", False)),
         "stress_available_in_principle": bool((config.get("loads") or {}).get("clock_confirmed") and (config.get("loads") or {}).get("area_mm2")),
@@ -747,6 +782,11 @@ def _current_pointer(root: Path) -> dict[str, Any]:
 
 def _inventory_fresh(root: Path, config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str]:
     current = _scan_inventory(config, read_dimensions=False)
+    return current, _inventory_fingerprint(config, current)
+
+
+def _inventory_fingerprint(config: Mapping[str, Any], current: Sequence[Mapping[str, Any]]) -> str:
+    """Bind an already hashed image inventory to its auxiliary source files."""
     auxiliary: dict[str, str] = {}
     for key in ("frame_map_csv", "mask_file"):
         if config.get(key):
@@ -766,7 +806,7 @@ def _inventory_fresh(root: Path, config: Mapping[str, Any]) -> tuple[list[dict[s
         "frames": [{key: item.get(key) for key in ("native_frame", "path", "relative_path", "sha256", "time_s")} for item in current],
         "loads_sha256": current_load_sha, "auxiliary_sha256": auxiliary,
     })
-    return current, fingerprint
+    return fingerprint
 
 
 def _record_inventory(root: Path, records: Sequence[Mapping[str, Any]], fingerprint: str) -> None:
@@ -1164,6 +1204,7 @@ def plan_project(project: str | os.PathLike[str], *, progress: Callable[[dict[st
         gauge_reference_geometry = _resolve_gauge_geometry(
             config.get("gauges") or [], roi, reference.shape,
             int(chosen["subset_size_px"]), int(chosen["step_px"]), specimen_mask,
+            calibration=config.get("calibration"),
         )
         if any(item.get("reference_status") != "resolved" for item in gauge_reference_geometry):
             plan_status = "review_required"
@@ -1192,6 +1233,8 @@ def plan_project(project: str | os.PathLike[str], *, progress: Callable[[dict[st
             "correlation_search_radius_px": int(chosen["search_radius_px"]),
             "environment": __import__("ezdic_core").collect_environment(),
         }
+        from .regions import recommend_regions
+        plan["region_recommendations"] = recommend_regions(reference, chosen_subset, chosen_step, specimen_mask=specimen_mask)
         plan_sha = _hash_json(plan)
         plan["plan_sha256"] = plan_sha
         plans_root = root / "plans"
@@ -1564,7 +1607,7 @@ def run(
                     "reference_filename": Path(reference_record["path"]).name,
                     "frame_global_1based": position, "native_frame": native,
                     "frame_filename": Path(record["path"]).name,
-                    "time_s": float(record["time_s"]), "roi_candidate_px": list(roi),
+                    "time_s": record.get("time_s"), "roi_candidate_px": list(roi),
                     "analysis_rectangle_status": "candidate_not_physical_specimen_confirmation",
                     "input_sha256": record["sha256"],
                 }
@@ -1572,13 +1615,13 @@ def run(
                 strain_valid = np.asarray(field.get("strain_valid", []), dtype=bool)
                 exx = np.asarray(field.get("exx", []), dtype=float)
                 finite_exx = exx[np.isfinite(exx) & strain_valid] if exx.size == strain_valid.size else np.asarray([], dtype=float)
-                mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
+                mechanics_row = _mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
                 quality_ok = bool(quality.get("scientific_ok", False)) and bool(core.fullfield_field_has_finite_strain(field))
                 status_text = "complete" if quality_ok else "quality_failed"
                 gauge_rows = _measure_gauges(field, plan.get("gauge_reference_geometry") or [], quality_ok=quality_ok)
                 gauge_summary = _gauge_group_summary(gauge_rows)
                 summary_row = {
-                    "frame_position_1based": position, "native_frame": native, "time_s": float(record["time_s"]),
+                    "frame_position_1based": position, "native_frame": native, "time_s": record.get("time_s"),
                     "reference_native_frame": int(reference_record["native_frame"]),
                     "status": status_text, "quality_status": "pass" if quality_ok else "fail",
                     "scientific_ok": quality_ok,
@@ -1594,7 +1637,7 @@ def run(
                 }
                 checkpoint = run_root / "checkpoints" / f"{_frame_key(native)}.npz"
                 meta = {
-                    "native_frame": native, "frame_position": position, "time_s": float(record["time_s"]),
+                    "native_frame": native, "frame_position": position, "time_s": record.get("time_s"),
                     "source_path": record["path"], "source_sha256": record["sha256"],
                     "reference_native_frame": int(reference_record["native_frame"]), "run_fingerprint": run_fingerprint,
                     "input_fingerprint": input_sha, "code_sha256": code_sha, "status": status_text,
@@ -1612,13 +1655,13 @@ def run(
                 _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, run_fingerprint, input_sha, code_sha, field_csv=False, plots=False)
                 return {"project": str(root), "run_id": run_id, "status": "cancelled", "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed", "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root)}
             except AgentError as exc:
-                mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
+                mechanics_row = _mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
                 row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, exc, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), parameters=parameters, mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": exc.as_dict()}, progress)
             except Exception as exc:
                 error = AgentError("DIC_FRAME_ERROR", f"{type(exc).__name__}: {exc}", path=record["path"])
-                mechanics_row = _mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
+                mechanics_row = _mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)
                 row = _frame_failure(run_root, record, run_fingerprint, input_sha, code_sha, error, frame_position=position, reference_native_frame=int(reference_record["native_frame"]), retryable=True, parameters=parameters, mechanics_row=mechanics_row)
                 rows.append(row)
                 _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": error.as_dict()}, progress)
@@ -1638,7 +1681,7 @@ def run(
                 "passed_frames": passed, "failed_frames": failed, "total_frames": len(records), "run_dir": str(run_root), "artifacts": output["artifacts"]}
 
 
-def _csv_atomic(path: Path, rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> None:
+def _csv_atomic(path: Path, rows: Iterable[Mapping[str, Any]], columns: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -1646,7 +1689,8 @@ def _csv_atomic(path: Path, rows: Sequence[Mapping[str, Any]], columns: Sequence
             writer = csv.DictWriter(stream, fieldnames=list(columns), extrasaction="ignore")
             writer.writeheader()
             for row in rows:
-                safe = {key: ("" if row.get(key) is None else row.get(key)) for key in columns}
+                safe = {key: (json.dumps(_json_safe(row[key]), ensure_ascii=False, allow_nan=False) if isinstance(row.get(key), (list, dict, tuple))
+                              else "" if row.get(key) is None or isinstance(row.get(key), float) and not math.isfinite(row[key]) else row.get(key)) for key in columns}
                 writer.writerow(safe)
             stream.flush()
             os.fsync(stream.fileno())
@@ -1744,14 +1788,14 @@ def _build_outputs(
         "mechanics_alignment": _json_safe(dict(mechanics_status)),
         "frames": [],
     }
-    for _, metadata in _iter_checkpoint_rows(run_root, validate_fingerprint=run_fingerprint):
+    for metadata in _iter_checkpoint_metadata(run_root):
         quality["frames"].append({"native_frame": metadata.get("native_frame"), "status": metadata.get("status"), "quality": metadata.get("quality"), "failure": metadata.get("error")})
     _atomic_json(run_root / "quality.json", quality)
     gauge_csv = run_root / "gauges.csv"
     gauge_tmp = gauge_csv.with_name(f".{gauge_csv.name}.{uuid.uuid4().hex}.tmp")
     try:
         with gauge_tmp.open("w", encoding="utf-8-sig", newline="") as stream:
-            gauge_writer = csv.DictWriter(stream, fieldnames=["frame_position_1based", "native_frame", "time_s", "gauge_name", "axis", "geometry_status", "status", "initial_length_px", "a_expected_poi_count", "b_expected_poi_count", "a_valid_poi_count", "b_valid_poi_count", "endpoint_policy", "engineering_strain", "true_strain"], extrasaction="ignore")
+            gauge_writer = csv.DictWriter(stream, fieldnames=_GAUGE_COLUMNS, extrasaction="ignore")
             gauge_writer.writeheader()
             for metadata in _iter_checkpoint_metadata(run_root):
                 summary = metadata.get("summary_row") or {}
@@ -1832,6 +1876,7 @@ def _build_outputs(
         "source_images": [{"native_frame": row["native_frame"], "path": row["path"], "sha256": row["sha256"], "time_s": row["time_s"]} for row in records],
         "load_file_sha256": _sha256(Path(config["loads"]["path"])) if config.get("loads") else None,
         "mask_sha256": config.get("mask_sha256"),
+        "time_basis": config.get("time_basis", "physical_time"),
         "environment": __import__("ezdic_core").collect_environment(),
         "artifacts": {path.relative_to(run_root).as_posix(): _sha256(path) for path in artifact_paths if path.is_file()},
         "checkpoint_receipts": {
@@ -1846,7 +1891,12 @@ def _build_outputs(
         "units": {"x_px": "px", "u_px": "px", "strain": "dimensionless", "force_N": "N", "stress_MPa": "MPa"},
     }
     _atomic_json(run_root / "manifest.json", manifest)
-    return {"quality": quality, "artifacts": {"summary": str(run_root / "summary.csv"), "gauges": str(gauge_csv), "quality": str(run_root / "quality.json"), "manifest": str(run_root / "manifest.json"), "report": str(run_root / "report.md"), "plots": str(run_root / "plots")}}
+    _write_region_outputs(run_root, config, plan, run_fingerprint)
+    _refresh_manifest_artifacts(run_root)
+    from .report import build_report
+    portable_report = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=False)
+    _refresh_manifest_artifacts(run_root)
+    return {"quality": quality, "artifacts": {"summary": str(run_root / "summary.csv"), "gauges": str(gauge_csv), "regions": str(run_root / "regions.csv"), "geometry": str(run_root / "geometry.json"), "quality": str(run_root / "quality.json"), "manifest": str(run_root / "manifest.json"), "report": str(run_root / "report.md"), "report_html": portable_report["report_html"], "plots": str(run_root / "plots")}}
 
 
 def _refresh_manifest_artifacts(run_root: Path) -> None:
@@ -1854,8 +1904,8 @@ def _refresh_manifest_artifacts(run_root: Path) -> None:
     if not manifest_path.is_file():
         return
     manifest = _read_json(manifest_path)
-    files = [run_root / name for name in ("summary.csv", "quality.json", "gauges.csv", "report.md")]
-    for subdir in ("plots", "fields_csv", "extractions"):
+    files = [run_root / name for name in ("summary.csv", "quality.json", "gauges.csv", "regions.csv", "geometry.json", "report.md")]
+    for subdir in ("plots", "fields_csv", "extractions", "report"):
         directory = run_root / subdir
         if directory.exists():
             files.extend(path for path in directory.rglob("*") if path.is_file())
@@ -1956,6 +2006,10 @@ def _plot_standard_histories(run_root: Path) -> dict[str, Any]:
             return np.full(len(table), np.nan, dtype=float)
         return pd.to_numeric(table[column], errors="coerce").to_numpy(dtype=float)
 
+    frame_axis = not np.isfinite(values("time_s")).any()
+    history_column = "native_frame" if frame_axis else "time_s"
+    history_label = "Native frame" if frame_axis else "Time (s)"
+
     specifications: list[dict[str, Any]] = []
     for plot_name, x_column, y_column, x_label, y_label, label, source, alignment_column, unavailable_reason in (
         ("time_force.png", "time_s", "force_N", "Time (s)", "Force (N)", "Force", "force_N", "force_alignment_kind", "requires a configured force channel, confirmed clock, and in-support source samples"),
@@ -1977,12 +2031,12 @@ def _plot_standard_histories(run_root: Path) -> dict[str, Any]:
     for axis in ("x", "y"):
         column = f"dic_virtual_gauge_engineering_strain_{axis}"
         gauge_series.append({
-            "label": f"DIC virtual-gauge engineering strain ({axis})", "x": values("time_s"),
+            "label": f"DIC virtual-gauge engineering strain ({axis})", "x": values(history_column),
             "y": values(column), "source": column, "alignment_column": "quality_status",
             "alignment_values": table["quality_status"].astype(str).tolist() if "quality_status" in table else [],
         })
     specifications.append({
-        "plot": "time_dic_virtual_gauge_engineering_strain.png", "x_label": "Time (s)",
+        "plot": ("frame" if frame_axis else "time") + "_dic_virtual_gauge_engineering_strain.png", "x_label": history_label,
         "y_label": "DIC virtual-gauge engineering strain", "series": gauge_series,
         "unavailable_reason": "requires configured fixed-reference DIC virtual-gauge endpoints; no full-field mean is substituted",
     })
@@ -2123,16 +2177,19 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
             native = int(record["native_frame"])
             meta = by_native.get(native)
             if meta is None:
-                rows.append({"frame": index, "native_frame": native, "time_s": record.get("time_s"), "status": "pending", "quality_status": "unavailable", "scientific_ok": False, "engineering_strain": None, **_mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)})
+                rows.append({"frame": index, "native_frame": native, "time_s": record.get("time_s"), "status": "pending", "quality_status": "unavailable", "scientific_ok": False, "engineering_strain": None, **_mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)})
                 continue
             row = dict(meta.get("summary_row") or {})
             if row.get("status") == "failed":
                 rows.append(row)
                 continue
-            row.update(_mechanics_at(float(record["time_s"]), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment))
-            row["engineering_strain"] = None
+            row.update(_mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment))
+            row["engineering_strain"] = row.get("dic_virtual_gauge_engineering_strain")
             rows.append(row)
         output = _build_outputs(root, run_root, config, plan, records, rows, mechanics_status, str(run_state["run_fingerprint"]), input_sha, current_code, field_csv=field_csv, plots=False)
+        from .report import build_report
+        output["portable_report"] = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=True)
+        _refresh_manifest_artifacts(run_root)
         return {"run_id": run_root.name, "status": run_state.get("status"),
                 "scientific_ok": output["quality"]["scientific_ok"],
                 "numerical_quality_passed": output["quality"]["numerical_quality_passed"],
@@ -2206,15 +2263,17 @@ def extract(
             component_slug = _component_file_slug(component)
             path_csv = fields.write_rows_csv(sample_rows(), dest / f"path_{component_slug}.csv")
             output["paths_csv"] = str(path_csv)
-            times = [record.get("time_s") for record in records]
+            frame_axis = config.get("time_basis") == "frame_index"
+            times = [record["native_frame"] if frame_axis else record.get("time_s") for record in records]
             def plot_fields():
                 for record in records:
                     field, _meta = load_field(record)
                     yield field
             finite_steps = np.diff([float(value) for value in times]) if len(times) > 1 else np.asarray([])
-            max_time_gap = float(np.median(finite_steps) * 1.5) if finite_steps.size else None
-            figure_path = dest / f"position_time_{component_slug}.png"
-            fig, _ax, _artist, plot_summary = fields.plot_position_time(plot_fields(), times, path_points, component, max_distance, max_time_gap_s=max_time_gap)
+            max_time_gap = float(np.median(finite_steps) * 1.5) if finite_steps.size and not frame_axis else None
+            figure_path = dest / f"position_{'frame' if frame_axis else 'time'}_{component_slug}.png"
+            fig, _ax, _artist, plot_summary = fields.plot_position_time(plot_fields(), times, path_points, component, max_distance,
+                         max_time_gap_s=max_time_gap, axis_unit="frame" if frame_axis else "s", axis_label="Native frame" if frame_axis else "Time (s)")
             fig.savefig(figure_path, dpi=220, bbox_inches="tight")
             import matplotlib.pyplot as plt
             plt.close(fig)
@@ -2472,3 +2531,292 @@ def batch(projects: Sequence[str | os.PathLike[str]], *, max_workers: int = 2, f
         "project_count": len(results), "execution_completed": completed, "execution_failed": failed,
         "scientific_passed": passed, "attention_required": attention, "results": results,
     }
+
+
+_GAUGE_COLUMNS = ["frame_position_1based", "native_frame", "time_s", "gauge_name", "axis", "geometry_status", "status",
+                  "initial_length_px", "initial_length_mm", "current_length_px", "extension_px", "current_length_mm", "extension_mm",
+                  "a_expected_poi_count", "b_expected_poi_count", "a_valid_poi_count", "b_valid_poi_count", "endpoint_policy",
+                  "engineering_strain", "true_strain", "calibration_status", "measurement_kind", "loading_axis", "min_zncc", "reasons"]
+_REGION_COLUMNS = ["frame_position_1based", "native_frame", "time_s", "frame_status", "region_name", "component", "coordinate_system",
+                   "coordinate_unit", "bounds", "unit", "n_poi_total", "n_poi_valid", "valid_fraction", "n_displacement_valid",
+                   "n_strain_valid", "displacement_valid_fraction", "strain_valid_fraction", "min_valid_pois", "min_valid_fraction", "min_zncc",
+                   "mean", "median", "sd_sample", "min", "max", "status", "reasons", "source", "interpolation", "calibration_status",
+                   "quality_ok", "sd_interpretation", "field_support_bounds", "coverage_interpretation"]
+
+
+def _region_rows(arrays: Mapping[str, np.ndarray], metadata: Mapping[str, Any], config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    from .regions import summarize_regions
+    frame = {"frame_position_1based": metadata.get("frame_position"), "native_frame": metadata.get("native_frame"),
+             "time_s": metadata.get("time_s"), "frame_status": metadata.get("status")}
+    if arrays:
+        field = _field_from_arrays(arrays, metadata)
+        field["calibration"] = config.get("calibration")
+        rows = summarize_regions(field, config.get("regions") or [], quality_ok=metadata.get("status") == "complete")
+    else:
+        rows = [{"region_name": region["name"], "bounds": region["bounds"], "component": component,
+                 "coordinate_system": region["coordinate_system"], "coordinate_unit": "px" if region["coordinate_system"] == "image" else "mm",
+                 "unit": "dimensionless", "status": "unavailable", "reasons": ["frame_failed"], "source": "original_poi",
+                 "quality_ok": False, "interpolation": "none", "n_poi_total": 0, "n_poi_valid": 0}
+                for region in config.get("regions") or [] for component in ("Exx", "Eyy", "Exy")]
+    return [{**frame, **row} for row in rows]
+
+
+def _write_region_outputs(run_root: Path, config: Mapping[str, Any], plan: Mapping[str, Any], run_fingerprint: str) -> None:
+    rows = (row for arrays, metadata in _iter_checkpoint_rows(run_root, validate_fingerprint=run_fingerprint)
+            for row in _region_rows(arrays, metadata, config)) if config.get("regions") else iter(())
+    _csv_atomic(run_root / "regions.csv", rows, _REGION_COLUMNS)
+    _atomic_json(run_root / "geometry.json", {"schema": "straintrace.geometry/v1", "regions": config.get("regions", []),
+                 "gauges": config.get("gauges", []), "gauge_reference_geometry": plan.get("gauge_reference_geometry", []),
+                 "analysis_rectangle_candidate_px": plan.get("analysis_rectangle_candidate_px"),
+                 "reference_native_frame": plan.get("reference_native_frame"), "reference_path": plan.get("reference_path"),
+                 "mask_file": config.get("mask_file"), "calibration": config.get("calibration"),
+                 "specimen_geometry_confirmed": False, "loading_axis": None})
+
+
+def reprocess(project: str | os.PathLike[str], *, regions: Sequence[Mapping[str, Any]] | None = None,
+              gauges: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Extract new regions/gauges from saved original POIs without rerunning DIC."""
+    root = _project_root(project)
+    with _project_lock(root, purpose="reprocess"):
+        checked = verify(root)
+        if not checked.get("valid"):
+            raise AgentError("REPROCESS_SOURCE_INVALID", "current run verification failed", details=checked.get("issues"))
+        config = _read_config(root)
+        candidate = {**config, "regions": config["regions"] if regions is None else list(regions),
+                     "gauges": config["gauges"] if gauges is None else list(gauges)}
+        derived_config = _validate_project_config(candidate, root)
+        pointer, run_root = _load_run_pointer(root)
+        plan = _read_json(_plan_path(root, pointer))
+        source_manifest = _read_json(run_root / "manifest.json")
+        reference = _load_image(plan["reference_path"])
+        parameters = plan["selected_parameters"]
+        geometry = _resolve_gauge_geometry(derived_config["gauges"], plan["analysis_rectangle_candidate_px"], reference.shape,
+                     parameters["subset_size_px"], parameters["step_px"], _load_specimen_mask(config, reference.shape),
+                     calibration=config.get("calibration"))
+        derived_plan = {**plan, "gauge_reference_geometry": geometry, "source_plan_sha256": plan["plan_sha256"],
+                        "configuration_sha256": _hash_json(derived_config), "analysis_kind": "saved_field_postprocessing"}
+        derived_plan.pop("plan_sha256")
+        derived_plan["plan_sha256"] = _hash_json(derived_plan)
+        receipt = {"schema": "straintrace.reprocess/v1", "source_run": run_root.name,
+                   "run_fingerprint": source_manifest["run_fingerprint"], "source_plan_sha256": plan["plan_sha256"],
+                   "regions": derived_config["regions"], "gauges": derived_config["gauges"],
+                   "checkpoint_receipts": source_manifest["checkpoint_receipts"], "solver_recomputed": False}
+        destination = run_root / "extractions" / f"reprocess-{_hash_json(receipt)[:20]}"
+        if destination.exists():
+            saved = _read_json(destination / "reprocess.json")
+            if saved != receipt:
+                raise AgentError("REPROCESS_IDENTITY_CONFLICT", "existing extraction has a different identity")
+            from .report import verify_report
+            report_check = verify_report(destination / "report")
+            if not report_check.get("valid"):
+                raise AgentError("REPROCESS_ARTIFACT_INVALID", "saved extraction report failed verification", details=report_check)
+            saved_result = _read_json(destination / "result.json")
+            measurement_status = saved_result["status"]
+            return {"project": str(root), "run_id": run_root.name, "status": "reused" if measurement_status == "complete" else measurement_status,
+                    "output_dir": str(destination), "solver_recomputed": False,
+                    "postprocessing_quality": saved_result.get("postprocessing_quality"),
+                    "report": {"report_html": str(destination / "report/index.html"), "verification": report_check},
+                    "artifacts": {name: str(destination / name) for name in ("summary.csv", "gauges.csv", "regions.csv", "geometry.json", "reprocess.json")}}
+        # A failed extraction remains outside the published artifact tree and
+        # can never be mistaken for a completed immutable result.
+        extraction = run_root / "_postprocess_staging" / uuid.uuid4().hex
+        extraction.mkdir(parents=True)
+        with (run_root / "summary.csv").open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            summary_columns = list(reader.fieldnames or [])
+            summaries = {int(row["native_frame"]): row for row in reader}
+        gauge_rows, region_rows = [], []
+        for arrays, metadata in _iter_checkpoint_rows(run_root, validate_fingerprint=source_manifest["run_fingerprint"]):
+            frame = {"frame_position_1based": metadata.get("frame_position"), "native_frame": metadata["native_frame"], "time_s": metadata.get("time_s")}
+            field = _field_from_arrays(arrays, metadata) if arrays else {}
+            measured = _measure_gauges(field, geometry, quality_ok=metadata.get("status") == "complete")
+            gauge_rows.extend({**frame, **row} for row in measured)
+            region_rows.extend(_region_rows(arrays, metadata, derived_config))
+            summary = summaries[int(metadata["native_frame"])]
+            summary.update(_gauge_group_summary(measured))
+            summary["engineering_strain"] = summary["dic_virtual_gauge_engineering_strain"]
+        _csv_atomic(extraction / "summary.csv", summaries.values(), summary_columns)
+        _csv_atomic(extraction / "gauges.csv", gauge_rows, _GAUGE_COLUMNS)
+        _csv_atomic(extraction / "regions.csv", region_rows, _REGION_COLUMNS)
+        _atomic_json(extraction / "reprocess.json", receipt)
+        _atomic_json(extraction / "geometry.json", {"regions": derived_config["regions"], "gauges": derived_config["gauges"], "gauge_reference_geometry": geometry})
+        complete = source_manifest.get("numerical_quality_passed") is True and all(row.get("status") == "valid" for row in (*gauge_rows, *region_rows))
+        def measurement_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+            valid = sum(row.get("status") == "valid" for row in rows)
+            return {"total": len(rows), "valid": valid, "unavailable": len(rows) - valid}
+        postprocessing_quality = {
+            "schema": "straintrace.postprocessing-quality/v1",
+            "status": "complete" if complete else "attention_required",
+            "region_measurements": measurement_counts(region_rows),
+            "gauge_measurements": measurement_counts(gauge_rows),
+            "source_dic_numerical_quality_passed": source_manifest.get("numerical_quality_passed") is True,
+            "source_run_id": run_root.name,
+        }
+        # Keep the source DIC gate distinct from this extraction's support gate.
+        # The report carries quality.json, so this status survives relocation.
+        derived_quality = {**_read_json(run_root / "quality.json"), "postprocessing_quality": postprocessing_quality}
+        _atomic_json(extraction / "quality.json", derived_quality)
+        _atomic_json(extraction / "result.json", {"status": postprocessing_quality["status"], "solver_recomputed": False,
+                                                  "postprocessing_quality": postprocessing_quality})
+        manifest = {**source_manifest, "artifacts": {path.name: _sha256(path) for path in extraction.iterdir() if path.is_file()},
+                    "postprocessing": receipt, "configuration_sha256": _hash_json(derived_config),
+                    "postprocessing_quality": postprocessing_quality,
+                    "source_configuration_sha256": source_manifest["configuration_sha256"], "plan_sha256": derived_plan["plan_sha256"]}
+        _atomic_json(extraction / "manifest.json", manifest)
+        from .report import build_report
+        portable_report = build_report(extraction, config=derived_config, plan=derived_plan, regions_csv=extraction / "regions.csv")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(extraction, destination)
+        def relocate(value: Any) -> Any:
+            if isinstance(value, str) and value.startswith(str(extraction)):
+                return str(destination) + value[len(str(extraction)):]
+            if isinstance(value, dict):
+                return {key: relocate(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [relocate(item) for item in value]
+            return value
+        portable_report = relocate(portable_report)
+        _refresh_manifest_artifacts(run_root)
+        return {"project": str(root), "run_id": run_root.name, "status": "complete" if complete else "attention_required",
+                "output_dir": str(destination), "solver_recomputed": False, "report": portable_report,
+                "postprocessing_quality": postprocessing_quality,
+                "artifacts": {name: str(destination / name) for name in ("summary.csv", "gauges.csv", "regions.csv", "geometry.json", "reprocess.json")}}
+
+
+def read_project_config(project: str | os.PathLike[str]) -> dict[str, Any]:
+    """Return the validated, editable configuration without mutating the project."""
+    return _read_config(_project_root(project))
+
+
+def update_project(project: str | os.PathLike[str], changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate top-level replacements, archive the old state and invalidate plans."""
+    root = _project_root(project)
+    if not isinstance(changes, Mapping):
+        raise AgentError("CONFIG_TYPE_ERROR", "changes must be an object", path="$.changes")
+    immutable = {"schema", "project_id", "image_dir", "mask_sha256"}
+    if immutable.intersection(changes):
+        raise AgentError("CONFIG_IMMUTABLE_FIELD", f"cannot update {sorted(immutable.intersection(changes))[0]}", path="$.changes")
+    with _project_lock(root, purpose="update"):
+        previous = _read_config(root)
+        candidate = {**previous, **dict(changes)}
+        if "mask_file" in changes:
+            candidate["mask_sha256"] = _sha256(Path(str(candidate["mask_file"]))) if candidate.get("mask_file") else None
+        validated = _validate_project_config(candidate, root)
+        if _hash_json(validated) == _hash_json(previous):
+            return {"project": str(root), "status": "unchanged", "configuration_sha256": _hash_json(previous)}
+        records = _scan_inventory(validated)
+        fingerprint = _inventory_fingerprint(validated, records)
+        pointer = _current_pointer(root)
+        revision = root / "configuration_history" / f"{time.time_ns()}-{_hash_json(previous)[:12]}.json"
+        _atomic_json(revision, {"schema": "straintrace.configuration-revision/v1", "config": previous,
+                                "pointer": pointer, "replacement_sha256": _hash_json(validated)})
+        # The old run is retained. A crash between these writes cannot make it
+        # current: all execution/export boundaries compare configuration hashes.
+        _atomic_json(root / "project.json", validated)
+        _record_inventory(root, records, fingerprint)
+        pointer.update(current_plan=None, current_run=None)
+        _atomic_json(root / "CURRENT.json", pointer)
+        return {"project": str(root), "status": "updated", "configuration_sha256": _hash_json(validated),
+                "previous_configuration": str(revision), "next_action": "analyze", "previous_runs_preserved": True}
+
+
+def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "full_field", options: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    from .discovery import discover_experiment as discover
+    return discover(folder, objective=objective, options=options)
+
+
+def _config_init_options(config: Mapping[str, Any]) -> dict[str, Any]:
+    options = {key: value for key, value in config.items() if key not in {"schema", "project_id", "loads", "mask_sha256"}}
+    if config.get("loads"):
+        names = {"path": "loads_csv", "time_column": "load_time_column", "force_column": "load_force_column",
+                 "time_unit": "load_time_unit", "time_offset_s": "load_time_offset_s"}
+        for key, value in config["loads"].items():
+            if not key.endswith("_basis"):
+                options[names.get(key, key)] = value
+        for basis, unit in (("time_unit_basis", "load_time_unit"), ("force_unit_basis", "force_unit"), ("displacement_unit_basis", "displacement_unit")):
+            if config["loads"].get(basis) == "canonical_column_name":
+                options[unit] = None
+    return options
+
+
+def auto_analyze(folder: str | os.PathLike[str], project: str | os.PathLike[str], *, objective: str = "full_field",
+                 options: Mapping[str, Any] | None = None, progress: Callable[[dict[str, Any]], None] | None = None,
+                 field_csv: bool = False, make_plots: bool = True) -> dict[str, Any]:
+    """Discover one sequence and execute the established reproducible workflow."""
+    root = _project_root(project)
+    existing = _read_config(root) if (root / "project.json").is_file() else None
+    if options is not None and not isinstance(options, Mapping):
+        raise AgentError("CONFIG_TYPE_ERROR", "options must be an object", path="$.options")
+    effective_options = {**(_config_init_options(existing) if existing else {}), **dict(options or {})}
+    discovery = discover_experiment(folder, objective=objective, options=effective_options)
+    result: dict[str, Any] = {"project": str(root), "discovery": discovery, "status": discovery["status"],
+                             "scientific_acceptance": "not_assessed"}
+    if discovery["status"] != "ready":
+        return result
+    if existing:
+        import inspect
+        binding = inspect.signature(init_project).bind(root, **discovery["init_options"])
+        binding.apply_defaults()
+        args = dict(binding.arguments)
+        args.pop("project")
+        candidate = _config_from_arguments(**args)
+        candidate["project_id"] = existing["project_id"]
+        if _hash_json(candidate) != _hash_json(existing):
+            result.update(status="needs_input", required_inputs=[{"field": "project", "reason": "Supplied options change the existing configuration. Apply update_project explicitly or select a new project."}])
+            return result
+    else:
+        result["initialization"] = init_project(root, **discovery["init_options"])
+    _atomic_json(root / "discovery.json", discovery)
+    config = _read_config(root)
+    try:
+        plan = _current_plan_if_fresh(root, config) or plan_project(root, progress=progress)
+    except AgentError as exc:
+        if exc.code not in {"TEXTURE_INSUFFICIENT", "ROI_TOO_SMALL", "IMAGE_TOO_SMALL", "ROI_OUTSIDE_IMAGE", "REFERENCE_FRAME_UNREADABLE"}:
+            raise
+        result.update(status="review_required", error=exc.as_dict())
+        return result
+    result["plan"] = plan
+    if plan.get("status") != "ready":
+        result["status"] = "review_required"
+        return result
+    result["run"] = run(root, progress=progress, field_csv=field_csv, make_plots=make_plots)
+    result["report"] = report(root, include_checkpoints=True)
+    result["verification"] = verify(root)
+    complete = result["run"].get("status") == "complete" and result["run"].get("numerical_quality_passed") is True and result["verification"].get("valid") is True
+    result["status"] = "complete" if complete else "attention_required"
+    if config.get("regions"):
+        region_table = pd.read_csv(Path(result["run"]["run_dir"]) / "regions.csv")
+        if region_table.empty or not region_table["status"].eq("valid").all():
+            result.update(status="attention_required", region_issue="One or more requested regions lack valid measurement support.")
+    if discovery["objective"] in {"virtual_gauge", "stress_strain"}:
+        run_root = Path(result["run"]["run_dir"])
+        table = pd.read_csv(run_root / "summary.csv")
+        gauge_table = pd.read_csv(run_root / "gauges.csv")
+        expected = {(int(frame), gauge["name"]) for frame in table["native_frame"] for gauge in config["gauges"]}
+        actual = list(zip(gauge_table["native_frame"].astype(int), gauge_table["gauge_name"]))
+        available = (len(actual) == len(expected) and set(actual) == expected and gauge_table["status"].eq("valid").all()
+                     and np.isfinite(pd.to_numeric(gauge_table["engineering_strain"], errors="coerce")).all())
+        if discovery["objective"] == "stress_strain":
+            available = available and "stress_MPa" in table and np.isfinite(pd.to_numeric(table["stress_MPa"], errors="coerce")).all()
+        if not available:
+            result.update(status="attention_required", objective_issue="One or more frames lack the requested supported gauge or stress measurement.")
+    _atomic_json(root / "automation.json", {"schema": "straintrace.automation/v1", "objective": discovery["objective"],
+                                           "status": result["status"], "run_id": result["run"].get("run_id"),
+                                           "verification_valid": result["verification"].get("valid"), "scientific_acceptance": "not_assessed"})
+    return result
+
+
+def report(project: str | os.PathLike[str], *, include_checkpoints: bool = True) -> dict[str, Any]:
+    """Rebuild the portable report package from a verified current run."""
+    root = _project_root(project)
+    with _project_lock(root, purpose="report"):
+        checked = verify(root)
+        if not checked.get("valid"):
+            raise AgentError("REPORT_SOURCE_INVALID", "current run verification failed", details=checked.get("issues"))
+        config = _read_config(root)
+        pointer, run_root = _load_run_pointer(root)
+        plan = _read_json(_plan_path(root, pointer))
+        from .report import build_report
+        result = build_report(run_root, config=config, plan=plan, regions_csv=run_root / "regions.csv", include_checkpoints=include_checkpoints)
+        _refresh_manifest_artifacts(run_root)
+        return result

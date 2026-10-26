@@ -12,6 +12,8 @@ A dual-mode desktop and headless workstation for image-based strain analysis. Ch
 
 **Agent 自动分析：**无 GUI 创建样品项目，自动检查纹理/ROI候选、固定参考二维 DIC、逐帧断点续算、载荷同步、虚拟标距、质量复核与可验证导出。见[Agent 工作流](docs/AGENT_WORKFLOW.md)与[命令和 Python 接口](docs/AGENT_INTERFACE.md)。
 
+**实验文件夹自动分析与多区域比较：**新增文件夹发现、目标检查、具名 ROI、多根可调整虚拟引伸计、保存场的局部重新分析，以及带几何位置图和独立校验脚本的离线报告包。桌面可从“自动分析”入口操作；见[完整流程、坐标约定与交付说明](docs/AUTONOMOUS_ANALYSIS.md)。
+
 [Windows / 源码启动](#windows-quick-start) · [桌面工作流](docs/UI_WORKBENCH.md) · [二维验证与参数](docs/2D_DIC_VALIDATION.md) · [输出约定](#full-field-output-contract) · [引用](#cite)
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465) [![MIT](https://img.shields.io/badge/License-MIT-455A64)](LICENSE.txt)

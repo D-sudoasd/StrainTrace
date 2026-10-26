@@ -2954,19 +2954,39 @@ def _refine_subset_ic(reference, deformed, x, y, subset_size, p0=None,
     prepared = _prepared or _prepare_dic_images(_as_float_image(reference), _as_float_image(deformed))
     f_image, height, width = prepared["reference"], *prepared["shape"]
     half = _odd_subset_size(subset_size) // 2
-    ix, iy = int(round(x)), int(round(y))
-    if ix-half < 0 or iy-half < 0 or ix+half >= width or iy+half >= height:
+    x, y = float(x), float(y)
+    if not np.isfinite([x, y]).all():
         return None
-    ys, xs = slice(iy-half, iy+half+1), slice(ix-half, ix+half+1)
-    f = f_image[ys, xs].ravel()
+    if x-half < 0 or y-half < 0 or x+half > width-1 or y+half > height-1:
+        return None
+    yy, xx = np.mgrid[-half:half+1, -half:half+1].astype(float)
+    xf, yf = xx.ravel(), yy.ravel()
+    ix, iy = int(round(x)), int(round(y))
+    if x == ix and y == iy:
+        ys, xs = slice(iy-half, iy+half+1), slice(ix-half, ix+half+1)
+        f = f_image[ys, xs].ravel()
+        fx, fy = prepared["fx"][ys, xs].ravel(), prepared["fy"][ys, xs].ravel()
+    else:
+        # Pyramid POIs need not land on integer pixels. Reference and target
+        # samples must share the same center or its fractional part becomes a
+        # spurious displacement. Cache only when fractional centers are used.
+        if x-half < .01 or y-half < .01 or x+half > width-1.01 or y+half > height-1.01:
+            return None
+        if "reference_coefficients" not in prepared:
+            prepared["reference_coefficients"] = ndimage.spline_filter(f_image, order=5, mode="mirror")
+        def sample_reference(dx, dy):
+            return ndimage.map_coordinates(
+                prepared["reference_coefficients"], [y+yf+dy, x+xf+dx],
+                order=5, mode="mirror", prefilter=False,
+            )
+        f = sample_reference(0, 0)
+        fx = (sample_reference(.01, 0)-sample_reference(-.01, 0))/.02
+        fy = (sample_reference(0, .01)-sample_reference(0, -.01))/.02
     f = f - f.mean()
     f_norm = np.linalg.norm(f)
     if not np.isfinite(f_norm) or f_norm < 1e-8:
         return None
     fn = f / f_norm
-    yy, xx = np.mgrid[-half:half+1, -half:half+1].astype(float)
-    xf, yf = xx.ravel(), yy.ravel()
-    fx, fy = prepared["fx"][ys, xs].ravel(), prepared["fy"][ys, xs].ravel()
     sd = np.column_stack([fx, fx*xf, fx*yf, fy, fy*xf, fy*yf]) / f_norm
     sd -= sd.mean(axis=0)
     sd -= fn[:, None] * (fn @ sd)[None, :]
@@ -3084,10 +3104,19 @@ def refine_subset_iclm(reference, deformed, x, y, subset_size, p0=None, max_iter
     )
 
 
-def _nan_gaussian(arr, sigma):
+def _nan_gaussian(arr, sigma, *, coordinates=None):
+    """Gaussian-weighted local linear smoothing on connected finite support.
+
+    Fitting the intercept preserves affine displacement at truncated specimen
+    boundaries; a normalized weighted mean would bias rigid rotations there.
+    """
     if sigma is None or float(sigma) <= 0:
         return arr
     values = np.asarray(arr, dtype=np.float64)
+    if coordinates is None:
+        Y, X = np.indices(values.shape, dtype=float)
+    else:
+        X, Y = coordinates
     finite = np.isfinite(values)
     out = np.full(values.shape, np.nan)
     radius = max(1, int(np.ceil(3*float(sigma))))
@@ -3100,8 +3129,17 @@ def _nan_gaussian(arr, sigma):
         labels, _ = ndimage.label(finite[i0:i1, j0:j1])
         support = labels == labels[i-i0, j-j0]
         yy, xx = np.mgrid[i0:i1, j0:j1]
-        weights = np.exp(-((xx-j)**2+(yy-i)**2)/(2*float(sigma)**2))*support
-        out[i, j] = np.sum(weights*np.nan_to_num(values[i0:i1,j0:j1]))/weights.sum()
+        weights = np.exp(-((xx-j)**2+(yy-i)**2)/(2*float(sigma)**2))[support]
+        dx = X[i0:i1, j0:j1][support]-X[i, j]
+        dy = Y[i0:i1, j0:j1][support]-Y[i, j]
+        scale = max(np.max(np.abs(dx)), np.max(np.abs(dy)), 1.0)
+        design = np.column_stack([np.ones(dx.size), dx/scale, dy/scale])
+        root_weights = np.sqrt(weights)
+        data = values[i0:i1, j0:j1][support]-values[i, j]
+        coefficients, _, rank, _ = np.linalg.lstsq(
+            design*root_weights[:, None], data*root_weights, rcond=None,
+        )
+        out[i, j] = values[i, j]+coefficients[0] if rank == 3 else values[i, j]
     return out
 
 
@@ -3132,8 +3170,12 @@ def compute_strain_fields(
     if degree not in (1, 2):
         raise ValueError("strain polynomial degree must be 1 or 2")
     if smooth_sigma and float(smooth_sigma) > 0:
-        U = _nan_gaussian(U, smooth_sigma)
-        V = _nan_gaussian(V, smooth_sigma)
+        # A displacement vector needs both components and a reference position.
+        # A missing component must also interrupt the other component's filter.
+        supported = np.isfinite(X) & np.isfinite(Y) & np.isfinite(U) & np.isfinite(V)
+        U[~supported] = V[~supported] = np.nan
+        U = _nan_gaussian(U, smooth_sigma, coordinates=(X, Y))
+        V = _nan_gaussian(V, smooth_sigma, coordinates=(X, Y))
 
     ny, nx = X.shape
     win = _odd_window_size(window)

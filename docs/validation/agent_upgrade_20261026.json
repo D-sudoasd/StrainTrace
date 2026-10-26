@@ -1,0 +1,361 @@
+{
+  "schema": "straintrace.upgrade-delivery/v1",
+  "date": "2026-10-26",
+  "base_commit": "5f812ef9a0a0f7ce2391400a889c25ad15dae153",
+  "scope": "Local development build; synthetic regression and public imagery workflow checks, not experimental uncertainty calibration.",
+  "tests": {
+    "full_regression": {
+      "passed": 517,
+      "skipped": 1,
+      "seconds": 330.83
+    },
+    "skipped_schema_check_rerun": {
+      "passed": 1,
+      "jsonschema": "4.26.0",
+      "isolated_dependency_target": true
+    },
+    "final_affected_agent_regression": {
+      "passed": 95,
+      "seconds": 62.42
+    },
+    "current_collected_tests": 525
+  },
+  "cli_validation": {
+    "passed": true,
+    "command_count": 14,
+    "input_files_unchanged": true,
+    "commands": [
+      {
+        "label": "discover",
+        "exit_code": 0,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_initial",
+        "exit_code": 4,
+        "frame_complete_events": 5,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "verify_initial",
+        "exit_code": 0,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_reused",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 6
+      },
+      {
+        "label": "reprocess",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "report",
+        "exit_code": 0,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "verify_relocated",
+        "exit_code": 0,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "verify_report_tamper",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "verify_checkpoint_tamper",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_repair",
+        "exit_code": 4,
+        "frame_complete_events": 1,
+        "frame_reused_events": 5
+      },
+      {
+        "label": "update",
+        "exit_code": 0,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_unknown_calibration",
+        "exit_code": 4,
+        "frame_complete_events": 5,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_missing_stress_metadata",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      },
+      {
+        "label": "auto_frame_index",
+        "exit_code": 4,
+        "frame_complete_events": 0,
+        "frame_reused_events": 0
+      }
+    ]
+  },
+  "analytic_core_cases": [
+    {
+      "case": "translation_multiscale",
+      "seconds": 0.322576200007461,
+      "F": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "translation_px": [
+        1.35,
+        -0.72
+      ],
+      "displacement_rmse_px": 1.3204836639250288e-05,
+      "displacement_max_error_px": 7.42370133415271e-05,
+      "valid_fraction": 1.0,
+      "strain_valid_fraction": 1.0,
+      "expected_green_lagrange": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "expected_infinitesimal": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "Exx_rmse": 1.3609760174928832e-07,
+      "Exx_max_error": 8.185989190945264e-07,
+      "Eyy_rmse": 2.2404062336232729e-07,
+      "Eyy_max_error": 6.454380190312747e-07,
+      "Exy_rmse": 1.4023041835071551e-07,
+      "Exy_max_error": 4.5244836584513655e-07,
+      "exx_rmse": 1.3609762358683437e-07,
+      "exx_max_error": 8.185992571636323e-07,
+      "eyy_rmse": 2.2404065184872e-07,
+      "eyy_max_error": 6.45438279162159e-07,
+      "exy_rmse": 1.4023042215247096e-07,
+      "exy_max_error": 4.5244846512585416e-07
+    },
+    {
+      "case": "rotation_smoothed",
+      "seconds": 0.1528628999949433,
+      "F": [
+        [
+          0.9959527330119943,
+          -0.08987854919801104
+        ],
+        [
+          0.08987854919801104,
+          0.9959527330119943
+        ]
+      ],
+      "translation_px": [
+        0.23,
+        -0.19
+      ],
+      "displacement_rmse_px": 4.105542777857796e-06,
+      "displacement_max_error_px": 1.3328014166091862e-05,
+      "valid_fraction": 1.0,
+      "strain_valid_fraction": 1.0,
+      "expected_green_lagrange": [
+        [
+          0.0,
+          2.9634539109419423e-18
+        ],
+        [
+          2.9634539109419423e-18,
+          0.0
+        ]
+      ],
+      "expected_infinitesimal": [
+        [
+          -0.004047266988005727,
+          0.0
+        ],
+        [
+          0.0,
+          -0.004047266988005727
+        ]
+      ],
+      "Exx_rmse": 2.118806660452323e-07,
+      "Exx_max_error": 6.598931864276736e-07,
+      "Eyy_rmse": 3.4005968132781133e-07,
+      "Eyy_max_error": 1.0342477706482e-06,
+      "Exy_rmse": 1.7279963060423907e-07,
+      "Exy_max_error": 4.586408469427697e-07,
+      "exx_rmse": 2.2801284709403177e-07,
+      "exx_max_error": 6.979028367324822e-07,
+      "eyy_rmse": 3.320308823339121e-07,
+      "eyy_max_error": 1.0017816497722917e-06,
+      "exy_rmse": 1.6830739059370184e-07,
+      "exy_max_error": 4.4664940679339793e-07
+    },
+    {
+      "case": "affine_extension",
+      "seconds": 0.25929489999543875,
+      "F": [
+        [
+          1.018,
+          0.004
+        ],
+        [
+          -0.002,
+          0.994
+        ]
+      ],
+      "translation_px": [
+        0.31,
+        0.24
+      ],
+      "displacement_rmse_px": 6.9004406689282166e-06,
+      "displacement_max_error_px": 2.2329750127281223e-05,
+      "valid_fraction": 1.0,
+      "strain_valid_fraction": 1.0,
+      "expected_green_lagrange": [
+        [
+          0.018163999999999958,
+          0.001042
+        ],
+        [
+          0.001042,
+          -0.005973999999999979
+        ]
+      ],
+      "expected_infinitesimal": [
+        [
+          0.018000000000000016,
+          0.001
+        ],
+        [
+          0.001,
+          -0.006000000000000005
+        ]
+      ],
+      "Exx_rmse": 2.1755700091508005e-07,
+      "Exx_max_error": 9.474986054636148e-07,
+      "Eyy_rmse": 3.3581636488013144e-07,
+      "Eyy_max_error": 1.0289008134378719e-06,
+      "Exy_rmse": 2.241809924583554e-07,
+      "Exy_max_error": 9.323193033612415e-07,
+      "exx_rmse": 2.1339226065890134e-07,
+      "exx_max_error": 9.26996939494551e-07,
+      "eyy_rmse": 3.378179203702483e-07,
+      "eyy_max_error": 1.0360441479095525e-06,
+      "exy_rmse": 2.2550629219148853e-07,
+      "exy_max_error": 9.405020175788214e-07
+    }
+  ],
+  "nonuniform_field_check": null,
+  "public_images": {
+    "source_url": "https://ncorr.com/download/sample12.zip",
+    "selected_native_frames": [
+      0,
+      4,
+      8
+    ],
+    "time_basis": "frame_index",
+    "source_status": "complete",
+    "source_verification_valid": true,
+    "frame_8_region_Eyy": [
+      {
+        "region_name": "left_of_hole",
+        "n_poi_valid": "85",
+        "mean": "0.006487931736573052",
+        "status": "valid"
+      },
+      {
+        "region_name": "right_of_hole",
+        "n_poi_valid": "88",
+        "mean": "0.006655416008484908",
+        "status": "valid"
+      },
+      {
+        "region_name": "upper_section",
+        "n_poi_valid": "112",
+        "mean": "0.005101859439176883",
+        "status": "valid"
+      }
+    ],
+    "input_sha256": {
+      "ohtcfrp_00.tif": "590a69e5d5e3baf14d6f5084d367a4df413c9cf064f72e7208fd3584e3942412",
+      "ohtcfrp_04.tif": "75345cd6b95b0dce01934ac98db871b6999c1de79ea1d588d9ed3eade380cd2b",
+      "ohtcfrp_08.tif": "f61d51bf408bfed5181f72e3f4a9a2abcebaf60d14ed9411f12380a3233ae093",
+      "roi.tif": "f4aa4584fda88847a45d8b6fa55fab810c38d524677b0881f6244effa8aef63e"
+    }
+  },
+  "frozen": {
+    "pyinstaller": "6.19.0",
+    "python": "3.13.0",
+    "smoke": "passed",
+    "auto_status": "complete",
+    "verification_valid": true,
+    "source_frozen_array_comparisons": 42,
+    "max_absolute_difference": 0.0,
+    "invalid_region_reprocess_status": "attention_required",
+    "postprocessing_quality": {
+      "gauge_measurements": {
+        "total": 6,
+        "unavailable": 0,
+        "valid": 6
+      },
+      "region_measurements": {
+        "total": 9,
+        "unavailable": 9,
+        "valid": 0
+      },
+      "schema": "straintrace.postprocessing-quality/v1",
+      "source_dic_numerical_quality_passed": true,
+      "source_run_id": "run-f970b7b3d8eab5bca285",
+      "status": "attention_required"
+    }
+  },
+  "source_sha256": {
+    "ezdic_core.py": "7ee6de2f9d5d4aab43ce90de65a23cc516b4361d32b4c0c2025fa621777afcb6",
+    "ezdic_cli.py": "4a7284d41dda4a0d04e85fb0d8c911277ee37a9bb826df253017ca1bb3bd88d5",
+    "straintrace_agent/__init__.py": "a10a3373d124429189c28950edb46bd4a30239b289369a2afac78eb37df59894",
+    "straintrace_agent/api.py": "070c3bc0753cd4220e786a19f1c9dcebfa2d16ca818242f213eb0a33df6ad0c3",
+    "straintrace_agent/cli.py": "7998c8fad8bf4ede3f9092b6a849cd1fdbee216186564fb31229421af2abc566",
+    "straintrace_agent/discovery.py": "b883a0cabe9e1e2dcd4a800ce646183e414471083b3c333e1668b8716264a577",
+    "straintrace_agent/fields.py": "f8c4bb80f0ab3945fd08ac6d7d2d4fdebc478e2308169bfdf11028961276fa39",
+    "straintrace_agent/gui.py": "fed5f6be9be03e11be67a28c9c588690a4118a75bb18b038cf4bf15aefaa8187",
+    "straintrace_agent/mechanics.py": "333b794ea0ad5b8aa384ed7f7bf0278129b080cfaf3806f7418e3c5ef16aa776",
+    "straintrace_agent/regions.py": "ef9d88d778eeec1d8830bfa065ef41b38e4ea39b1e43ee3d668ad989dfdb2c86",
+    "straintrace_agent/report.py": "9bdf809786287eccf7a5f810d0d9d8b05ea955e13b0d762dec1fbc20a2218112",
+    "dic_virtual_extensometer_gui_v7_multi_roi_range.py": "14b50bf6cd3bc09ab6a7b16975289bff31c30b966f67395c241bdeaaf2bd84bd"
+  },
+  "desktop_validation": {
+    "real_Tk_workflow_tests": 7,
+    "visible_short_window_checked": true,
+    "native_input_limitation": "Later native input access returned GetCursorPos access denied; no claim of a complete manual frozen-GUI acceptance run."
+  }
+}

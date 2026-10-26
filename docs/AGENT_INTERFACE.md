@@ -29,6 +29,14 @@ Python 源码 checkout 安装后可从 straintrace_agent 导入 api。CLI 是跨
 | batch | 多个独立项目并行分析 | 每个 --project 重复一次；max-workers 限制为 1 到 8 |
 | cancel | 写入当前项目的取消请求 | DIC 在下一进度回调边界停止 |
 | recover-lock | 恢复一个确认死亡的本机锁进程 | 必须提供锁记录 PID；活跃/远程/未知 PID 被拒绝 |
+| discover | 发现实验目录、独立图像序列和实验元数据 | `--folder`、`--objective`、可选 `--options-json`；返回结构化所需输入 |
+| auto | 发现、计划、计算、生成完整报告包并核验 | `--folder`、`--project`；保存并复用同一输入和配置的结果 |
+| update | 校验并保存项目配置修订 | `--changes-json` 使用项目配置字段；保留历史配置和运行目录 |
+| reprocess | 使用保存场重新计算多个 ROI 和标距 | 独立后处理目录；不重跑相关、不覆盖原检查点 |
+| report | 生成离线 HTML 报告 | `--include-checkpoints` 将原始 NPZ/JSON 纳入可搬移包 |
+| verify-report | 脱离项目目录校验报告包 | `--report` 指向完整报告目录；不重新访问外部原始图像 |
+
+自动入口、空间定义与报告包的完整说明见[实验文件夹分析指南](AUTONOMOUS_ANALYSIS.md)。
 
 查看各子命令的精确 flags 可运行 agent <command> --help。当前 init 关键参数：
 
