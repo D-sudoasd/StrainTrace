@@ -665,10 +665,12 @@ def test_dropdown_hover_explains_candidate_without_selecting_it(workbench):
     root_y = int(app.root.tk.call("winfo", "rooty", listbox)) + y
     # Tk routes synthetic pointer events to the grab window even when a
     # listbox child is named. Release the grab only while injecting motion.
+    # Move the actual pointer too: a tooltip covering its old screen position
+    # otherwise generates a real Leave event unrelated to the hovered row.
     popup = app.root.tk.call("winfo", "toplevel", listbox)
     app.root.tk.call("grab", "release", popup)
     app.root.tk.call("event", "generate", listbox, "<Motion>", "-x", x, "-y", y,
-                     "-rootx", root_x, "-rooty", root_y)
+                     "-rootx", root_x, "-rooty", root_y, "-warp", 1)
     wait_for(app, lambda: tip.tip_window is not None and str(values[target]) in tip.shown_text)
     assert "直线距离" in tip.shown_text
     assert box.get() == original
@@ -758,6 +760,7 @@ def test_notebook_tabs_and_group_headers_explain_their_specific_meaning(workbenc
     app.control_notebook.select(app.settings_page)
     app.root.update()
     tree = app.group_tree
+    general_help = tree._tooltip_text
     explanations = {}
     for x in range(0, tree.winfo_width(), 5):
         event = tk.Event()
@@ -766,6 +769,10 @@ def test_notebook_tabs_and_group_headers_explain_their_specific_meaning(workbenc
             explanations[tree.identify_column(x)] = tree._tooltip.resolve_text(event)
     assert "初始间距" in explanations["#4"]
     assert "左右" in explanations["#3"]
+    assert "结果文件名" in explanations["#1"]
+    # Header/hover context must not replace the whole-control explanation.
+    assert tree._tooltip_text == general_help
+    assert "双击载入编辑" in tree._tooltip.resolve_text()
 
 
 

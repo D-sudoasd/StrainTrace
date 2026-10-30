@@ -42,10 +42,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _json(path: Path) -> Any:
+def _json(path: Path) -> dict[str, Any]:
     def invalid(value: str) -> None:
         raise ValueError(f"Nonfinite JSON token: {value}")
-    return json.loads(path.read_text(encoding="utf-8"), parse_constant=invalid)
+    value = json.loads(path.read_text(encoding="utf-8"), parse_constant=invalid)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object: {path.name}")
+    return value
 
 
 def _json_sha256(value: Mapping[str, Any]) -> str:
@@ -566,24 +569,47 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
     source = _json(run_root / "manifest.json")
     _validate_snapshot_binding(config, plan, source)
     source["artifacts"] = {key: value for key, value in source.get("artifacts", {}).items() if not key.startswith("report/")}
-    quality = _json(run_root / "quality.json") if (run_root / "quality.json").is_file() else {}
+    artifacts = source["artifacts"]
+    quality_path = _safe_file(run_root, "quality.json")
+    if "quality.json" in artifacts and not quality_path.is_file():
+        raise ValueError("Registered report input is missing: quality.json")
+    if quality_path.is_file():
+        quality_copy = stage / "data" / "quality.json"
+        quality_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(quality_path, quality_copy)
+        if "quality.json" in artifacts and _sha256(quality_copy) != artifacts["quality.json"]:
+            raise ValueError("Saved quality disagrees with source manifest: quality.json")
+        quality = _json(quality_copy)
+    else:
+        quality = {}
+        _write_json(stage / "data" / "quality.json", quality)
     tables = {}
+    table_sources = {}
     for name, source_path in (("summary", run_root / "summary.csv"), ("gauges", run_root / "gauges.csv"), ("regions", regions_csv or run_root / "regions.csv")):
+        source_path = source_path.absolute()
+        if not source_path.is_relative_to(run_root):
+            raise ValueError("Report CSV must be a manifest-registered file in the run directory")
+        source_relative = source_path.relative_to(run_root).as_posix()
+        source_path = _safe_file(run_root, source_relative)
         if not source_path.is_file():
+            if source_relative in artifacts or (name in {"gauges", "regions"} and config.get(name)):
+                raise ValueError(f"Registered report input is missing: {source_relative}")
             continue
+        expected = artifacts.get(source_relative)
+        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            raise ValueError(f"Report CSV is not registered in source manifest: {source_relative}")
         relative = f"data/{name}.csv"
         destination = stage / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, destination)
-        expected = source.get("artifacts", {}).get(source_path.relative_to(run_root).as_posix()) if source_path.is_relative_to(run_root) else None
-        if expected and _sha256(destination) != expected:
+        if _sha256(destination) != expected:
             raise ValueError(f"Saved CSV disagrees with source manifest: {source_path.name}")
         tables[name] = _read_table(destination, relative)
+        table_sources[name] = source_relative
     if "summary" not in tables:
         raise ValueError("Report requires saved summary.csv")
     for name, value in (("project", dict(config)), ("plan", dict(plan)), ("source_manifest", source)):
         _write_json(stage / "provenance" / f"{name}.json", value)
-    _write_json(stage / "data" / "quality.json", quality)
     geometry = _geometry(config, plan)
     warnings = _preview(stage, geometry, source)
     _write_json(stage / "data" / "geometry.json", geometry)
@@ -621,7 +647,7 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
     data = {"schema": REPORT_SCHEMA, "project_id": config.get("project_id", source.get("project_id", "StrainTrace")),
             "sequence_name": PurePosixPath(str(config.get("image_dir") or "").replace("\\", "/").rstrip("/")).name or "未命名图像序列",
             "mechanics_configuration": config.get("loads"),
-            "tables": tables, "frames": frames, "curves": _curves(tables, frames, time_basis), "geometry": geometry, "quality": quality,
+            "tables": tables, "table_sources": table_sources, "frames": frames, "curves": _curves(tables, frames, time_basis), "geometry": geometry, "quality": quality,
             "selected_parameters": plan.get("selected_parameters") or {}, "source_manifest": source, "warnings": warnings,
             "include_checkpoints": include_checkpoints, "checkpoint_files": source_files, "included_array_count": included_array_count, "time_basis": time_basis,
             "field_maps": field_maps,
@@ -677,6 +703,8 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{output.name}-build-", dir=output.parent))
     backup = None
+    preserve_backup = False
+    failure = None
     try:
         _build(stage, root, config, plan, Path(regions_csv) if regions_csv else None, include_checkpoints)
         verification = verify_report(stage)
@@ -688,9 +716,20 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
             os.replace(output, backup)
         try:
             os.replace(stage, output)
-        except BaseException:
+        except BaseException as publication_error:
             if backup is not None:
-                os.replace(backup, output)
+                try:
+                    os.replace(backup, output)
+                except BaseException as restore_error:
+                    # An open Windows handle can block both publication and
+                    # restoration. The backup is then the only previous copy;
+                    # cleanup must leave it available for explicit recovery.
+                    preserve_backup = True
+                    publication_error.add_note(
+                        f"Previous report retained at {backup}; automatic restoration failed: "
+                        f"{type(restore_error).__name__}: {restore_error}"
+                    )
+                    raise publication_error from restore_error
                 backup = None
             raise
         verification["path"] = str(output)
@@ -698,11 +737,23 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
                 "report_manifest": str(output / "manifest.json"), "verification": verification,
                 "artifacts": {"report_html": str(output / "index.html"), "report_package": str(output),
                               "report_manifest": str(output / "manifest.json")}}
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
+        for leftover in (stage, None if preserve_backup else backup):
+            if leftover is None:
+                continue
+            try:
+                if leftover.exists():
+                    shutil.rmtree(leftover)
+            except OSError as cleanup_error:
+                if failure is None:
+                    raise
+                failure.add_note(
+                    f"Report cleanup could not remove {leftover}: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
 
 
 def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
@@ -743,8 +794,30 @@ def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
         source = _json(root / "provenance/source_manifest.json")
         if data["source_manifest"] != source:
             errors.append("Source manifest/report-data mismatch")
+        source_artifacts = source.get("artifacts") or {}
+        # Older v1 packages used these fixed names without an explicit mapping.
+        table_sources = data.get("table_sources", {name: f"{name}.csv" for name in data["tables"]})
+        if set(table_sources) != set(data["tables"]):
+            errors.append("CSV source inventory mismatch")
+        for name, table in data["tables"].items():
+            source_relative = table_sources.get(name)
+            expected_sha = source_artifacts.get(source_relative)
+            if not expected_sha or digests.get(table["path"]) != expected_sha:
+                errors.append(f"CSV source checksum mismatch: {name}")
+        for name in ("summary", "gauges", "regions"):
+            if f"{name}.csv" in source_artifacts and name not in data["tables"]:
+                errors.append(f"Registered source table is missing: {name}")
         if data["geometry"] != _json(root / "data/geometry.json") or data["quality"] != _json(root / "data/quality.json"):
             errors.append("Geometry or quality/report-data mismatch")
+        quality_sha = source_artifacts.get("quality.json")
+        if quality_sha and digests.get("data/quality.json") != quality_sha:
+            # Earlier v1 builders reindented the API's canonical JSON. Recover
+            # that exact original serialization while still binding its values.
+            canonical_quality = json.dumps(data["quality"], ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+            if hashlib.sha256(canonical_quality.encode("utf-8")).hexdigest() != quality_sha:
+                errors.append("Quality source checksum mismatch")
+        if "numerical_quality_passed" in source and data["quality"].get("numerical_quality_passed") != source["numerical_quality_passed"]:
+            errors.append("Numerical quality/source manifest mismatch")
         config = _json(root / "provenance/project.json")
         plan = _json(root / "provenance/plan.json")
         _validate_snapshot_binding(config, plan, source)
@@ -795,7 +868,7 @@ def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
         return {"valid": not errors, "path": str(root), "checked_files": checked, "errors": errors,
                 "include_checkpoints": data["include_checkpoints"], "external_sources_checked": False,
                 "scientific_acceptance": "not_assessed"}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
         return {"valid": False, "path": str(root), "checked_files": checked, "errors": errors,
                 "external_sources_checked": False, "scientific_acceptance": "not_assessed"}

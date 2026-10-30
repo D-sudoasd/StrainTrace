@@ -3143,6 +3143,25 @@ def _nan_gaussian(arr, sigma, *, coordinates=None):
     return out
 
 
+def _positive_deformation_jacobian(Fxx, Fxy, Fyx, Fyy):
+    """Require an orientation-preserving, numerically nonsingular 2-D warp."""
+    Fxx, Fxy, Fyx, Fyy = (np.asarray(value) for value in (Fxx, Fxy, Fyx, Fyy))
+    with np.errstate(over="ignore", invalid="ignore"):
+        product_diagonal = Fxx * Fyy
+        product_offdiagonal = Fxy * Fyx
+        determinant = product_diagonal - product_offdiagonal
+        # Exact collapse can acquire a tiny positive determinant from a fitted
+        # derivative. Propagate entry roundoff through the two products instead
+        # of imposing an absolute determinant floor: small, resolved positive
+        # biaxial stretches still preserve orientation.
+        entry_error = 16 * np.finfo(float).eps * np.maximum(
+            1.0, np.maximum(np.maximum(np.abs(Fxx), np.abs(Fxy)),
+                            np.maximum(np.abs(Fyx), np.abs(Fyy))),
+        )
+        roundoff = entry_error * (np.abs(Fxx) + np.abs(Fxy) + np.abs(Fyx) + np.abs(Fyy)) + 2*entry_error**2
+    return np.isfinite(determinant) & (determinant > roundoff)
+
+
 def compute_strain_fields(
     X,
     Y,
@@ -3293,6 +3312,11 @@ def compute_strain_fields(
             variance = np.sum(weights[:, None]*(data-A@coefficients)**2, axis=0)/dof
             gradient_standard_error[i, j] = np.sqrt(np.maximum(0, [covariance[1,1]*variance[0], covariance[2,2]*variance[0], covariance[1,1]*variance[1], covariance[2,2]*variance[1]]))/scale
             Fxx, Fxy, Fyx, Fyy = 1.0 + du_dx, du_dy, dv_dx, 1.0 + dv_dy
+            dudx[i, j], dudy[i, j] = du_dx, du_dy
+            dvdx[i, j], dvdy[i, j] = dv_dx, dv_dy
+            if not _positive_deformation_jacobian(Fxx, Fxy, Fyx, Fyy):
+                strain_invalid_reason[i, j] = "NONPOSITIVE_JACOBIAN"
+                continue
             values = (
                 0.5 * (Fxx * Fxx + Fyx * Fyx - 1.0),
                 0.5 * (Fxy * Fxy + Fyy * Fyy - 1.0),
@@ -3304,8 +3328,6 @@ def compute_strain_fields(
             if not np.isfinite(values).all():
                 strain_invalid_reason[i, j] = "NONFINITE_STRAIN"
                 continue
-            dudx[i, j], dudy[i, j] = du_dx, du_dy
-            dvdx[i, j], dvdy[i, j] = dv_dx, dv_dy
             Exx[i, j], Eyy[i, j], Exy[i, j], exx[i, j], eyy[i, j], exy[i, j] = values
             strain_valid[i, j] = True
             strain_invalid_reason[i, j] = ""
@@ -4151,16 +4173,26 @@ def run_2d_dic(
     U[spatial_outlier] = V[spatial_outlier] = np.nan
     valid[spatial_outlier] = False
     invalid_reason[spatial_outlier] = "SPATIAL_OUTLIER"
+    # A finite, high-correlation displacement is useful diagnostic evidence,
+    # but a folded/collapsed subset is not support for a material strain fit.
+    # Preserve raw correlation results and exclude these points from both
+    # local strain fitting and optional smoothing, including neighboring fits.
+    subset_foldover = valid & ~_positive_deformation_jacobian(
+        1.0 + P[..., 1], P[..., 2], P[..., 4], 1.0 + P[..., 5],
+    )
+    strain_U, strain_V = U.copy(), V.copy()
+    strain_U[subset_foldover] = strain_V[subset_foldover] = np.nan
     strains = compute_strain_fields(
         X,
         Y,
-        U,
-        V,
+        strain_U,
+        strain_V,
         window=strain_window,
         smooth_sigma=smooth_sigma,
         max_condition_number=max_condition_number,
         degree=strain_degree, robust=robust_strain,
     )
+    strains["strain_invalid_reason"][subset_foldover] = "NONPOSITIVE_SUBSET_JACOBIAN"
     strain_valid = np.asarray(strains["strain_valid"], dtype=bool) & valid
     field = {
         "x": X.ravel(),

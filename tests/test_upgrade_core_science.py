@@ -133,3 +133,63 @@ def test_two_roi_distance_and_axis_projection_have_distinct_rotation_response():
     projected_strain = core.length_between(moved1, moved2, "x")/core.length_between(roi1, roi2, "x")-1
     assert distance_strain == pytest.approx(0., abs=1e-14)
     assert projected_strain == pytest.approx(np.cos(theta)-1, abs=1e-14)
+
+
+@pytest.mark.parametrize("stretch_x", [-1., 0.])
+def test_local_strain_fit_rejects_reflection_and_collapsed_material_area(stretch_x):
+    y, x = np.mgrid[0:7, 0:9].astype(float)
+    strains = core.compute_strain_fields(x, y, (stretch_x-1)*x, np.zeros_like(y))
+
+    assert not strains["strain_valid"].any()
+    assert set(strains["strain_invalid_reason"].ravel()) == {"NONPOSITIVE_JACOBIAN"}
+    for component in ("Exx", "Eyy", "Exy", "exx", "eyy", "exy"):
+        assert np.isnan(strains[component]).all()
+    # Displacements and fitted derivatives remain available as diagnostics.
+    np.testing.assert_allclose(strains["U"], (stretch_x-1)*x)
+    np.testing.assert_allclose(strains["dudx"], stretch_x-1, atol=1e-14)
+
+
+def test_positive_resolved_area_change_has_no_absolute_determinant_cutoff():
+    y, x = np.mgrid[0:7, 0:9].astype(float)
+    # This analytic conditioning check has det(F)=1e-20 but both positive
+    # stretches are well above double-precision entry roundoff.
+    stretch = 1e-10
+    strains = core.compute_strain_fields(x, y, (stretch-1)*x, (stretch-1)*y)
+    assert strains["strain_valid"].all()
+
+
+@pytest.mark.parametrize("stretch_x", [-1., 0.])
+def test_subset_foldover_masks_core_csv_plots_and_numerical_quality(monkeypatch, tmp_path, stretch_x):
+    import pandas as pd
+    from straintrace_agent.fields import component_values
+
+    reference = core.generate_synthetic_speckle(72, 72, seed=41)
+
+    def folded_subset(*_args, **_kwargs):
+        # High correlation alone cannot validate an orientation-reversing or
+        # collapsed affine subset, even if its center displacement is finite.
+        return {"u": 0., "v": 0., "zncc": 1.,
+                "p": np.array([0., stretch_x-1, 0., 0., 0., 0.]), "residual_rms": 0.}
+
+    monkeypatch.setattr(core, "refine_subset_icgn", folded_subset)
+    field = core.run_2d_dic(
+        reference, reference, (12, 12, 48, 48), subset_size=15, step=8,
+        initialization="local", reject_ambiguous_peaks=False, zncc_min=0.,
+    )
+
+    assert field["valid"].all()  # Raw correlation remains inspectable.
+    assert np.isfinite(field["u_raw"]).all()
+    assert not field["strain_valid"].any()
+    assert not field["strain_valid_grid"].any()
+    assert field["quality_summary"]["scientific_ok"] is False
+    assert field["quality_summary"]["strain_valid_fraction"] == 0.
+    assert set(field["strain_invalid_reason"]) == {"NONPOSITIVE_SUBSET_JACOBIAN"}
+    for component in ("Exx", "Eyy", "Exy", "exx", "eyy", "exy"):
+        assert np.isnan(field[component]).all()
+        assert np.isnan(field[component + "_grid"]).all()
+        assert np.isnan(component_values(field, component)).all()
+    exported = core.write_dic_field_txt(field, tmp_path / "field.txt")
+    table = pd.read_csv(exported, sep="\t")
+    assert table["Exx"].isna().all()
+    assert not table["strain_valid"].any()
+    assert not core._dic_display_mesh(field, "Exx")[3].any()

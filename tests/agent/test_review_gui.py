@@ -332,3 +332,127 @@ def test_keyboard_traversal_reveals_controls_in_short_page(page):
     page.update()
     assert_in_view(source_entry, canvas)
     assert page._scheduler.state() == "withdrawn"
+
+
+def test_identity_only_frame_map_remains_usable_when_saving_and_planning(page, tmp_path):
+    destination = project(page, tmp_path)
+    mapping = tmp_path / "identity.csv"
+    mapping.write_text("filename,native_frame\nframe_0001.png,1\nframe_0002.png,2\n", encoding="utf-8")
+    api.update_project(destination, {"frame_map_csv": str(mapping)})
+    page.open_project(destination)
+    wait(page)
+    before = (destination / "project.json").read_bytes()
+    page.save_project()
+    wait(page)
+    assert "操作未完成" not in page.status_var.get(), page.status_var.get()
+    assert (destination / "project.json").read_bytes() == before
+    page.make_plan()
+    wait(page)
+    assert page.plan is not None, page.status_var.get()
+    assert page.config["time_basis"] == "frame_index"
+    assert all(row["time_s"] is None for row in _snapshot(api, destination)["inventory"])
+
+
+def test_new_project_resolves_frame_map_time_without_reading_on_tk_thread(page, tmp_path, monkeypatch):
+    project(page, tmp_path)
+    mapping = tmp_path / "mapping.csv"
+    mapping.write_text("filename,native_frame\nframe_0001.png,1\nframe_0002.png,2\n", encoding="utf-8")
+    workers = []
+    read_map = api._explicit_frame_map
+
+    def record_read(*args, **kwargs):
+        workers.append(threading.get_ident())
+        return read_map(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_explicit_frame_map", record_read)
+    destination = tmp_path / "mapped-project"
+    page.project_var.set(str(destination))
+    page.map_var.set(str(mapping))
+    page.create_project()
+    wait(page)
+    assert page.project_dir == destination, page.status_var.get()
+    assert page.config["time_basis"] == "frame_index"
+    # Replacing that map with actual recorded times must promote the time basis.
+    timed = tmp_path / "timed.csv"
+    timed.write_text("filename,native_frame,time_s\nframe_0001.png,1,0.5\nframe_0002.png,2,1.5\n", encoding="utf-8")
+    page.map_var.set(str(timed))
+    page.save_project()
+    wait(page)
+    assert page.config["time_basis"] == "physical_time", page.status_var.get()
+    assert [row["time_s"] for row in _snapshot(api, destination)["inventory"]] == [0.5, 1.5]
+    page.map_var.set(str(mapping))
+    page.save_project()
+    wait(page)
+    assert page.config["time_basis"] == "frame_index", page.status_var.get()
+    assert workers and all(worker != threading.get_ident() for worker in workers)
+
+
+def test_typing_new_source_does_not_reuse_another_experiments_hidden_calibration(page, tmp_path):
+    project(page, tmp_path)
+    images = tmp_path / "images"
+    calibration = {"mm_per_px": 0.1, "origin_px": [0, 0], "origin_mm": [0, 0], "axis_sign": [1, 1]}
+    (images / "experiment.json").write_text(json.dumps({"schema": "straintrace.experiment/v1", "options": {"calibration": calibration}}), encoding="utf-8")
+    page.discover()
+    wait(page)
+    assert page._init_options()["calibration"] == calibration
+    second = tmp_path / "second-images"
+    second.mkdir()
+    for source in images.glob("*.png"):
+        (second / source.name).write_bytes(source.read_bytes())
+    page.source_var.set(str(second))
+    page.project_var.set(str(tmp_path / "second-project"))
+    page.create_project()
+    wait(page)
+    assert page.config["image_dir"] == str(second), page.status_var.get()
+    assert page.config["calibration"] is None
+
+
+@pytest.mark.parametrize("key,kind,value", [
+    ("regions", "统计 ROI", region("Metadata ROI")),
+    ("gauges", "虚拟标距", {"name": "Metadata gauge", "axis": "x", "a_point_px": [30, 30], "b_point_px": [90, 30]}),
+    ("exclusions_px", "排除区", [20, 20, 10, 10]),
+])
+def test_discovery_does_not_restore_geometry_explicitly_deleted_in_editor(page, tmp_path, key, kind, value):
+    project(page, tmp_path)
+    images = tmp_path / "images"
+    (images / "experiment.json").write_text(json.dumps({"schema": "straintrace.experiment/v1", "options": {key: [value]}}), encoding="utf-8")
+    page.discover()
+    wait(page)
+    assert page.items == [{"kind": kind, "value": value}]
+    page.geometry_tree.selection_set("0")
+    page.update()
+    page.delete_item()
+    assert not page.items
+    page.discover()
+    wait(page)
+    assert not page.items
+    assert page._discovered_options[key] == []
+
+
+def test_auto_analysis_requires_replacement_after_user_deletes_metadata_gauge(page, tmp_path):
+    project(page, tmp_path)
+    gauge = {"name": "Metadata gauge", "axis": "x", "a_point_px": [30, 30], "b_point_px": [90, 30]}
+    (tmp_path / "images" / "experiment.json").write_text(json.dumps({
+        "schema": "straintrace.experiment/v1", "options": {"gauges": [gauge]},
+    }), encoding="utf-8")
+    page.objective_var.set("虚拟标距应变")
+    page.discover()
+    wait(page)
+    page.geometry_tree.selection_set("0")
+    page.update()
+    page.delete_item()
+    destination = tmp_path / "automatic-project"
+    page.project_var.set(str(destination))
+    page.auto_analyze()
+    wait(page)
+    assert "需要补充输入" in page.status_var.get(), page.status_var.get()
+    assert not (destination / "project.json").exists()
+    assert '"field": "gauges"' in page.result_text.get("1.0", "end")
+
+
+@pytest.mark.parametrize("pending", (False, True))
+def test_open_project_during_manual_work_reports_actionable_error(page, tmp_path, pending):
+    page.app = SimpleNamespace(is_processing=not pending, _completion_pending=pending)
+    page.open_project(tmp_path / "project")
+    assert not page._busy
+    assert "手动分析仍在运行" in page.status_var.get()

@@ -51,16 +51,21 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 
-# 科研人员中文 Windows 环境字体支持（解决 matplotlib 图中中文乱码/方框）
-# 优先使用系统中常见的微软雅黑 / 黑体，失败时回退到 DejaVu Sans
+# 优先使用微软雅黑 / 黑体，并使用其他平台已有的中文字库作为回退。
 import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = [
     "Microsoft YaHei",
     "SimHei",
     "SimSun",
+    "Noto Sans SC",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "PingFang SC",
+    "Heiti SC",
+    "Arial Unicode MS",
     "Arial",
     "Helvetica",
-    "Arial Unicode MS",
     "DejaVu Sans",
 ]
 plt.rcParams["axes.unicode_minus"] = False
@@ -398,9 +403,10 @@ class ToolTip:
         self.widget.bind("<Escape>", self.dismiss, add="+")
 
     def resolve_text(self, event=None):
-        text = self.text(event) if callable(self.text) else self.text
-        self.widget._tooltip_text = text
-        return text
+        # The registered _tooltip_text describes the whole control. Hovering a
+        # table header or candidate must not replace that general help; the
+        # active context is held separately in pending_text / shown_text.
+        return self.text(event) if callable(self.text) else self.text
 
     def schedule(self, event=None):
         text = self.resolve_text(event)
@@ -2962,6 +2968,11 @@ def write_qc_summary(summary, path):
 # ==========================
 
 UI_FONT_FAMILY = "Microsoft YaHei UI"
+UI_FONT_FALLBACKS = (
+    UI_FONT_FAMILY, "Microsoft YaHei", "PingFang SC", "Noto Sans SC",
+    "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Zen Hei",
+    "Heiti SC", "SimHei", "SimSun", "song ti", "fangsong ti",
+)
 UI_BASE_FONT_SIZE = 10
 UI_TITLE_FONT_SIZE = 12
 UI_PRIMARY_FONT_SIZE = 11
@@ -2977,6 +2988,15 @@ UI_MAX_TK_SCALING = 2.50
 UI_SCALE_ENV_VAR = "EZDIC_UI_SCALE"
 RECENT_CONFIG_ENV_VAR = "EZDIC_RECENT_CONFIG"
 RECENT_CONFIG_FILENAME = "recent_paths.json"
+
+
+def choose_ui_font_family(root):
+    """Use an installed Chinese font instead of Tk's missing-family fallback."""
+    available = {name.casefold(): name for name in tkfont.families(root)}
+    for name in UI_FONT_FALLBACKS:
+        if name.casefold() in available:
+            return available[name.casefold()]
+    return tkfont.nametofont("TkDefaultFont", root=root).actual("family")
 
 
 def enable_windows_dpi_awareness():
@@ -3240,13 +3260,14 @@ class MultiROIGUI:
             return platform_scaling
 
     def configure_ui_metrics(self):
-        self.ui_base_font = (UI_FONT_FAMILY, UI_BASE_FONT_SIZE)
-        self.ui_title_font = (UI_FONT_FAMILY, UI_TITLE_FONT_SIZE, "bold")
-        self.ui_primary_font = (UI_FONT_FAMILY, UI_PRIMARY_FONT_SIZE, "bold")
-        self.ui_step_font = (UI_FONT_FAMILY, UI_STEP_FONT_SIZE, "bold")
-        self.ui_log_font = (UI_FONT_FAMILY, UI_LOG_FONT_SIZE)
-        self.canvas_group_font = (UI_FONT_FAMILY, UI_BASE_FONT_SIZE, "bold")
-        self.canvas_current_roi_font = (UI_FONT_FAMILY, UI_TITLE_FONT_SIZE, "bold")
+        self.ui_font_family = choose_ui_font_family(self.root)
+        self.ui_base_font = (self.ui_font_family, UI_BASE_FONT_SIZE)
+        self.ui_title_font = (self.ui_font_family, UI_TITLE_FONT_SIZE, "bold")
+        self.ui_primary_font = (self.ui_font_family, UI_PRIMARY_FONT_SIZE, "bold")
+        self.ui_step_font = (self.ui_font_family, UI_STEP_FONT_SIZE, "bold")
+        self.ui_log_font = (self.ui_font_family, UI_LOG_FONT_SIZE)
+        self.canvas_group_font = (self.ui_font_family, UI_BASE_FONT_SIZE, "bold")
+        self.canvas_current_roi_font = (self.ui_font_family, UI_TITLE_FONT_SIZE, "bold")
         self.viewer_tick_font_size = UI_VIEWER_TICK_FONT_SIZE
         self.viewer_legend_font_size = UI_VIEWER_LEGEND_FONT_SIZE
         self.viewer_label_font_size = UI_VIEWER_LABEL_FONT_SIZE
@@ -3845,7 +3866,7 @@ class MultiROIGUI:
 
         for font_name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             try:
-                tkfont.nametofont(font_name).configure(family=UI_FONT_FAMILY, size=UI_BASE_FONT_SIZE)
+                tkfont.nametofont(font_name).configure(family=self.ui_font_family, size=UI_BASE_FONT_SIZE)
             except tk.TclError:
                 pass
 
@@ -3863,7 +3884,7 @@ class MultiROIGUI:
         self.style.configure("TLabelframe", background=self.card_bg, bordercolor=self.border_color, relief="solid")
         self.style.configure("TLabelframe.Label", background=self.card_bg, foreground=self.text_color, font=step_font)
         self.style.configure("Brand.TLabel", background=self.ui_bg, foreground=self.text_color,
-                             font=(UI_FONT_FAMILY, 18, "bold"))
+                             font=(self.ui_font_family, 18, "bold"))
         self.style.configure("AppHint.TLabel", background=self.ui_bg, foreground=self.muted_color, font=base_font)
         self.style.configure("Badge.TLabel", background=self.panel_bg, foreground=self.key_color,
                              font=base_font, padding=(10, 4))
@@ -4403,7 +4424,7 @@ class MultiROIGUI:
             self.workflow_guide_frame,
             text=self._visible_workflow_steps_text(),
             style="Hint.TLabel",
-            font=(UI_FONT_FAMILY, 9),
+            font=(self.ui_font_family, 9),
             justify=tk.LEFT,
             wraplength=430,
         )
@@ -5321,7 +5342,7 @@ class MultiROIGUI:
         self.canvas.delete("empty_state")
         cx, cy = self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2
         self.canvas.create_text(cx, cy - 24, text="加载图像序列", fill="#e2e8f0",
-                                 font=(UI_FONT_FAMILY, 16, "bold"), tags="empty_state")
+                                 font=(self.ui_font_family, 16, "bold"), tags="empty_state")
         self.canvas.create_text(cx, cy + 24, text="选择图像文件夹，然后点击“加载序列”\n支持 TIFF、PNG、JPEG 和 BMP",
                                  fill="#b0bfd2", justify=tk.CENTER, font=self.ui_base_font,
                                  width=max(200, self.canvas.winfo_width() - 50), tags="empty_state")
