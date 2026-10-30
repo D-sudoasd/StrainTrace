@@ -1,0 +1,239 @@
+{
+  "schema": "competing-peak-validation-v1",
+  "core_sha256": "9c72d2ec77c0fa4ee31f206923a963061bc5c199a366d7b3651b331abbce22b1",
+  "script_sha256": "88d8860378dbb30038b1eaaf5032d2c82187ecaa2ff8d2ad45e826d5ecff8977",
+  "fixture_script_sha256": "c6039c0762b5ffc940013055116815a7b26bd73403394238a06211bfa35a1a66",
+  "environment": {
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "limits": [
+    "Synthetic 2-D deformation and texture; no out-of-plane motion, fracture, or experimentally calibrated uncertainty.",
+    "The control disables the competing-peak probe only; it does not supply a ground-truth candidate for all rejections.",
+    "The 0.5 px displacement threshold is an illustrative assessment criterion, not a calibrated tolerance.",
+    "Accepted candidates may still be inaccurate; counts apply only to these images and thresholds."
+  ],
+  "cases": {
+    "clean": {
+      "noise_sigma_gray": 0.0,
+      "input_sha256": "29a48055f6927a3edbfca400784b44509648e0db1587d666bae510bfc49523db",
+      "settings": {
+        "subset_size": 15,
+        "step": 4,
+        "search_radius": 10,
+        "strain_window": 3,
+        "smooth_sigma": 0.0,
+        "max_iter": 50,
+        "conv_tol": 0.0001,
+        "zncc_min": 0.8,
+        "reject_nonconverged": true,
+        "initialization": "local",
+        "roi": [
+          20,
+          20,
+          120,
+          120
+        ]
+      },
+      "point_count": 729,
+      "control_valid_count": 729,
+      "probe_valid_count": 721,
+      "control_accepted_error_over_0_5_px": 11,
+      "probe_accepted_error_over_0_5_px": 11,
+      "control_valid_probe_invalid_count": 8,
+      "control_valid_probe_invalid_control_error_at_most_0_5_px_count": 8,
+      "control_valid_probe_invalid_control_error_over_0_5_px_count": 0,
+      "probe_valid_control_invalid_count": 0,
+      "control_valid_probe_invalid_points": [
+        {
+          "x_px": 123.0,
+          "y_px": 27.0,
+          "control_displacement_error_px": 5.395443448905863e-06,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7055156230926514,
+          "competing_refined_zncc": 0.9237675985325218
+        },
+        {
+          "x_px": 119.0,
+          "y_px": 31.0,
+          "control_displacement_error_px": 2.1395081749524906e-05,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7391273975372314,
+          "competing_refined_zncc": 0.8074241222520488
+        },
+        {
+          "x_px": 123.0,
+          "y_px": 31.0,
+          "control_displacement_error_px": 1.515160409251252e-06,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7027549147605896,
+          "competing_refined_zncc": 0.8620028609982064
+        },
+        {
+          "x_px": 31.0,
+          "y_px": 55.0,
+          "control_displacement_error_px": 0.051504613766087434,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7209704518318176,
+          "competing_refined_zncc": 0.8511265543684511
+        },
+        {
+          "x_px": 31.0,
+          "y_px": 59.0,
+          "control_displacement_error_px": 0.09663061782157434,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.745679497718811,
+          "competing_refined_zncc": 0.8341930146051348
+        },
+        {
+          "x_px": 47.0,
+          "y_px": 63.0,
+          "control_displacement_error_px": 0.24693258691984185,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.707145631313324,
+          "competing_refined_zncc": 0.827120925044851
+        },
+        {
+          "x_px": 51.0,
+          "y_px": 63.0,
+          "control_displacement_error_px": 0.25737829216468294,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.710246741771698,
+          "competing_refined_zncc": 0.8210040869249431
+        },
+        {
+          "x_px": 95.0,
+          "y_px": 131.0,
+          "control_displacement_error_px": 1.2328912359528695e-05,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7102146148681641,
+          "competing_refined_zncc": 0.9054407668514746
+        }
+      ]
+    },
+    "noise_sigma_1_5": {
+      "noise_sigma_gray": 1.5,
+      "input_sha256": "aa999446796b75525397af3de057fb78aee728db91493f580c4896d5e85decba",
+      "settings": {
+        "subset_size": 15,
+        "step": 4,
+        "search_radius": 10,
+        "strain_window": 3,
+        "smooth_sigma": 0.0,
+        "max_iter": 50,
+        "conv_tol": 0.0001,
+        "zncc_min": 0.8,
+        "reject_nonconverged": true,
+        "initialization": "local",
+        "roi": [
+          20,
+          20,
+          120,
+          120
+        ]
+      },
+      "point_count": 729,
+      "control_valid_count": 729,
+      "probe_valid_count": 720,
+      "control_accepted_error_over_0_5_px": 11,
+      "probe_accepted_error_over_0_5_px": 11,
+      "control_valid_probe_invalid_count": 9,
+      "control_valid_probe_invalid_control_error_at_most_0_5_px_count": 9,
+      "control_valid_probe_invalid_control_error_over_0_5_px_count": 0,
+      "probe_valid_control_invalid_count": 0,
+      "control_valid_probe_invalid_points": [
+        {
+          "x_px": 123.0,
+          "y_px": 27.0,
+          "control_displacement_error_px": 0.007019246905024664,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.705912172794342,
+          "competing_refined_zncc": 0.923503839395131
+        },
+        {
+          "x_px": 119.0,
+          "y_px": 31.0,
+          "control_displacement_error_px": 0.005583161690001649,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7375635504722595,
+          "competing_refined_zncc": 0.803310515847163
+        },
+        {
+          "x_px": 123.0,
+          "y_px": 31.0,
+          "control_displacement_error_px": 0.0037767536194171507,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.701746940612793,
+          "competing_refined_zncc": 0.8567683845097408
+        },
+        {
+          "x_px": 31.0,
+          "y_px": 55.0,
+          "control_displacement_error_px": 0.05210897681588012,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7176719903945923,
+          "competing_refined_zncc": 0.8481277131432907
+        },
+        {
+          "x_px": 31.0,
+          "y_px": 59.0,
+          "control_displacement_error_px": 0.09972665803784321,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7423622608184814,
+          "competing_refined_zncc": 0.8305503043354127
+        },
+        {
+          "x_px": 47.0,
+          "y_px": 63.0,
+          "control_displacement_error_px": 0.25945327350106884,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7078105807304382,
+          "competing_refined_zncc": 0.8295837254611416
+        },
+        {
+          "x_px": 51.0,
+          "y_px": 63.0,
+          "control_displacement_error_px": 0.2822734376873838,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7143195271492004,
+          "competing_refined_zncc": 0.8215738516630205
+        },
+        {
+          "x_px": 115.0,
+          "y_px": 75.0,
+          "control_displacement_error_px": 0.20994912965433274,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7410317659378052,
+          "competing_refined_zncc": 0.8005619374069723
+        },
+        {
+          "x_px": 95.0,
+          "y_px": 131.0,
+          "control_displacement_error_px": 0.00995202383971651,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7055188417434692,
+          "competing_refined_zncc": 0.8983879860965696
+        }
+      ]
+    }
+  }
+}

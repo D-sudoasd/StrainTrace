@@ -20,9 +20,17 @@ def _isolated_operation_state(tmp_path, monkeypatch):
 
 
 def _write_png(path: Path, image: np.ndarray) -> None:
-    ok, encoded = cv2.imencode(".png", np.asarray(image, dtype=np.uint8))
+    # Cubic interpolation may overshoot the 8-bit sensor range. Saturate before
+    # quantizing: casting first would wrap values >=256 into dark pixels.
+    ok, encoded = cv2.imencode(".png", np.clip(image, 0, 255).astype(np.uint8))
     assert ok
     encoded.tofile(str(path))
+
+
+def test_png_fixture_saturates_out_of_range_samples(tmp_path: Path) -> None:
+    path = tmp_path / "saturation.png"
+    _write_png(path, np.array([[-10.0, 0.0, 254.9, 255.0, 256.0, 272.0]], dtype=np.float32))
+    assert core.read_gray_image(path).tolist() == [[0, 0, 254, 255, 255, 255]]
 
 
 def _sequence(tmp_path: Path, *, n=3):

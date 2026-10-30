@@ -1,0 +1,239 @@
+{
+  "schema": "competing-peak-validation-v1",
+  "core_sha256": "9ec3116182041aa9f9d31786493bd3b29a2d7cca3df15162ac4867e3cf6924de",
+  "script_sha256": "a45dedcc298dd249688498a486147d27147fc44734fd2d2ed089eab15d293a7b",
+  "fixture_script_sha256": "c6039c0762b5ffc940013055116815a7b26bd73403394238a06211bfa35a1a66",
+  "environment": {
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "limits": [
+    "Synthetic 2-D deformation and texture; no out-of-plane motion, fracture, or experimentally calibrated uncertainty.",
+    "The control disables the competing-peak probe only; it does not supply a ground-truth candidate for all rejections.",
+    "The 0.5 px displacement threshold is an illustrative assessment criterion, not a calibrated tolerance.",
+    "Accepted candidates may still be inaccurate; counts apply only to these images and thresholds.",
+    "The copied-patch sweep is an adversarial synthetic construction; it demonstrates a false accept that ordinary quality gates can miss."
+  ],
+  "cases": {
+    "clean": {
+      "noise_sigma_gray": 0.0,
+      "input_sha256": "29a48055f6927a3edbfca400784b44509648e0db1587d666bae510bfc49523db",
+      "settings": {
+        "subset_size": 15,
+        "step": 4,
+        "search_radius": 10,
+        "strain_window": 3,
+        "smooth_sigma": 0.0,
+        "max_iter": 50,
+        "conv_tol": 0.0001,
+        "zncc_min": 0.8,
+        "reject_nonconverged": true,
+        "initialization": "local",
+        "roi": [
+          20,
+          20,
+          120,
+          120
+        ]
+      },
+      "point_count": 729,
+      "control_valid_count": 729,
+      "probe_valid_count": 728,
+      "control_accepted_error_over_0_5_px": 11,
+      "probe_accepted_error_over_0_5_px": 11,
+      "control_valid_probe_invalid_count": 1,
+      "control_valid_probe_invalid_control_error_at_most_0_5_px_count": 1,
+      "control_valid_probe_invalid_control_error_over_0_5_px_count": 0,
+      "probe_valid_control_invalid_count": 0,
+      "control_valid_probe_invalid_points": [
+        {
+          "x_px": 123.0,
+          "y_px": 27.0,
+          "control_displacement_error_px": 5.395443448905863e-06,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.7055156230926514,
+          "competing_refined_zncc": 0.9237675985325218
+        }
+      ]
+    },
+    "noise_sigma_1_5": {
+      "noise_sigma_gray": 1.5,
+      "input_sha256": "aa999446796b75525397af3de057fb78aee728db91493f580c4896d5e85decba",
+      "settings": {
+        "subset_size": 15,
+        "step": 4,
+        "search_radius": 10,
+        "strain_window": 3,
+        "smooth_sigma": 0.0,
+        "max_iter": 50,
+        "conv_tol": 0.0001,
+        "zncc_min": 0.8,
+        "reject_nonconverged": true,
+        "initialization": "local",
+        "roi": [
+          20,
+          20,
+          120,
+          120
+        ]
+      },
+      "point_count": 729,
+      "control_valid_count": 729,
+      "probe_valid_count": 728,
+      "control_accepted_error_over_0_5_px": 11,
+      "probe_accepted_error_over_0_5_px": 11,
+      "control_valid_probe_invalid_count": 1,
+      "control_valid_probe_invalid_control_error_at_most_0_5_px_count": 1,
+      "control_valid_probe_invalid_control_error_over_0_5_px_count": 0,
+      "probe_valid_control_invalid_count": 0,
+      "control_valid_probe_invalid_points": [
+        {
+          "x_px": 123.0,
+          "y_px": 27.0,
+          "control_displacement_error_px": 0.007019246905024664,
+          "invalid_reason": "AMBIGUOUS_PEAK",
+          "competing_status": "DISTINCT_VALID_CANDIDATE",
+          "competing_raw_zncc": 0.705912172794342,
+          "competing_refined_zncc": 0.923503839395131
+        }
+      ]
+    }
+  },
+  "copied_patch_noise_sweep": {
+    "sigma_0.06": {
+      "target_patch_noise_sigma": 0.06,
+      "input_sha256": "b7f8c8c0e980c7bed5be2b75c41d646a55f0d7c7d40987294898a1e57c7a409f",
+      "settings": {
+        "subset_size": 21,
+        "step": 30,
+        "search_radius": 18,
+        "strain_window": 5,
+        "max_iter": 40,
+        "zncc_min": 0.75,
+        "reject_nonconverged": true,
+        "roi": [
+          20,
+          20,
+          81,
+          81
+        ]
+      },
+      "true_displacement_uv_px": [
+        5.0,
+        0.0
+      ],
+      "copied_displacement_uv_px": [
+        22.0,
+        17.0
+      ],
+      "point_count": 9,
+      "valid_count": 8,
+      "strain_valid_count": 8,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": false,
+      "center_displacement_uv_px": [
+        null,
+        null
+      ],
+      "center_error_px": null,
+      "center_invalid_reason": "AMBIGUOUS_PEAK",
+      "center_peak_is_ambiguous": true,
+      "competing_raw_zncc": 0.9620480537414551,
+      "competing_refined_zncc": 0.9628494706581564,
+      "competing_refined_zncc_gap": 0.03715044837295933,
+      "competing_peak_status": "DISTINCT_VALID_CANDIDATE",
+      "competing_peak_max_zncc_gap": 0.08
+    },
+    "sigma_0.08": {
+      "target_patch_noise_sigma": 0.08,
+      "input_sha256": "3141e9251437de50865a4c0cddc4919b6d32bc96e1cc82006d4f311e406f85f3",
+      "settings": {
+        "subset_size": 21,
+        "step": 30,
+        "search_radius": 18,
+        "strain_window": 5,
+        "max_iter": 40,
+        "zncc_min": 0.75,
+        "reject_nonconverged": true,
+        "roi": [
+          20,
+          20,
+          81,
+          81
+        ]
+      },
+      "true_displacement_uv_px": [
+        5.0,
+        0.0
+      ],
+      "copied_displacement_uv_px": [
+        22.0,
+        17.0
+      ],
+      "point_count": 9,
+      "valid_count": 8,
+      "strain_valid_count": 8,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": false,
+      "center_displacement_uv_px": [
+        null,
+        null
+      ],
+      "center_error_px": null,
+      "center_invalid_reason": "AMBIGUOUS_PEAK",
+      "center_peak_is_ambiguous": true,
+      "competing_raw_zncc": 0.94096440076828,
+      "competing_refined_zncc": 0.9427346560716732,
+      "competing_refined_zncc_gap": 0.05726526327761161,
+      "competing_peak_status": "DISTINCT_VALID_CANDIDATE",
+      "competing_peak_max_zncc_gap": 0.08
+    },
+    "sigma_0.10": {
+      "target_patch_noise_sigma": 0.1,
+      "input_sha256": "8e6d7a51eb9aef4cd631ffa2c59bb6e237d241d13bf6acb52ba6c517b0480e19",
+      "settings": {
+        "subset_size": 21,
+        "step": 30,
+        "search_radius": 18,
+        "strain_window": 5,
+        "max_iter": 40,
+        "zncc_min": 0.75,
+        "reject_nonconverged": true,
+        "roi": [
+          20,
+          20,
+          81,
+          81
+        ]
+      },
+      "true_displacement_uv_px": [
+        5.0,
+        0.0
+      ],
+      "copied_displacement_uv_px": [
+        22.0,
+        17.0
+      ],
+      "point_count": 9,
+      "valid_count": 8,
+      "strain_valid_count": 8,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": false,
+      "center_displacement_uv_px": [
+        null,
+        null
+      ],
+      "center_error_px": null,
+      "center_invalid_reason": "AMBIGUOUS_PEAK",
+      "center_peak_is_ambiguous": true,
+      "competing_raw_zncc": 0.9162411093711853,
+      "competing_refined_zncc": 0.9187162741632224,
+      "competing_refined_zncc_gap": 0.0812836459804318,
+      "competing_peak_status": "PREDICTION_CONFLICT",
+      "competing_peak_max_zncc_gap": 0.08
+    }
+  }
+}

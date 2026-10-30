@@ -1,0 +1,312 @@
+{
+  "schema": "straintrace-real-necking-comparison-v1",
+  "reference_sha256": "828a257db89a280a9b4f6591ce52d34024cebec86f69429da134c09d74a69344",
+  "core_before_sha256": "7ee6de2f9d5d4aab43ce90de65a23cc516b4361d32b4c0c2025fa621777afcb6",
+  "core_after_sha256": "7c3516f8d71156d84fc5c0ea45e3ac3d24462c5255ca7a7f3ef70da90d2a0d3d",
+  "environment": {
+    "python": "3.11.8",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "frames": [
+    {
+      "frame": 50,
+      "sha256": "ba629cdd25e9589c88caada301ea95994435bd23460f883f4061b5941a7f35ff",
+      "valid_n_before_after": [
+        150,
+        150
+      ],
+      "strain_valid_n_before_after": [
+        150,
+        150
+      ],
+      "common_valid_n": 150,
+      "common_strain_valid_n": 150,
+      "gained_valid_n": 0,
+      "lost_valid_n": 0,
+      "effective_radius_px_before_after": [
+        3,
+        20
+      ],
+      "elapsed_s_before_after": [
+        1.5334167999681085,
+        1.5333489999175072
+      ],
+      "invalid_reason_counts_before_after": [
+        {},
+        {}
+      ],
+      "common_poi_differences": {
+        "u": {
+          "n": 150,
+          "max_abs": 3.447195950911919e-07,
+          "rms": 4.527721822156409e-08
+        },
+        "v": {
+          "n": 150,
+          "max_abs": 2.1199233124491457e-07,
+          "rms": 2.503785088572647e-08
+        },
+        "Exx": {
+          "n": 150,
+          "max_abs": 2.395409726130282e-08,
+          "rms": 1.9711819822484435e-09
+        },
+        "Eyy": {
+          "n": 150,
+          "max_abs": 2.645310970272874e-09,
+          "rms": 2.6169482964838487e-10
+        },
+        "zncc": {
+          "n": 150,
+          "max_abs": 2.0624937313584724e-09,
+          "rms": 1.9308156070788035e-10
+        }
+      }
+    },
+    {
+      "frame": 90,
+      "sha256": "942d509e4db93030ed7c813e5eebd58cce0b0e6b3d3e76959f5e95c0749cec8d",
+      "valid_n_before_after": [
+        73,
+        73
+      ],
+      "strain_valid_n_before_after": [
+        60,
+        60
+      ],
+      "common_valid_n": 73,
+      "common_strain_valid_n": 60,
+      "gained_valid_n": 0,
+      "lost_valid_n": 0,
+      "effective_radius_px_before_after": [
+        5,
+        20
+      ],
+      "elapsed_s_before_after": [
+        1.7826092999894172,
+        1.8134339000098407
+      ],
+      "invalid_reason_counts_before_after": [
+        {
+          "ZNCC_BELOW_THRESHOLD": 77
+        },
+        {
+          "ZNCC_BELOW_THRESHOLD": 77
+        }
+      ],
+      "common_poi_differences": {
+        "u": {
+          "n": 73,
+          "max_abs": 3.8451752004675654e-07,
+          "rms": 8.733089822087405e-08
+        },
+        "v": {
+          "n": 73,
+          "max_abs": 1.151773254548516e-07,
+          "rms": 3.0317242253560614e-08
+        },
+        "Exx": {
+          "n": 60,
+          "max_abs": 2.1341348688252992e-09,
+          "rms": 5.417752214641845e-10
+        },
+        "Eyy": {
+          "n": 60,
+          "max_abs": 1.880020472633248e-09,
+          "rms": 4.5854185572686464e-10
+        },
+        "zncc": {
+          "n": 73,
+          "max_abs": 2.404746402007163e-09,
+          "rms": 3.8734391562267556e-10
+        }
+      }
+    },
+    {
+      "frame": 130,
+      "sha256": "82e89ceb2e3595a904aa7fe53eaef703f889aef0b5ce21161251cae7156ba14d",
+      "valid_n_before_after": [
+        0,
+        0
+      ],
+      "strain_valid_n_before_after": [
+        0,
+        0
+      ],
+      "common_valid_n": 0,
+      "common_strain_valid_n": 0,
+      "gained_valid_n": 0,
+      "lost_valid_n": 0,
+      "effective_radius_px_before_after": [
+        20,
+        20
+      ],
+      "elapsed_s_before_after": [
+        2.949775599874556,
+        3.0011973998043686
+      ],
+      "invalid_reason_counts_before_after": [
+        {
+          "AMBIGUOUS_PEAK": 23,
+          "ZNCC_BELOW_THRESHOLD": 127
+        },
+        {
+          "AMBIGUOUS_PEAK": 23,
+          "ZNCC_BELOW_THRESHOLD": 127
+        }
+      ],
+      "common_poi_differences": {
+        "u": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "v": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Exx": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Eyy": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "zncc": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        }
+      }
+    },
+    {
+      "frame": 185,
+      "sha256": "025450dcd1c5338126c70b939be6cc82d91395b4f35600eecb9572c337697811",
+      "valid_n_before_after": [
+        0,
+        0
+      ],
+      "strain_valid_n_before_after": [
+        0,
+        0
+      ],
+      "common_valid_n": 0,
+      "common_strain_valid_n": 0,
+      "gained_valid_n": 0,
+      "lost_valid_n": 0,
+      "effective_radius_px_before_after": [
+        20,
+        20
+      ],
+      "elapsed_s_before_after": [
+        2.729043399915099,
+        2.9960055998526514
+      ],
+      "invalid_reason_counts_before_after": [
+        {
+          "ZNCC_BELOW_THRESHOLD": 119,
+          "AMBIGUOUS_PEAK": 31
+        },
+        {
+          "ZNCC_BELOW_THRESHOLD": 119,
+          "AMBIGUOUS_PEAK": 31
+        }
+      ],
+      "common_poi_differences": {
+        "u": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "v": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Exx": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Eyy": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "zncc": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        }
+      }
+    },
+    {
+      "frame": 193,
+      "sha256": "2196148541ce432c0b0ec942c692b1f1145bfa37d0eadcfc4729e7559af5b7f3",
+      "valid_n_before_after": [
+        0,
+        0
+      ],
+      "strain_valid_n_before_after": [
+        0,
+        0
+      ],
+      "common_valid_n": 0,
+      "common_strain_valid_n": 0,
+      "gained_valid_n": 0,
+      "lost_valid_n": 0,
+      "effective_radius_px_before_after": [
+        20,
+        20
+      ],
+      "elapsed_s_before_after": [
+        1.9907201998867095,
+        2.3040688999462873
+      ],
+      "invalid_reason_counts_before_after": [
+        {
+          "AMBIGUOUS_PEAK": 86,
+          "ZNCC_BELOW_THRESHOLD": 64
+        },
+        {
+          "AMBIGUOUS_PEAK": 86,
+          "ZNCC_BELOW_THRESHOLD": 64
+        }
+      ],
+      "common_poi_differences": {
+        "u": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "v": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Exx": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "Eyy": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        },
+        "zncc": {
+          "n": 0,
+          "max_abs": null,
+          "rms": null
+        }
+      }
+    }
+  ],
+  "scope": "Differences on common valid points are not accuracy without experimental truth. One timing per run is diagnostic, not a performance benchmark."
+}

@@ -2739,6 +2739,27 @@ def _correlation_peak_diagnostics(corr, max_loc, *, exclusion_radius=None):
     }
 
 
+def _competing_correlation_peak(corr, max_loc, *, exclusion_radius=2):
+    """Find the strongest distinct local maximum, rather than a peak shoulder.
+
+    A high second value outside a fixed exclusion square can still be part of
+    one broad correlation peak. Only local maxima are alternative candidates.
+    This is a conservative diagnostic, not proof of either correspondence.
+    """
+    values = np.asarray(corr, dtype=np.float32)
+    px, py = int(max_loc[0]), int(max_loc[1])
+    neighborhood_max = cv2.dilate(values, np.ones((3, 3), dtype=np.uint8))
+    candidates = np.isfinite(values) & (values >= neighborhood_max)
+    radius = max(1, int(exclusion_radius))
+    candidates[max(0, py-radius):min(values.shape[0], py+radius+1),
+               max(0, px-radius):min(values.shape[1], px+radius+1)] = False
+    if not np.any(candidates):
+        return None
+    scores = np.where(candidates, values, -np.inf)
+    _, peak, _, location = cv2.minMaxLoc(scores)
+    return {"zncc": float(peak), "location": location}
+
+
 def integer_cc_guess(
     reference,
     deformed,
@@ -2809,6 +2830,17 @@ def integer_cc_guess(
         max_loc,
         exclusion_radius=peak_exclusion_radius,
     )
+    competing_peak = _competing_correlation_peak(
+        safe_corr, max_loc,
+        exclusion_radius=peak_diagnostics["second_peak_exclusion_radius"],
+    )
+    if competing_peak is None:
+        competing_zncc = competing_u = competing_v = np.nan
+    else:
+        competing_x, competing_y = competing_peak["location"]
+        competing_zncc = competing_peak["zncc"]
+        competing_u = (sx1 + competing_x) - (ix - half)
+        competing_v = (sy1 + competing_y) - (iy - half)
     peak_ambiguous = bool(
         np.isfinite(peak_diagnostics["peak_margin"])
         and np.isfinite(peak_diagnostics["peak_ratio"])
@@ -2820,6 +2852,9 @@ def integer_cc_guess(
         "v": float(v),
         "zncc": float(max_val),
         **peak_diagnostics,
+        "competing_peak_zncc": float(competing_zncc),
+        "competing_peak_u": float(competing_u),
+        "competing_peak_v": float(competing_v),
         "peak_is_ambiguous": peak_ambiguous,
         "search_level": 0,
         "stop_reason": "peak_found",
@@ -3179,6 +3214,10 @@ def compute_strain_fields(
     Coordinates are scaled before fitting. A quadratic fit avoids one-sided
     linear-fit bias near specimen boundaries. Tukey IRLS limits the influence
     of isolated mismatches; local connectivity prevents fits across gaps.
+    Nonpositive fitted det(F) is invalid. A positive determinant at floating
+    point roundoff scale is separately marked near singular: a mathematically
+    singular fit can otherwise acquire a small positive determinant through
+    least-squares rounding. This numerical guard is not an uncertainty bound.
     """
     X = np.asarray(X, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
@@ -3209,6 +3248,7 @@ def compute_strain_fields(
     dudy = np.full((ny, nx), np.nan)
     dvdx = np.full((ny, nx), np.nan)
     dvdy = np.full((ny, nx), np.nan)
+    deformation_jacobian = np.full((ny, nx), np.nan)
     strain_valid = np.zeros((ny, nx), dtype=bool)
     fit_condition_number = np.full((ny, nx), np.nan)
     fit_residual_rms = np.full((ny, nx), np.nan)
@@ -3312,8 +3352,13 @@ def compute_strain_fields(
             variance = np.sum(weights[:, None]*(data-A@coefficients)**2, axis=0)/dof
             gradient_standard_error[i, j] = np.sqrt(np.maximum(0, [covariance[1,1]*variance[0], covariance[2,2]*variance[0], covariance[1,1]*variance[1], covariance[2,2]*variance[1]]))/scale
             Fxx, Fxy, Fyx, Fyy = 1.0 + du_dx, du_dy, dv_dx, 1.0 + dv_dy
+            # Keep the fitted gradient and determinant when the mapping folds.
+            # Validity uses the upstream roundoff test so a tiny resolved
+            # positive area is not rejected by an absolute determinant floor.
             dudx[i, j], dudy[i, j] = du_dx, du_dy
             dvdx[i, j], dvdy[i, j] = dv_dx, dv_dy
+            determinant = float(Fxx * Fyy - Fxy * Fyx)
+            deformation_jacobian[i, j] = determinant
             if not _positive_deformation_jacobian(Fxx, Fxy, Fyx, Fyy):
                 strain_invalid_reason[i, j] = "NONPOSITIVE_JACOBIAN"
                 continue
@@ -3343,6 +3388,7 @@ def compute_strain_fields(
         "dudy": dudy,
         "dvdx": dvdx,
         "dvdy": dvdy,
+        "deformation_jacobian": deformation_jacobian,
         "U": U,
         "V": V,
         "window": win,
@@ -3390,6 +3436,11 @@ DEFAULT_PEAK_RATIO_MIN = 1.02
 DEFAULT_MAX_HESSIAN_CONDITION_NUMBER = 1e12
 DEFAULT_MIN_CORRELATION_VALID_FRACTION = 0.95
 DEFAULT_MIN_STRAIN_VALID_FRACTION = 0.80
+COMPETING_PEAK_RAW_MARGIN = 0.10
+COMPETING_PEAK_MIN_SEPARATION_PX = 2.0
+COMPETING_PEAK_MAX_ZNCC_GAP = 0.08
+PREDICTION_CONFLICT_MIN_RADIUS_PX = 3.0
+PREDICTION_CONFLICT_ERROR_MULTIPLIER = 3.0
 
 
 def _field_array(field, name, *, dtype=None, size=None, default=None):
@@ -3475,11 +3526,18 @@ def field_quality_summary(
         "converged_count": converged_count,
         "convergence_known_count": convergence_known_count,
         "converged_fraction": convergence_fraction,
+        "accepted_converged_count": int((valid & convergence_known & converged).sum()),
+        "rejected_converged_count": int((~valid & convergence_known & converged).sum()),
         "invalid_reason_histogram": invalid_reason_histogram,
         "ambiguous_rejected_count": ambiguous_rejected_count,
         "ambiguous_accepted_count": ambiguous_accepted_count,
         "unsafe_accept_count": false_accept_count,
+        # This is a diagnostic proxy, not a measured false-accept rate. A
+        # false match requires independently known displacement ground truth.
         "false_accept_count": false_accept_count,
+        "ambiguous_accept_proxy_count": false_accept_count,
+        "false_accept_is_proxy": True,
+        "false_accept_ground_truth_assessed": False,
         # Kept solely as a compatibility proxy; no ground truth is available
         # to call ordinary quality rejections true false-rejects.
         "false_reject_count": false_reject_proxy_count,
@@ -3569,6 +3627,102 @@ def _coerce_refine_result(result):
     return output
 
 
+def _refine_competing_peak(
+    guess, primary, initial_parameters, refine, reference, deformed, x, y,
+    subset_size, *, max_iter, conv_tol, zncc_min, max_condition_number,
+    max_residual_rms, reject_nonconverged, prepared=None,
+):
+    """Check one independently seeded secondary peak against solver gates.
+
+    The 0.10 raw-correlation margin permits a candidate to improve during
+    affine refinement. It is a bounded heuristic, not an ambiguity guarantee:
+    lower-scoring or further peaks can still converge to valid alternatives.
+    The additional primary/alternative ZNCC-gap cutoff is also a heuristic:
+    it reduces false rejections but cannot prove a weaker candidate is false.
+    """
+    diagnostic = {"status": "NO_CANDIDATE", "result": None}
+    try:
+        score = float(guess.get("competing_peak_zncc", np.nan))
+        u = float(guess.get("competing_peak_u", np.nan))
+        v = float(guess.get("competing_peak_v", np.nan))
+    except (TypeError, ValueError):
+        return diagnostic
+    if not np.isfinite([score, u, v]).all():
+        return diagnostic
+    if score < max(-1.0, float(zncc_min) - COMPETING_PEAK_RAW_MARGIN):
+        diagnostic["status"] = "BELOW_RAW_CANDIDATE_THRESHOLD"
+        return diagnostic
+    if not _displacement_support_is_inside(x, y, u, v, subset_size, deformed.shape):
+        diagnostic["status"] = "CANDIDATE_BOUNDARY_FAILURE"
+        return diagnostic
+    p0 = np.asarray(initial_parameters, dtype=float).reshape(6).copy()
+    p0[0], p0[3] = u, v
+    try:
+        result = _coerce_refine_result(refine(
+            reference, deformed, x, y, subset_size, p0=p0, max_iter=max_iter,
+            tol=conv_tol, **({"_prepared": prepared} if prepared is not None else {}),
+        ))
+    except Exception:
+        result = None
+    if result is None or not result.get("finite"):
+        diagnostic["status"] = "CANDIDATE_REFINE_FAILED"
+        return diagnostic
+    diagnostic["result"] = result
+    condition = result.get("hessian_condition_number", result.get("condition_number"))
+    residual = result.get("residual_rms")
+    if result["zncc"] < float(zncc_min):
+        diagnostic["status"] = "CANDIDATE_ZNCC_BELOW_THRESHOLD"
+    elif condition is not None and np.isfinite(float(condition)) and float(condition) > max_condition_number:
+        diagnostic["status"] = "CANDIDATE_ILL_CONDITIONED"
+    elif np.isfinite(max_residual_rms) and (residual is None or not np.isfinite(float(residual)) or float(residual) > max_residual_rms):
+        diagnostic["status"] = "CANDIDATE_RESIDUAL_ABOVE_THRESHOLD"
+    elif reject_nonconverged and result.get("converged") is not None and not bool(result["converged"]):
+        diagnostic["status"] = "CANDIDATE_NOT_CONVERGED"
+    elif np.hypot(result["u"] - primary["u"], result["v"] - primary["v"]) <= COMPETING_PEAK_MIN_SEPARATION_PX:
+        diagnostic["status"] = "SAME_REFINED_BASIN"
+    elif not np.isfinite(float(primary.get("zncc", np.nan))):
+        diagnostic["status"] = "PRIMARY_ZNCC_UNAVAILABLE"
+    elif float(primary["zncc"]) - result["zncc"] > COMPETING_PEAK_MAX_ZNCC_GAP:
+        diagnostic["status"] = "CANDIDATE_WEAKER_THAN_GAP"
+    else:
+        diagnostic["status"] = "DISTINCT_VALID_CANDIDATE"
+    return diagnostic
+
+
+def _prediction_conflict(primary, candidate, transform, x, y, *, scale_x=1.0, scale_y=1.0):
+    """Conservatively flag two valid candidates around a global prediction.
+
+    Distances and the heuristic radius are in full-resolution pixels. The
+    accepted global affine model is a prediction, not displacement ground truth;
+    a conflict causes rejection, never selection of the predicted candidate.
+    """
+    diagnostic = {"conflict": False, "tested": False, "radius_px": np.nan,
+                  "primary_distance_px": np.nan, "candidate_distance_px": np.nan}
+    if transform is None or candidate is None:
+        return diagnostic
+    try:
+        median_error = float(transform["median_reprojection_error_px"])
+        matrix = np.asarray(transform["matrix"], dtype=float).reshape(2, 3)
+        sx, sy = float(scale_x), float(scale_y)
+        if (not np.isfinite(median_error) or median_error < 0 or
+                not np.isfinite(matrix).all() or sx <= 0 or sy <= 0):
+            return diagnostic
+        prediction = matrix @ np.array([float(x), float(y), 1.0]) - np.array([float(x), float(y)])
+        main = np.array([float(primary["u"]) / sx, float(primary["v"]) / sy])
+        other = np.array([float(candidate["u"]) / sx, float(candidate["v"]) / sy])
+        if not np.isfinite([*prediction, *main, *other]).all():
+            return diagnostic
+        radius = max(PREDICTION_CONFLICT_MIN_RADIUS_PX,
+                     PREDICTION_CONFLICT_ERROR_MULTIPLIER * median_error)
+        main_distance = float(np.linalg.norm(main - prediction))
+        candidate_distance = float(np.linalg.norm(other - prediction))
+    except (KeyError, TypeError, ValueError):
+        return diagnostic
+    return {"conflict": bool(candidate_distance <= radius < main_distance), "tested": True,
+            "radius_px": float(radius), "primary_distance_px": main_distance,
+            "candidate_distance_px": candidate_distance}
+
+
 def _serializable_float(value):
     try:
         value = float(value)
@@ -3653,6 +3807,7 @@ def _run_2d_dic_multiscale(
     initial_guesses = {}
     prepared_levels = [_prepare_dic_images(f, g) for f, g in zip(reference_pyramid, deformed_pyramid)] if refine is _CANONICAL_REFINERS[solver_name] else []
     pyramid_diagnostics = []
+    pyramid_conflicts = {}
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             x_fine, y_fine = float(X[i, j]), float(Y[i, j])
@@ -3715,6 +3870,13 @@ def _run_2d_dic_multiscale(
                 condition = refined.get("hessian_condition_number") if refined else None
                 residual = refined.get("residual_rms") if refined else None
                 converged = refined.get("converged") if refined else None
+                raw_margin = guess.get("peak_margin")
+                raw_ratio = guess.get("peak_ratio")
+                similar_peak = bool(
+                    raw_margin is not None and raw_ratio is not None
+                    and np.isfinite([raw_margin, raw_ratio]).all()
+                    and raw_margin < peak_margin_min and raw_ratio < peak_ratio_min
+                )
                 layer_accepted = bool(
                     refined_finite
                     and float(refined["zncc"]) >= float(zncc_min)
@@ -3722,7 +3884,33 @@ def _run_2d_dic_multiscale(
                         condition is None
                         or (np.isfinite(float(condition)) and float(condition) <= max_condition_number)
                     )
+                    and (not np.isfinite(max_residual_rms) or
+                         (residual is not None and np.isfinite(float(residual)) and float(residual) <= max_residual_rms))
+                    and (not reject_nonconverged or converged is None or bool(converged))
                 )
+                candidate = {"status": "NOT_EVALUATED", "result": None}
+                if layer_accepted and not similar_peak:
+                    candidate = _refine_competing_peak(
+                        guess, refined, p0, refine, reference_level, deformed_level,
+                        x_level, y_level, subset_level, max_iter=max_iter,
+                        conv_tol=conv_tol, zncc_min=zncc_min,
+                        max_condition_number=max_condition_number,
+                        max_residual_rms=max_residual_rms,
+                        reject_nonconverged=reject_nonconverged,
+                        prepared=prepared_levels[level_index] if prepared_levels else None,
+                    )
+                prediction = {"conflict": False, "tested": False, "radius_px": np.nan,
+                              "primary_distance_px": np.nan, "candidate_distance_px": np.nan}
+                if candidate["status"] in {"DISTINCT_VALID_CANDIDATE", "CANDIDATE_WEAKER_THAN_GAP"}:
+                    prediction = _prediction_conflict(
+                        refined, candidate["result"], _global_initial_transform,
+                        x_fine, y_fine, scale_x=sx, scale_y=sy,
+                    )
+                    if prediction["conflict"] and candidate["status"] == "CANDIDATE_WEAKER_THAN_GAP":
+                        candidate["status"] = "PREDICTION_CONFLICT"
+                competing = candidate["status"] in {"DISTINCT_VALID_CANDIDATE", "PREDICTION_CONFLICT"}
+                level_ambiguous = similar_peak or competing
+                alternate = candidate["result"]
                 layer_record = {
                     "level_index": int(level_index),
                     "scale_x": float(sx),
@@ -3742,6 +3930,22 @@ def _run_2d_dic_multiscale(
                     "peak_margin": _serializable_float(guess.get("peak_margin")),
                     "best_to_second_peak_ratio": _serializable_float(guess.get("best_to_second_peak_ratio")),
                     "second_to_best_peak_ratio": _serializable_float(guess.get("second_to_best_peak_ratio")),
+                    "competing_peak_zncc": _serializable_float(guess.get("competing_peak_zncc")),
+                    "competing_peak_u": _serializable_float(guess.get("competing_peak_u")),
+                    "competing_peak_v": _serializable_float(guess.get("competing_peak_v")),
+                    "competing_peak_refined_zncc": _serializable_float(alternate.get("zncc") if alternate else None),
+                    "competing_peak_zncc_gap": _serializable_float(refined["zncc"] - alternate["zncc"] if refined and alternate else None),
+                    "competing_peak_max_zncc_gap": COMPETING_PEAK_MAX_ZNCC_GAP,
+                    "competing_peak_status": candidate["status"],
+                    "prediction_conflict": prediction["conflict"],
+                    "prediction_conflict_tested": prediction["tested"],
+                    "prediction_conflict_radius_px": _serializable_float(prediction["radius_px"]),
+                    "prediction_primary_distance_px": _serializable_float(prediction["primary_distance_px"]),
+                    "prediction_candidate_distance_px": _serializable_float(prediction["candidate_distance_px"]),
+                    "peak_is_ambiguous": level_ambiguous,
+                    "ambiguity_reason": ("similar_raw_peaks" if similar_peak else
+                                         "prediction_conflict" if candidate["status"] == "PREDICTION_CONFLICT" else
+                                         "distinct_valid_candidate" if competing else ""),
                     "refine_u": _serializable_float(refined.get("u") if refined else None),
                     "refine_v": _serializable_float(refined.get("v") if refined else None),
                     "refine_zncc": _serializable_float(refined.get("zncc") if refined else None),
@@ -3753,18 +3957,27 @@ def _run_2d_dic_multiscale(
                         "boundary_support_failure" if not boundary_ok else "refine_failed"
                     ),
                     "boundary_support_ok": bool(boundary_ok),
-                    "accepted": layer_accepted,
+                    "accepted": bool(layer_accepted and not (level_ambiguous and reject_ambiguous_peaks)),
                 }
                 point_levels.append(layer_record)
+                if level_ambiguous:
+                    # Preserve the first explicit prediction conflict when an
+                    # earlier layer was ambiguous for a different reason.
+                    # The complete history remains in point_levels.
+                    previous = pyramid_conflicts.get((i, j))
+                    if previous is None or (layer_record["prediction_conflict"] and
+                                            not previous["prediction_conflict"]):
+                        pyramid_conflicts[(i, j)] = layer_record
+                    if reject_ambiguous_peaks:
+                        break
                 if not boundary_ok:
                     seed_p = None
                     break
-                if refined_finite:
+                if layer_accepted:
                     seed_u, seed_v = float(refined["u"]), float(refined["v"])
                     seed_p = np.asarray(refined["p"], dtype=float).copy()
-                elif np.isfinite([guess_u, guess_v]).all():
-                    seed_u, seed_v = guess_u, guess_v
-                    seed_p = np.asarray(p0, dtype=float)
+                # A failed coarse refinement is not evidence for propagating
+                # its peak; keep the previous seed and search anew next level.
                 if level_index + 1 < len(reference_pyramid):
                     seed_u *= scales_x[level_index + 1] / sx
                     seed_v *= scales_y[level_index + 1] / sy
@@ -3802,6 +4015,7 @@ def _run_2d_dic_multiscale(
         pyramid_scale=pyramid_scale,
         _initial_guesses=initial_guesses,
         _pyramid_diagnostics=pyramid_diagnostics,
+        _pyramid_conflicts=pyramid_conflicts,
         _coordinate_offset=(0.0, 0.0),
         _output_roi=roi,
         specimen_mask=specimen_mask, strain_degree=strain_degree,
@@ -3855,6 +4069,7 @@ def run_2d_dic(
     _global_initial_transform=None,
     _initial_guesses=None,
     _pyramid_diagnostics=None,
+    _pyramid_conflicts=None,
     _coordinate_offset=None,
     _output_roi=None,
 ):
@@ -3952,8 +4167,8 @@ def run_2d_dic(
     if search_radius is None:
         search_radius = max(8, subset_size // 2)
     effective_search_radius = int(search_radius)
-    if global_transform is not None:
-        effective_search_radius = min(effective_search_radius, max(3,int(math.ceil(3*global_transform["median_reprojection_error_px"]))))
+    # Global RANSAC inlier residuals do not bound local non-affine motion.
+    # Preserve the requested neighborhood around its predicted location.
 
     grid_X, grid_Y = build_poi_grid(roi, subset_size, step, reference.shape)
     if _coordinate_offset is None:
@@ -3979,6 +4194,26 @@ def run_2d_dic(
     peak_second = np.full((ny, nx), np.nan, dtype=np.float64)
     peak_margin = np.full((ny, nx), np.nan, dtype=np.float64)
     peak_ratio = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_zncc = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_u = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_v = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_refined_zncc = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_zncc_gap = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_refined_u = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_refined_v = np.full((ny, nx), np.nan, dtype=np.float64)
+    competing_peak_status = np.full((ny, nx), "NOT_EVALUATED", dtype=object)
+    competing_peak_is_plausible = np.zeros((ny, nx), dtype=bool)
+    pyramid_conflict_level = np.full((ny, nx), -1, dtype=np.int32)
+    pyramid_competing_peak_zncc = np.full((ny, nx), np.nan, dtype=np.float64)
+    pyramid_competing_peak_u = np.full((ny, nx), np.nan, dtype=np.float64)
+    pyramid_competing_peak_v = np.full((ny, nx), np.nan, dtype=np.float64)
+    pyramid_peak_margin = np.full((ny, nx), np.nan, dtype=np.float64)
+    pyramid_competing_peak_zncc_gap = np.full((ny, nx), np.nan, dtype=np.float64)
+    prediction_conflict = np.zeros((ny, nx), dtype=bool)
+    prediction_conflict_tested = np.zeros((ny, nx), dtype=bool)
+    prediction_conflict_radius_px = np.full((ny, nx), np.nan, dtype=np.float64)
+    prediction_primary_distance_px = np.full((ny, nx), np.nan, dtype=np.float64)
+    prediction_candidate_distance_px = np.full((ny, nx), np.nan, dtype=np.float64)
     peak_is_ambiguous = np.zeros((ny, nx), dtype=bool)
     residual_rms = np.full((ny, nx), np.nan, dtype=np.float64)
     hessian_condition_number = np.full((ny, nx), np.nan, dtype=np.float64)
@@ -3999,6 +4234,35 @@ def run_2d_dic(
                 continue
             px = float(grid_X[i, j])
             py = float(grid_Y[i, j])
+            pyramid_conflict = (_pyramid_conflicts or {}).get((i, j))
+            if pyramid_conflict is not None:
+                pyramid_conflict_level[i, j] = int(pyramid_conflict["level_index"])
+                prediction_conflict[i, j] = bool(pyramid_conflict.get("prediction_conflict", False))
+                prediction_conflict_tested[i, j] = bool(pyramid_conflict.get("prediction_conflict_tested", False))
+                for target, key, scale in (
+                    (pyramid_competing_peak_zncc, "competing_peak_zncc", 1.0),
+                    (pyramid_competing_peak_u, "competing_peak_u", pyramid_conflict["scale_x"]),
+                    (pyramid_competing_peak_v, "competing_peak_v", pyramid_conflict["scale_y"]),
+                    (pyramid_peak_margin, "peak_margin", 1.0),
+                    (pyramid_competing_peak_zncc_gap, "competing_peak_zncc_gap", 1.0),
+                    (prediction_conflict_radius_px, "prediction_conflict_radius_px", 1.0),
+                    (prediction_primary_distance_px, "prediction_primary_distance_px", 1.0),
+                    (prediction_candidate_distance_px, "prediction_candidate_distance_px", 1.0),
+                ):
+                    value = pyramid_conflict.get(key)
+                    if value is not None:
+                        target[i, j] = float(value) / scale
+            if pyramid_conflict is not None and reject_ambiguous_peaks:
+                peak_is_ambiguous[i, j] = True
+                competing_peak_status[i, j] = "PYRAMID_AMBIGUOUS_PEAK"
+                competing_peak_is_plausible[i, j] = (
+                    pyramid_conflict["competing_peak_status"] in {"DISTINCT_VALID_CANDIDATE", "PREDICTION_CONFLICT"}
+                )
+                invalid_reason[i, j] = "AMBIGUOUS_PEAK"
+                stop_reason[i, j] = "pyramid_competing_correlation_peaks"
+                if progress_callback is not None:
+                    progress_callback(i * nx + j + 1, total)
+                continue
             seed = _affine_initial_parameters(global_transform,px,py) if global_transform is not None else (0.0,0.0)
             if _initial_guesses is not None:
                 seed = _initial_guesses.get((i, j), seed)
@@ -4044,6 +4308,9 @@ def run_2d_dic(
                 (peak_second, "second_peak"),
                 (peak_margin, "peak_margin"),
                 (peak_ratio, "peak_ratio"),
+                (competing_peak_zncc, "competing_peak_zncc"),
+                (competing_peak_u, "competing_peak_u"),
+                (competing_peak_v, "competing_peak_v"),
             ):
                 value = guess.get(key)
                 if value is not None:
@@ -4054,12 +4321,12 @@ def run_2d_dic(
             margin = peak_margin[i, j]
             ratio = peak_ratio[i, j]
             has_peak_diagnostics = np.isfinite(margin) and np.isfinite(ratio)
-            ambiguous = bool(
+            similar_peak = bool(
                 has_peak_diagnostics
                 and (margin < peak_margin_min and ratio < peak_ratio_min)
             )
-            peak_is_ambiguous[i, j] = ambiguous
-            if ambiguous and reject_ambiguous_peaks:
+            peak_is_ambiguous[i, j] = similar_peak or pyramid_conflict is not None
+            if similar_peak and reject_ambiguous_peaks:
                 invalid_reason[i, j] = "AMBIGUOUS_PEAK"
                 stop_reason[i, j] = "ambiguous_peak"
                 if progress_callback is not None:
@@ -4160,6 +4427,47 @@ def run_2d_dic(
             elif reject_nonconverged and convergence_known[i, j] and not converged[i, j]:
                 invalid_reason[i, j] = invalid_reason[i, j] or "NOT_CONVERGED"
             if not invalid_reason[i, j]:
+                candidate = _refine_competing_peak(
+                    guess, {"u": result_u, "v": result_v, "zncc": result_zncc}, p0, refine,
+                    reference, deformed, px, py, subset_size, max_iter=max_iter,
+                    conv_tol=conv_tol, zncc_min=zncc_min,
+                    max_condition_number=max_condition_number,
+                    max_residual_rms=max_residual_rms,
+                    reject_nonconverged=reject_nonconverged, prepared=prepared_images,
+                )
+                alternate = candidate["result"]
+                if alternate is not None:
+                    competing_peak_refined_zncc[i, j] = alternate["zncc"]
+                    competing_peak_zncc_gap[i, j] = result_zncc - alternate["zncc"]
+                    competing_peak_refined_u[i, j] = alternate["u"]
+                    competing_peak_refined_v[i, j] = alternate["v"]
+                if candidate["status"] in {"DISTINCT_VALID_CANDIDATE", "CANDIDATE_WEAKER_THAN_GAP"}:
+                    prediction = _prediction_conflict(
+                        {"u": result_u, "v": result_v}, alternate,
+                        global_transform, px, py,
+                    )
+                    # Prefer a detected conflict's distances over earlier,
+                    # non-conflicting coarse-level evidence. The full coarse
+                    # record remains available in pyramid diagnostics.
+                    if prediction["tested"] and (not prediction_conflict_tested[i, j] or
+                            (prediction["conflict"] and not prediction_conflict[i, j])):
+                        prediction_conflict_tested[i, j] = True
+                        prediction_conflict_radius_px[i, j] = prediction["radius_px"]
+                        prediction_primary_distance_px[i, j] = prediction["primary_distance_px"]
+                        prediction_candidate_distance_px[i, j] = prediction["candidate_distance_px"]
+                    prediction_conflict[i, j] |= prediction["conflict"]
+                    if prediction["conflict"] and candidate["status"] == "CANDIDATE_WEAKER_THAN_GAP":
+                        candidate["status"] = "PREDICTION_CONFLICT"
+                competing_peak_status[i, j] = candidate["status"]
+                competing = candidate["status"] in {"DISTINCT_VALID_CANDIDATE", "PREDICTION_CONFLICT"}
+                competing_peak_is_plausible[i, j] = competing
+                if competing:
+                    peak_is_ambiguous[i, j] = True
+                    if reject_ambiguous_peaks:
+                        invalid_reason[i, j] = "AMBIGUOUS_PEAK"
+                        stop_reason[i, j] = ("prediction_conflicting_peaks" if candidate["status"] == "PREDICTION_CONFLICT"
+                                             else "competing_correlation_peaks")
+            if not invalid_reason[i, j]:
                 U[i, j] = result_u
                 V[i, j] = result_v
                 Z[i, j] = result_zncc
@@ -4241,6 +4549,26 @@ def run_2d_dic(
             where=np.abs(peak_best.ravel()) > 1e-12,
         ),
         "peak_is_ambiguous": peak_is_ambiguous.ravel(),
+        "competing_peak_zncc": competing_peak_zncc.ravel(),
+        "competing_peak_u": competing_peak_u.ravel(),
+        "competing_peak_v": competing_peak_v.ravel(),
+        "competing_peak_refined_zncc": competing_peak_refined_zncc.ravel(),
+        "competing_peak_zncc_gap": competing_peak_zncc_gap.ravel(),
+        "competing_peak_refined_u": competing_peak_refined_u.ravel(),
+        "competing_peak_refined_v": competing_peak_refined_v.ravel(),
+        "competing_peak_status": competing_peak_status.ravel(),
+        "competing_peak_is_plausible": competing_peak_is_plausible.ravel(),
+        "pyramid_conflict_level": pyramid_conflict_level.ravel(),
+        "pyramid_competing_peak_zncc": pyramid_competing_peak_zncc.ravel(),
+        "pyramid_competing_peak_u": pyramid_competing_peak_u.ravel(),
+        "pyramid_competing_peak_v": pyramid_competing_peak_v.ravel(),
+        "pyramid_peak_margin": pyramid_peak_margin.ravel(),
+        "pyramid_competing_peak_zncc_gap": pyramid_competing_peak_zncc_gap.ravel(),
+        "prediction_conflict": prediction_conflict.ravel(),
+        "prediction_conflict_tested": prediction_conflict_tested.ravel(),
+        "prediction_conflict_radius_px": prediction_conflict_radius_px.ravel(),
+        "prediction_primary_distance_px": prediction_primary_distance_px.ravel(),
+        "prediction_candidate_distance_px": prediction_candidate_distance_px.ravel(),
         "residual_rms": residual_rms.ravel(),
         "hessian_condition_number": hessian_condition_number.ravel(),
         "condition_number": hessian_condition_number.ravel(),
@@ -4256,6 +4584,13 @@ def run_2d_dic(
         "fit_point_count": np.asarray(strains["fit_point_count"], dtype=int).ravel(),
         "strain_fit_effective_count": strains["fit_effective_count"].ravel(),
         "strain_fit_degree": strains["fit_degree"].ravel(),
+        # These are the gradients used for the strain fit, not the distinct
+        # affine subset-warp parameters stored in P.
+        "strain_fit_dudx": strains["dudx"].ravel(),
+        "strain_fit_dudy": strains["dudy"].ravel(),
+        "strain_fit_dvdx": strains["dvdx"].ravel(),
+        "strain_fit_dvdy": strains["dvdy"].ravel(),
+        "deformation_jacobian": strains["deformation_jacobian"].ravel(),
         "dudx_standard_error": strains["gradient_standard_error"][:,:,0].ravel(),
         "dudy_standard_error": strains["gradient_standard_error"][:,:,1].ravel(),
         "dvdx_standard_error": strains["gradient_standard_error"][:,:,2].ravel(),
@@ -4282,6 +4617,12 @@ def run_2d_dic(
         "peak_margin_min": peak_margin_min,
         "peak_ratio_min": peak_ratio_min,
         "reject_ambiguous_peaks": bool(reject_ambiguous_peaks),
+        "competing_peak_policy": "strongest_distinct_local_peak_prediction_conflict_v3",
+        "competing_peak_raw_margin": COMPETING_PEAK_RAW_MARGIN,
+        "competing_peak_min_separation_px": COMPETING_PEAK_MIN_SEPARATION_PX,
+        "competing_peak_max_zncc_gap": COMPETING_PEAK_MAX_ZNCC_GAP,
+        "prediction_conflict_min_radius_px": PREDICTION_CONFLICT_MIN_RADIUS_PX,
+        "prediction_conflict_error_multiplier": PREDICTION_CONFLICT_ERROR_MULTIPLIER,
         "max_condition_number": max_condition_number,
         "reject_nonconverged": bool(reject_nonconverged),
         "max_residual_rms": max_residual_rms,
@@ -4358,6 +4699,26 @@ def dic_field_to_dataframe(field, *, include_quality=True):
             ("second_to_best_peak_ratio", float),
             ("second_peak_ratio", float),
             ("peak_is_ambiguous", bool),
+            ("competing_peak_zncc", float),
+            ("competing_peak_u", float),
+            ("competing_peak_v", float),
+            ("competing_peak_refined_zncc", float),
+            ("competing_peak_zncc_gap", float),
+            ("competing_peak_refined_u", float),
+            ("competing_peak_refined_v", float),
+            ("competing_peak_status", object),
+            ("competing_peak_is_plausible", bool),
+            ("pyramid_conflict_level", int),
+            ("pyramid_competing_peak_zncc", float),
+            ("pyramid_competing_peak_u", float),
+            ("pyramid_competing_peak_v", float),
+            ("pyramid_peak_margin", float),
+            ("pyramid_competing_peak_zncc_gap", float),
+            ("prediction_conflict", bool),
+            ("prediction_conflict_tested", bool),
+            ("prediction_conflict_radius_px", float),
+            ("prediction_primary_distance_px", float),
+            ("prediction_candidate_distance_px", float),
             ("residual_rms", float),
             ("hessian_condition_number", float),
             ("iterations", int),
@@ -4375,6 +4736,11 @@ def dic_field_to_dataframe(field, *, include_quality=True):
             ("spatial_outlier", bool),
             ("strain_fit_degree", int),
             ("strain_fit_effective_count", float),
+            ("strain_fit_dudx", float),
+            ("strain_fit_dudy", float),
+            ("strain_fit_dvdx", float),
+            ("strain_fit_dvdy", float),
+            ("deformation_jacobian", float),
             ("dudx_standard_error", float),
             ("dudy_standard_error", float),
             ("dvdx_standard_error", float),
@@ -4397,12 +4763,16 @@ def write_dic_field_txt(field, path):
     for row in table.itertuples(index=False):
         cells = []
         for col, value in zip(columns, row):
-            if col in {"valid", "strain_valid", "peak_is_ambiguous", "converged", "convergence_known", "eligible", "spatial_outlier"}:
+            if col in {"valid", "strain_valid", "peak_is_ambiguous", "competing_peak_is_plausible", "prediction_conflict", "prediction_conflict_tested", "converged", "convergence_known", "eligible", "spatial_outlier"}:
                 cells.append("1" if bool(value) else "0")
-            elif col in {"stop_reason", "invalid_reason", "strain_invalid_reason"}:
+            elif col in {"stop_reason", "invalid_reason", "strain_invalid_reason", "competing_peak_status"}:
                 cells.append("" if value is None else str(value))
             elif pd.isna(value) or not np.isfinite(float(value)):
                 cells.append("NaN")
+            elif col == "deformation_jacobian":
+                # Preserve very small signed values for numerical fold/near-
+                # singular diagnostics; fixed decimals would round them to 0.
+                cells.append(f"{float(value):.17g}")
             else:
                 cells.append(f"{float(value):.8f}")
         lines.append("\t".join(cells))
@@ -4440,6 +4810,12 @@ def write_dic_field_parameters(field, path):
         "display": field.get("display_options", {}),
         "peak_margin_min": field.get("peak_margin_min"),
         "peak_ratio_min": field.get("peak_ratio_min"),
+        "competing_peak_policy": field.get("competing_peak_policy"),
+        "competing_peak_raw_margin": field.get("competing_peak_raw_margin"),
+        "competing_peak_min_separation_px": field.get("competing_peak_min_separation_px"),
+        "competing_peak_max_zncc_gap": field.get("competing_peak_max_zncc_gap"),
+        "prediction_conflict_min_radius_px": field.get("prediction_conflict_min_radius_px"),
+        "prediction_conflict_error_multiplier": field.get("prediction_conflict_error_multiplier"),
         "max_condition_number": field.get("max_condition_number"),
         "reject_nonconverged": field.get("reject_nonconverged"),
         "max_residual_rms": field.get("max_residual_rms"),
@@ -4666,8 +5042,12 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
     parameters_path = write_dic_field_parameters(field, output_dir / f"{stem}_parameters.txt")
     arrays = {key: np.asarray(value) for key, value in field.items()
               if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" and not key.endswith("_image")}
+    if "competing_peak_status" in field:
+        arrays["competing_peak_status"] = np.asarray(field["competing_peak_status"], dtype=str)
     parameters = {key: field.get(key) for key in ("subset_size", "step", "strain_window", "smooth_sigma", "strain_degree",
-                  "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px")}
+                  "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px",
+                  "competing_peak_policy", "competing_peak_raw_margin", "competing_peak_min_separation_px",
+                  "competing_peak_max_zncc_gap", "prediction_conflict_min_radius_px", "prediction_conflict_error_multiplier")}
     arrays["metadata_json"] = np.asarray(json.dumps({"roi": field.get("roi"), "parameters": parameters, "provenance": field.get("provenance", {}),
                        "interpolation": field.get("interpolation"), "strain_gauge_span_px": field.get("strain_gauge_span_px"),
                        "mask": field.get("mask_provenance"), "display": field.get("display_options", {})}))

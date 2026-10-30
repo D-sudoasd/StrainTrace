@@ -1,0 +1,104 @@
+{
+  "report_version": "necking-search-validation-v1",
+  "purpose": "Known-displacement assessment of global initialization and local search radius",
+  "limitations": [
+    "Localized case is in-plane shear, not a complete optical or mechanical tensile-neck model.",
+    "Uses directly sampled floating-point synthetic images, not the experimental image-import path.",
+    "The spatial outlier threshold is deliberately permissive to isolate the search mechanism.",
+    "Error statistics use accepted points only; inspect valid counts to detect selection bias.",
+    "Timing is a single elapsed run on this machine and is not a calibrated performance benchmark.",
+    "No VIC-2D data or independent experimental ground truth is evaluated."
+  ],
+  "provenance": {
+    "core_sha256": "9c72d2ec77c0fa4ee31f206923a963061bc5c199a366d7b3651b331abbce22b1",
+    "script_sha256": "ae96ddfea3fbd8295da93c72c9c66d27ea4c2498e4aa16e79aa5944446cdd08c",
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "settings": {
+    "subset_size": 21,
+    "step": 30,
+    "search_radius": 18,
+    "zncc_min": 0.75,
+    "strain_window": 3,
+    "outlier_threshold_px": 1000000.0,
+    "max_iter": 40,
+    "initialization": "auto",
+    "roi": [
+      30,
+      30,
+      360,
+      360
+    ]
+  },
+  "cases": [
+    {
+      "case": "localized_shear_band",
+      "input_sha256": "d7584bfaf53fae72ed126cc7a71ea8544972ec6c93f418e44456c69b30b8f304",
+      "field_point_count": 144,
+      "correlation_valid_count": 144,
+      "local_band_point_count": 24,
+      "local_band_valid_count": 24,
+      "valid_displacement_mean_error_px": 0.05939324549592958,
+      "valid_displacement_rmse_px": 0.10757606621008334,
+      "valid_displacement_max_error_px": 0.47050697764813554,
+      "valid_error_over_1_px_count": 0,
+      "known_converged_count": 144,
+      "invalid_reasons": {},
+      "effective_search_radius_px": 18,
+      "initial_transform": {
+        "matrix": [
+          [
+            0.9999741964811213,
+            0.00012998403090155565,
+            15.091983376212115
+          ],
+          [
+            1.8152191444280237e-06,
+            0.9999999090018105,
+            5.000548276372006
+          ]
+        ],
+        "matches": 1146,
+        "inliers": 851,
+        "median_reprojection_error_px": 0.10058794358986915
+      },
+      "elapsed_seconds": 0.29432499990798533
+    },
+    {
+      "case": "uniform_affine",
+      "input_sha256": "5c8f7d4f5bb146161462eef815186d6fa3edb100386bff348351f631540ef2a3",
+      "field_point_count": 144,
+      "correlation_valid_count": 144,
+      "local_band_point_count": 24,
+      "local_band_valid_count": 24,
+      "valid_displacement_mean_error_px": 0.00024438355774266773,
+      "valid_displacement_rmse_px": 0.0003503451693571807,
+      "valid_displacement_max_error_px": 0.0008355170920807416,
+      "valid_error_over_1_px_count": 0,
+      "known_converged_count": 144,
+      "invalid_reasons": {},
+      "effective_search_radius_px": 18,
+      "initial_transform": {
+        "matrix": [
+          [
+            0.9799952528738243,
+            0.010004728240843763,
+            17.248997534088804
+          ],
+          [
+            0.005018005405443313,
+            1.0599813355592647,
+            -9.641992062845222
+          ]
+        ],
+        "matches": 1075,
+        "inliers": 1075,
+        "median_reprojection_error_px": 0.029003158638320897
+      },
+      "elapsed_seconds": 0.20438070013187826
+    }
+  ]
+}

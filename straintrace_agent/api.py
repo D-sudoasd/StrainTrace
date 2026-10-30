@@ -139,6 +139,17 @@ def _solver_parameters_match(recorded: Any, expected: Any) -> bool:
             return False
         if type(recorded[key]) is not type(expected[key]) or recorded[key] != expected[key]:
             return False
+    # Old v1 plans and sidecars predate the explicit policy and both omitted
+    # it. Preserve their read-only comparison while refusing a mixed pair.
+    key = "reject_nonconverged"
+    if key not in recorded and key not in expected:
+        return True
+    if key not in recorded or key not in expected:
+        return False
+    if type(recorded[key]) is not bool or type(expected[key]) is not bool:
+        return False
+    if recorded[key] != expected[key]:
+        return False
     return True
 
 
@@ -1165,11 +1176,13 @@ def plan_project(project: str | os.PathLike[str], *, progress: Callable[[dict[st
                             solver=core.DIC_SOLVER_ICGN, strain_window=5,
                             search_radius=max(8, subset // 2),
                             specimen_mask=specimen_mask,
+                            reject_nonconverged=True,
                         )
                         quality = field.get("quality_summary") or core.field_quality_summary(field)
                         candidates.append({
                             "subset_size_px": int(subset), "step_px": pilot_step, "strain_window_poi": 5,
                             "solver": core.DIC_SOLVER_ICGN,
+                            "reject_nonconverged": True,
                             "scientific_ok": bool(quality.get("scientific_ok", False)),
                             "correlation_valid_fraction": float(quality.get("correlation_valid_fraction", 0.0)),
                             "strain_valid_fraction": float(quality.get("strain_valid_fraction", 0.0)),
@@ -1178,7 +1191,7 @@ def plan_project(project: str | os.PathLike[str], *, progress: Callable[[dict[st
                         })
                     except Exception as exc:
                         candidates.append({"subset_size_px": int(subset), "step_px": pilot_step, "strain_window_poi": 5,
-                                           "solver": core.DIC_SOLVER_ICGN, "scientific_ok": False,
+                                           "solver": core.DIC_SOLVER_ICGN, "reject_nonconverged": True, "scientific_ok": False,
                                            "correlation_valid_fraction": 0.0, "strain_valid_fraction": 0.0,
                                            "quality_reasons": ["pilot_error"], "error": f"{type(exc).__name__}: {exc}"})
                 pilot_problem = None if candidates else "no candidate subset fits a 3x3 pilot grid"
@@ -1196,6 +1209,7 @@ def plan_project(project: str | os.PathLike[str], *, progress: Callable[[dict[st
             chosen = {"subset_size_px": fallback_subset, "step_px": fallback_step, "strain_window_poi": 5, "solver": core.DIC_SOLVER_ICGN}
             plan_status = "review_required"
         chosen["search_radius_px"] = max(8, int(chosen["subset_size_px"]) // 2)
+        chosen["reject_nonconverged"] = True
         roi_before_support_crop = roi
         roi = _safe_roi_for_image(roi, reference.shape, search_radius_px=int(chosen["search_radius_px"]))
         x, y, width, height = roi
@@ -1559,6 +1573,12 @@ def run(
                     "candidate_trials": plan.get("candidate_trials", []),
                 },
             )
+        parameters = dict(plan["selected_parameters"])
+        if parameters.get("reject_nonconverged") is not True:
+            raise AgentError(
+                "PLAN_SOLVER_POLICY_INVALID",
+                "create a fresh plan with explicit nonconverged-point rejection",
+            )
         _record_inventory(root, records, input_sha)
         run_fingerprint = _run_fingerprint(config, plan, input_sha, code_sha)
         run_id = f"run-{run_fingerprint[:20]}"
@@ -1584,7 +1604,6 @@ def run(
         except AgentError as exc:
             raise AgentError("REFERENCE_FRAME_UNREADABLE", exc.message, path=str(reference_record["path"])) from exc
         roi = tuple(int(value) for value in plan["analysis_rectangle_candidate_px"])
-        parameters = dict(plan["selected_parameters"])
         specimen_mask = _load_specimen_mask(config, reference.shape)
         mechanics, mechanics_status = _load_mechanics(config)
         displacement_reference = None
@@ -1645,6 +1664,7 @@ def run(
                     subset_size=int(parameters["subset_size_px"]), step=int(parameters["step_px"]),
                     solver=str(parameters["solver"]), strain_window=int(parameters["strain_window_poi"]),
                     search_radius=int(parameters["search_radius_px"]),
+                    reject_nonconverged=parameters["reject_nonconverged"],
                     specimen_mask=specimen_mask,
                     progress_callback=dic_progress,
                 )

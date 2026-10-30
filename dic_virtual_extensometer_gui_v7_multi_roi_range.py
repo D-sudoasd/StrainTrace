@@ -3124,6 +3124,7 @@ class MultiROIGUI:
         self.dic_last_filename = None
         self.dic_last_reference_frame_1based = None
         self.dic_last_reference_filename = None
+        self._dic_diagnostic_notice = None
         self.field_viewer_context_var = tk.StringVar(value="")
         self._viewer_kind = "extensometer"
         self._committed_analysis_mode = ANALYSIS_MODE_EXTENSOMETER
@@ -3833,9 +3834,158 @@ class MultiROIGUI:
         correlation = minimum_fraction("correlation_valid_fraction")
         strain = minimum_fraction("strain_valid_fraction")
         failed_text = "、".join(failed[:12]) + ("…" if len(failed) > 12 else "") if failed else "无"
-        return (f"全场 DIC：{valid_count}/{len(frames)} 个变形帧通过有效性检查。\n"
+        return (f"全场 DIC：{valid_count}/{len(frames)} 个变形帧通过数值质量门。\n"
                 f"已计算帧的最低有效点比例：相关 {correlation}；应变 {strain}。\n"
                 f"未通过的帧：{failed_text}。")
+
+    @staticmethod
+    def format_fullfield_frame_quality(field, frame_quality=None):
+        """Describe the displayed frame using its recorded gate, not the run gate."""
+        record = frame_quality if isinstance(frame_quality, dict) else {}
+        summary = field.get("quality_summary") if isinstance(field.get("quality_summary"), dict) else {}
+        status = record.get("status")
+        if status == "scientific_valid":
+            label = "当前帧：通过数值质量门"
+        elif status == "computed_partial":
+            label = "当前帧：部分结果，未通过数值质量门；仅供排查"
+        elif status == "invalid":
+            label = "当前帧：无有效结果，未通过数值质量门"
+        else:
+            label = "当前帧：数值质量门状态未提供；请查看运行清单"
+
+        def fraction(key):
+            value = record.get(key, summary.get(key))
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return "未提供"
+            return f"{value:.1%}" if np.isfinite(value) and 0 <= value <= 1 else "未提供"
+
+        reasons = summary.get("scientific_reasons") or []
+        reason_text = f"；门限原因：{', '.join(map(str, reasons))}" if reasons else ""
+        return (f"{label}。相关有效比例 {fraction('correlation_valid_fraction')}；"
+                f"应变有效比例 {fraction('strain_valid_fraction')}{reason_text}。"
+                "数值质量门不代表实验精度验收。")
+
+    @staticmethod
+    def competing_peak_soft_risk(field):
+        """Count POIs once when any recorded level has a weaker candidate."""
+        valid = np.asarray(field.get("valid", []), dtype=bool).ravel()
+        size = valid.size
+        if not size:
+            return None
+        eligible = np.asarray(field.get("eligible", np.ones(size, dtype=bool)), dtype=bool).ravel()
+        if eligible.size != size:
+            return None
+        flagged = np.zeros(size, dtype=bool)
+        prediction_conflicts = np.zeros(size, dtype=bool)
+        observed = np.zeros(size, dtype=bool)
+        complete = np.ones(size, dtype=bool)
+        incomplete = False
+        has_records = False
+        completed_statuses = {
+            "NO_CANDIDATE", "BELOW_RAW_CANDIDATE_THRESHOLD",
+            "CANDIDATE_ZNCC_BELOW_THRESHOLD", "CANDIDATE_ILL_CONDITIONED",
+            "CANDIDATE_RESIDUAL_ABOVE_THRESHOLD", "CANDIDATE_NOT_CONVERGED",
+            "SAME_REFINED_BASIN", "CANDIDATE_WEAKER_THAN_GAP", "DISTINCT_VALID_CANDIDATE", "PREDICTION_CONFLICT",
+        }
+
+        def record(index, status):
+            nonlocal has_records
+            if status is None or not str(status):
+                complete[index] = False
+                return
+            has_records = True
+            status = str(status)
+            if status in completed_statuses:
+                observed[index] = True
+            else:
+                # Unknown, not evaluated, boundary and refinement failures do
+                # not constitute a completed competing-candidate check.
+                complete[index] = False
+            if status == "CANDIDATE_WEAKER_THAN_GAP":
+                flagged[index] = True
+            elif status == "PREDICTION_CONFLICT":
+                prediction_conflicts[index] = True
+
+        statuses = field.get("competing_peak_status")
+        if statuses is not None:
+            statuses = np.asarray(statuses, dtype=object).ravel()
+            if statuses.size == size:
+                for index, status in enumerate(statuses):
+                    record(index, status)
+            else:
+                incomplete = True
+                complete[:] = False
+        else:
+            complete[:] = False
+        prediction_flags = field.get("prediction_conflict")
+        if prediction_flags is not None:
+            prediction_flags = np.asarray(prediction_flags)
+            if prediction_flags.size == size and (prediction_flags.dtype.kind == "b" or (
+                prediction_flags.dtype.kind in "iu" and np.isin(prediction_flags, [0, 1]).all()
+            )):
+                prediction_flags = prediction_flags.astype(bool).ravel()
+                prediction_conflicts |= prediction_flags
+                has_records = has_records or bool(np.any(prediction_flags))
+            else:
+                incomplete = True
+        try:
+            expected_levels = max(1, int(field.get("pyramid_levels_used", 1)))
+        except (TypeError, ValueError, OverflowError):
+            expected_levels = 1
+            incomplete = True
+        levels = field.get("pyramid_level_diagnostics")
+        if levels is not None:
+            if isinstance(levels, (list, tuple, np.ndarray)) and len(levels) == size:
+                for index, point_levels in enumerate(levels):
+                    if isinstance(point_levels, dict):
+                        point_levels = [point_levels]
+                    if not isinstance(point_levels, (list, tuple)):
+                        incomplete = True
+                        complete[index] = False
+                        continue
+                    # A rejected point may legitimately stop early.  An
+                    # accepted point needs every used pyramid level recorded.
+                    if expected_levels > 1 and eligible[index] and valid[index]:
+                        level_ids = [level.get("level_index") if isinstance(level, dict) else None for level in point_levels]
+                        valid_ids = all(isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)) for value in level_ids)
+                        if len(point_levels) != expected_levels or not valid_ids or sorted(level_ids) != list(range(expected_levels)):
+                            incomplete = True
+                            complete[index] = False
+                    for level in point_levels:
+                        if isinstance(level, dict):
+                            if "competing_peak_status" in level:
+                                record(index, level["competing_peak_status"])
+                            elif expected_levels > 1 and valid[index]:
+                                incomplete = True
+                                complete[index] = False
+                            prediction = level.get("prediction_conflict")
+                            if isinstance(prediction, (bool, np.bool_)) and prediction:
+                                prediction_conflicts[index] = True
+                                has_records = True
+                            elif prediction is not None and not isinstance(prediction, (bool, np.bool_)):
+                                incomplete = True
+                        else:
+                            incomplete = True
+                            complete[index] = False
+            else:
+                incomplete = True
+                complete[:] = False
+        elif expected_levels > 1 and np.any(eligible & valid):
+            incomplete = True
+            complete[eligible & valid] = False
+        if not has_records:
+            return None
+        evaluated = observed & complete & eligible
+        eligible_count = int(np.count_nonzero(eligible))
+        evaluated_count = int(np.count_nonzero(evaluated))
+        return {"flagged": int(np.count_nonzero(flagged & eligible)),
+                "flagged_valid": int(np.count_nonzero(flagged & eligible & valid)),
+                "prediction_conflicts": int(np.count_nonzero(prediction_conflicts & eligible)),
+                "prediction_conflicts_valid": int(np.count_nonzero(prediction_conflicts & eligible & valid)),
+                "evaluated": evaluated_count, "unfinished": eligible_count - evaluated_count,
+                "eligible": eligible_count, "incomplete": incomplete}
 
     def get_int_setting(self, var, label):
         try:
@@ -7331,7 +7481,7 @@ class MultiROIGUI:
                 if isinstance(event, dict):
                     value = 100.0 * float(event.get("fraction", 0.0))
                     frame = event.get("frame_global_1based")
-                    state = event.get("status", "")
+                    state = {"scientific_valid": "通过数值质量门", "computed_partial": "部分结果，需排查", "invalid": "无有效结果"}.get(event.get("status"), event.get("status", ""))
                 else:
                     value = 100.0 * float(event)
                     frame = None
@@ -7357,23 +7507,43 @@ class MultiROIGUI:
                             except OSError:
                                 pass
                 raise
-            if not result.get("scientific_ok", False):
-                raise RuntimeError("全场 DIC 科学有效性门未通过（无有效应变/有限应变）：" + ", ".join(result.get("errors", [])))
             last_field = result.get("last_field")
+            gate_failed = not result.get("scientific_ok", False)
+            diagnostic_only = (gate_failed and result.get("status") == "scientific_gate_failed"
+                               and result.get("integrity_ok") is True and last_field is not None
+                               and bool(result.get("manifest_path")))
+            if gate_failed and not diagnostic_only:
+                reasons = ", ".join(map(str, result.get("errors", []))) or "未提供原因"
+                if last_field is None:
+                    reasons += "；未获得可展示的有限应变场"
+                manifest_path = result.get("manifest_path")
+                location = f"；诊断记录：{manifest_path}" if manifest_path else ""
+                if result.get("integrity_ok") is False:
+                    location += "；记录完整性核验未通过"
+                raise RuntimeError(f"全场 DIC 数值质量门未通过：{reasons}{location}")
             if last_field is None:
                 raise RuntimeError("全场 DIC 没有可展示的有效结果。")
             last_image = result.get("last_image")
             frames = result.get("frames", [])
             valid_count = sum(1 for item in frames if item.get("status") == "scientific_valid")
             total_count = len(frames)
+            displayed_frame = last_field.get("frame_global_1based")
+            displayed_quality = next((item for item in frames
+                                      if displayed_frame is not None and item.get("frame_global_1based") == displayed_frame), None)
+            if diagnostic_only:
+                reasons = ", ".join(map(str, result.get("errors", []))) or "未提供原因"
+                diagnostic_notice = (f"整轮数值质量门未通过：{reasons}。当前场只读供排查，未提交为正式结果。"
+                                     f"诊断记录：{result['manifest_path']}")
+            else:
+                diagnostic_notice = None
 
             def finish():
                 self.dic_last_field = last_field
                 self.dic_last_image = np.asarray(last_image).copy() if last_image is not None else None
                 self.dic_last_frame_1based = last_field.get("frame_global_1based")
                 self.dic_last_filename = last_field.get("frame_filename")
-                self.dic_last_reference_frame_1based = result.get("manifest", {}).get("reference_frame_1based", settings.get("reference_frame_1based", settings.get("start_idx", 0) + 1))
-                self.dic_last_reference_filename = result.get("manifest", {}).get("reference_filename")
+                self.dic_last_reference_frame_1based = (result.get("manifest") or {}).get("reference_frame_1based", settings.get("reference_frame_1based", settings.get("start_idx", 0) + 1))
+                self.dic_last_reference_filename = (result.get("manifest") or {}).get("reference_filename")
                 self.show_field_viewer(
                     last_field,
                     image=self.dic_last_image,
@@ -7381,16 +7551,23 @@ class MultiROIGUI:
                     filename=self.dic_last_filename,
                     reference_frame_1based=self.dic_last_reference_frame_1based,
                     reference_filename=self.dic_last_reference_filename,
+                    frame_quality=displayed_quality,
+                    diagnostic_notice=diagnostic_notice,
                 )
                 self._update_progress(100)
-                self.status_var.set(f"处理完成，全场 DIC：{valid_count}/{total_count} 帧科学有效。")
                 if hasattr(self, "qc_overview_var"):
                     self.qc_overview_var.set(self.format_fullfield_qc_overview(frames))
-                self.log(f"全场 DIC manifest 已验证：{result['manifest_path']}")
-                self.show_completion_and_open_output_folder(
-                    f"全场 2D DIC 完成：{valid_count}/{total_count} 个变形帧有效。结果已写入 {settings['output_dir']}",
-                    settings["output_dir"],
-                )
+                if diagnostic_only:
+                    self.status_var.set("分析失败：全场数值质量门未通过；已显示只读诊断场。")
+                    self.log(diagnostic_notice)
+                    messagebox.showwarning("数值质量门未通过", diagnostic_notice)
+                else:
+                    self.status_var.set(f"处理完成，全场 DIC：{valid_count}/{total_count} 帧通过数值质量门。")
+                    self.log(f"全场 DIC manifest 已验证：{result['manifest_path']}")
+                    self.show_completion_and_open_output_folder(
+                        f"全场 2D DIC 完成：{valid_count}/{total_count} 个变形帧通过数值质量门。结果已写入 {settings['output_dir']}",
+                        settings["output_dir"],
+                    )
 
             self.post_to_ui(finish)
             return result
@@ -8059,6 +8236,8 @@ class MultiROIGUI:
         filename=None,
         reference_frame_1based=None,
         reference_filename=None,
+        frame_quality=None,
+        diagnostic_notice=None,
     ):
         """Embed a DIC field and bind it to the image/frame that produced it."""
         if field is None:
@@ -8069,6 +8248,7 @@ class MultiROIGUI:
         previous_reference_frame = self.dic_last_reference_frame_1based
         previous_reference_filename = self.dic_last_reference_filename
         self.clear_viewer(keep_placeholder=False)
+        self._dic_diagnostic_notice = diagnostic_notice
         self.viewer_frame.grid()
         self.viewer_content_frame.grid()
         self.dic_last_field = field
@@ -8114,9 +8294,9 @@ class MultiROIGUI:
         self._has_poisson = False
         self._update_field_viewer_context()
         self._rebuild_field_viewer_plot()
-        self._add_field_viewer_controls()
+        self._add_field_viewer_controls(frame_quality)
         self.viewer_placeholder.grid_remove()
-        self.viewer_export_btn.config(state=tk.NORMAL)
+        self.viewer_export_btn.config(state=tk.DISABLED if diagnostic_notice else tk.NORMAL)
         self.viewer_clear_btn.config(state=tk.NORMAL)
         self._update_field_viewer_overlay()
         self.show_visual_window()
@@ -8171,7 +8351,11 @@ class MultiROIGUI:
         cmap.set_bad(self.panel_bg)
         mesh = render_dic_field_on_axes(ax, self.dic_last_field, component, cmap=cmap)
         values = np.asarray(self.dic_last_field[component], dtype=float)
-        unit = "px" if component in ("u", "v") else ("%" if self.dic_percent.get() and component != "zncc" else "1")
+        # The controls are pending until Apply.  Label the values using the
+        # same applied settings that render_dic_field_on_axes uses, even if a
+        # component change triggers a redraw before Apply is pressed.
+        applied_percent = bool((self.dic_last_field.get("display_options") or {}).get("percent", False))
+        unit = "px" if component in ("u", "v") else ("%" if applied_percent and component != "zncc" else "1")
         # Keep the equal-aspect specimen centered and its colorbar adjacent,
         # including very tall ROIs in a wide independently resized window.
         cax = make_axes_locatable(ax).append_axes("right", size=0.18, pad=0.24)
@@ -8185,7 +8369,7 @@ class MultiROIGUI:
         cbar.ax.tick_params(colors=self.muted_color)
         self._attach_viewer_canvas(fig)
 
-    def _add_field_viewer_controls(self):
+    def _add_field_viewer_controls(self, frame_quality=None):
         if hasattr(self, "_viewer_controls") and self._viewer_controls:
             self._viewer_controls.destroy()
         ctrl = ttk.Frame(self.viewer_frame, style="Card.TFrame")
@@ -8262,14 +8446,38 @@ class MultiROIGUI:
             style="Hint.TLabel",
             wraplength=360,
         ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        quality_row = 4
+        if self._dic_diagnostic_notice:
+            notice_label = ttk.Label(ctrl, text=self._dic_diagnostic_notice, style="Warning.TLabel", wraplength=580)
+            notice_label.grid(row=quality_row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            self.add_tooltip(notice_label, "整轮分析没有通过数值质量门；当前画面只供排查，原始与失败归档文件保持不变。")
+            quality_row += 1
+        quality_text = self.format_fullfield_frame_quality(self.dic_last_field, frame_quality)
+        quality_style = "Hint.TLabel" if isinstance(frame_quality, dict) and frame_quality.get("status") == "scientific_valid" else "Warning.TLabel"
+        self.dic_field_quality_label = ttk.Label(ctrl, text=quality_text, style=quality_style, wraplength=580)
+        self.dic_field_quality_label.grid(row=quality_row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.add_tooltip(self.dic_field_quality_label, "此状态只反映当前帧的数值质量门。请结合逐点失效原因、实验条件和独立验证判断结果；空白不能当作零。")
         valid = np.asarray(self.dic_last_field.get("valid", []), dtype=bool)
         strain_valid = np.asarray(self.dic_last_field.get("strain_valid", []), dtype=bool)
         eligible_count = int(np.count_nonzero(self.dic_last_field.get("eligible", np.ones(valid.size))))
         gauge = self.dic_last_field.get("strain_gauge_span_px", "未知")
         summary = f"位移有效 {np.count_nonzero(valid)}/{eligible_count} · 应变有效 {np.count_nonzero(strain_valid)}/{eligible_count} · 应变窗口跨度 {gauge} px · 空白表示无有效结果"
         summary_label = ttk.Label(ctrl, text=summary, style="Hint.TLabel", wraplength=580)
-        summary_label.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        summary_label.grid(row=quality_row + 1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         self.add_tooltip(summary_label, "找到对应纹理后，还要利用周围足够多、分布合适的测量点计算伸缩，所以移动量与伸缩量的有效数量可能不同。空白或 NaN 表示没有有效数值，不能当作零。")
+        risk = self.competing_peak_soft_risk(self.dic_last_field)
+        if risk is None:
+            risk_text = "竞争峰提示：无可用评估记录，无法判断是否存在较弱候选。"
+        else:
+            incomplete = "；部分记录缺失或层级不一致，计数可能不完整" if risk["incomplete"] else ""
+            risk_text = (f"竞争峰提示：有限检查完成 {risk['evaluated']}/{risk['eligible']} 点；未完成 {risk['unfinished']} 点；较弱候选 {risk['flagged']} 点"
+                         f"（其中当前有效 {risk['flagged_valid']} 点）；预测冲突 {risk['prediction_conflicts']} 点"
+                         f"（其中当前有效 {risk['prediction_conflicts_valid']} 点）{incomplete}。两类可能重叠。"
+                         "较弱候选不自动判无效；预测冲突可能按设置拒绝，预测不是真值。未见标记不保证可靠，请核查局部匹配。")
+        risk_style = "Warning.TLabel" if risk is None or risk["flagged"] or risk["prediction_conflicts"] or risk["incomplete"] or risk["unfinished"] else "Hint.TLabel"
+        self.dic_competing_risk_label = ttk.Label(ctrl, text=risk_text, style=risk_style, wraplength=580)
+        self.dic_competing_risk_label.grid(row=quality_row + 2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.add_tooltip(self.dic_competing_risk_label, "不同位置的较弱候选可能对应另一种匹配；细化层和多尺度层按测点合并计数，不改变原有质量门。")
         ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
         self.dic_component_box.bind("<<ComboboxSelected>>", self._on_field_component_change)
         self.add_tooltip(
@@ -8449,6 +8657,12 @@ class MultiROIGUI:
         for name, button in self.viewer_toolbar._buttons.items():
             button.configure(takefocus=True)
             self.add_tooltip(button, toolbar_help[name])
+        if getattr(self, "_viewer_kind", None) == "fullfield" and getattr(self, "_dic_diagnostic_notice", None):
+            # Diagnostic fields belong to a failed transaction.  Do not turn
+            # them into unlabelled plot exports, including via the toolbar's
+            # keyboard shortcut.  The original failed artifacts remain intact.
+            self.viewer_toolbar._buttons["Save"].configure(state=tk.DISABLED)
+            self.viewer_toolbar.save_figure = lambda *_args: None
         self.add_tooltip(self.viewer_canvas.get_tk_widget(), self._result_plot_help)
         self.add_tooltip(self.viewer_toolbar._message_label, "鼠标移到图中时，这里显示当前位置的坐标或数值；可对照坐标轴和颜色刻度读取。")
         self._style_viewer_toolbar()
@@ -8630,6 +8844,9 @@ class MultiROIGUI:
         ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
 
     def export_viewer_figure(self):
+        if getattr(self, "_dic_diagnostic_notice", None):
+            messagebox.showinfo("只读诊断", "当前场来自未通过质量门的运行，仅供查看。请从失败记录中复核原始诊断文件。")
+            return
         if self.viewer_figure is None:
             messagebox.showinfo("无预览", "当前没有可导出的曲线预览。")
             return
@@ -8670,6 +8887,7 @@ class MultiROIGUI:
         self.dic_last_filename = None
         self.dic_last_reference_frame_1based = None
         self.dic_last_reference_filename = None
+        self._dic_diagnostic_notice = None
         if hasattr(self, "field_viewer_context_var"):
             self.field_viewer_context_var.set("")
         self._viewer_kind = "extensometer"

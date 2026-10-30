@@ -339,6 +339,105 @@ def test_field_display_restores_percent_manual_limits_and_image_coordinates(work
     np.testing.assert_array_equal(field["Exx"], before)
 
 
+def test_field_viewer_exposes_displayed_frame_quality_and_unknown_status(workbench):
+    app = workbench
+    X, Y = np.meshgrid(np.arange(4) * 10 + 10, np.arange(4) * 10 + 10)
+    field = {"X": X, "Y": Y, "Exx": np.full(X.shape, 0.01),
+             "u": np.zeros(X.shape), "v": np.zeros(X.shape),
+             "valid": np.ones(X.shape, bool), "strain_valid": np.ones(X.shape, bool),
+             "quality_summary": {"scientific_reasons": ["strain_valid_fraction_below_threshold"]}}
+    partial = {"status": "computed_partial", "correlation_valid_fraction": 0.72,
+               "strain_valid_fraction": 0.4}
+    app.show_field_viewer(field, component="Exx", frame_1based=5, frame_quality=partial)
+    app.root.update()
+    text = app.dic_field_quality_label.cget("text")
+    assert "部分结果" in text and "未通过数值质量门" in text
+    assert "72.0%" in text and "40.0%" in text
+    assert "strain_valid_fraction_below_threshold" in text
+    assert "实验精度验收" in text
+    assert "无可用评估记录" in app.dic_competing_risk_label.cget("text")
+
+    passed = {"status": "scientific_valid", "correlation_valid_fraction": 1.0,
+              "strain_valid_fraction": 0.9}
+    field["quality_summary"] = {"scientific_reasons": []}
+    field["competing_peak_status"] = np.array(["CANDIDATE_WEAKER_THAN_GAP", "NOT_EVALUATED", "PREDICTION_CONFLICT"] + ["NOT_EVALUATED"] * 13)
+    field["prediction_conflict"] = np.array([False, False, True] + [False] * 13)
+    field["pyramid_level_diagnostics"] = [[{"competing_peak_status": "CANDIDATE_WEAKER_THAN_GAP"}],
+                                          [{"competing_peak_status": "CANDIDATE_WEAKER_THAN_GAP"}],
+                                          [{"competing_peak_status": "PREDICTION_CONFLICT", "prediction_conflict": True}]] + [[] for _ in range(13)]
+    app.show_field_viewer(field, component="Exx", frame_1based=4, frame_quality=passed)
+    assert "当前帧：通过数值质量门" in app.dic_field_quality_label.cget("text")
+    risk_text = app.dic_competing_risk_label.cget("text")
+    assert "有限检查完成 2/16 点" in risk_text and "未完成 14 点" in risk_text and "较弱候选 2 点" in risk_text
+    assert "其中当前有效 2 点" in risk_text and "不自动判无效" in risk_text
+    assert "预测冲突 1 点（其中当前有效 1 点）" in risk_text and "预测不是真值" in risk_text
+
+    # A field-level quality flag alone does not prove that the sequence's
+    # recorded frame gate passed, and missing metadata must stay explicit.
+    field["quality_summary"] = {"scientific_ok": True}
+    app.show_field_viewer(field, component="Exx", frame_1based=3)
+    assert "状态未提供" in app.dic_field_quality_label.cget("text")
+
+
+def test_failed_gate_shows_read_only_diagnostic_and_preserves_published_run(workbench, tmp_path, monkeypatch):
+    app = workbench
+    load_sequence(app, tmp_path)
+    app.mode_fullfield_radio.invoke()
+    app.dic_step.set(12)
+    draw_roi(app, (25, 25, 140, 110))
+    app.start_button.invoke()
+    finish_run(app)
+
+    output = tmp_path / "output"
+    prior_manifest = (output / "run_manifest.json").read_bytes()
+    prior_field = (output / "dic" / "frame_0003.npz").read_bytes()
+    run_dic = gui.run_2d_dic
+
+    def forced_partial(*args, **kwargs):
+        # Exercise actual correlation and transaction I/O, while forcing the
+        # quality result so this UI-path test is independent of solver noise.
+        field = run_dic(*args, **kwargs)
+        field["quality_summary"]["scientific_ok"] = False
+        field["quality_summary"]["scientific_reasons"] = ["test_forced_partial"]
+        return field
+
+    monkeypatch.setattr(gui, "run_2d_dic", forced_partial)
+    app.start_button.invoke()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        app.root.update()
+        if not app.is_processing and not app._completion_pending and app.ui_queue.empty():
+            break
+        time.sleep(0.01)
+    assert not app.is_processing and not app._completion_pending
+    assert app.status_var.get().startswith("分析失败")
+    assert app.run_state_var.get().startswith("分析失败")
+    assert app.dic_last_field is not None and app.dic_last_frame_1based == 3
+    assert "部分结果" in app.dic_field_quality_label.cget("text")
+    assert app.viewer_export_btn.instate(["disabled"])
+    assert app.viewer_toolbar._buttons["Save"].cget("state") == tk.DISABLED
+    app.dic_field_component.set("Exx")
+    app._on_field_component_change()
+    assert app.viewer_toolbar._buttons["Save"].cget("state") == tk.DISABLED
+
+    failed_manifests = list((output / "_failed_runs").glob("*/run_manifest.json"))
+    assert len(failed_manifests) == 1
+    failed_manifest = failed_manifests[0]
+    assert core.verify_run_manifest(failed_manifest)["ok"]
+    failed_field = failed_manifest.parent / "dic" / "frame_0003.npz"
+    assert failed_field.is_file()
+    assert app._test_dialogs and str(failed_manifest) in app._test_dialogs[-1][1]
+    assert any("整轮数值质量门未通过" in str(child.cget("text"))
+               for child in app._viewer_controls.winfo_children() if isinstance(child, ttk.Label))
+    assert (output / "run_manifest.json").read_bytes() == prior_manifest
+    assert (output / "dic" / "frame_0003.npz").read_bytes() == prior_field
+
+    # A later non-diagnostic viewer is not locked in read-only mode.
+    app.show_field_viewer(app.dic_last_field, component="Exx")
+    assert app.viewer_export_btn.instate(["!disabled"])
+    assert app.viewer_toolbar._buttons["Save"].cget("state") == tk.NORMAL
+
+
 def test_windows_resize_independently_and_keep_roi_coordinates(workbench, tmp_path):
     app = workbench
     load_sequence(app, tmp_path)

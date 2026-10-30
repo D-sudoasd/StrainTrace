@@ -1,0 +1,368 @@
+{
+  "schema": "straintrace-real-necking-pilot-v1",
+  "dataset_key": "CAMERA_FIO:000083",
+  "acquisition_id": "83_LDF_Ti15_812WQ_300_40",
+  "images_path": "H:\\1_Large_Scientific_Facilities_Source_Data\\2026_DESY_P212_insitu_tensile\\DIC_images\\0_raw\\83_LDF_Ti15_812WQ_300_40\\1236B_1",
+  "reference_frame": 1,
+  "reference_sha256": "828a257db89a280a9b4f6591ce52d34024cebec86f69429da134c09d74a69344",
+  "reference_shape": [
+    1000,
+    4112
+  ],
+  "reference_dtype": "uint16",
+  "core_file": "E:\\Vibe_coding\\StrainTrace\\ezdic_core.py",
+  "core_sha256": "9ec3116182041aa9f9d31786493bd3b29a2d7cca3df15162ac4867e3cf6924de",
+  "benchmark_script_sha256": "212642d63dc4431bc3ab01600284f4a2854f9b872a60e5b436fe7b8a76c26949",
+  "environment": {
+    "python": "3.11.8",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "roi_xywh_px": [
+    1550,
+    350,
+    1000,
+    250
+  ],
+  "normalization_bounds": [
+    80.0,
+    3756.0
+  ],
+  "parameters": {
+    "subset_size": 31,
+    "step": 40,
+    "search_radius": 20,
+    "solver": "IC-GN",
+    "max_iter": 40,
+    "conv_tol": 0.001,
+    "zncc_min": 0.8,
+    "strain_window": 5,
+    "reject_nonconverged": true,
+    "initialization": "auto"
+  },
+  "rng_seed": 0,
+  "frames": [
+    {
+      "frame": 50,
+      "filename": "dir_000050.tif",
+      "sha256": "ba629cdd25e9589c88caada301ea95994435bd23460f883f4061b5941a7f35ff",
+      "elapsed_s": 1.2528327000327408,
+      "eligible_n": 150,
+      "valid_n": 150,
+      "strain_valid_n": 150,
+      "invalid_reason_counts": {},
+      "strain_invalid_reason_counts": {},
+      "median_zncc": 0.973832989417619,
+      "initial_transform": {
+        "matrix": [
+          [
+            1.0093246356443974,
+            0.004332916575222978,
+            -96.16147667171565
+          ],
+          [
+            -0.0018472061343706965,
+            0.9962771955714361,
+            -9.294605416052052
+          ]
+        ],
+        "matches": 202,
+        "inliers": 202,
+        "median_reprojection_error_px": 0.5478171718899165
+      },
+      "effective_search_radius_px": 20,
+      "quality": {
+        "point_count": 150,
+        "eligible_point_count": 150,
+        "masked_point_count": 0,
+        "spatial_outlier_count": 0,
+        "correlation_valid_count": 150,
+        "strain_valid_count": 150,
+        "correlation_valid_fraction": 1.0,
+        "strain_valid_fraction": 1.0,
+        "converged_count": 150,
+        "convergence_known_count": 150,
+        "converged_fraction": 1.0,
+        "accepted_converged_count": 150,
+        "rejected_converged_count": 0,
+        "invalid_reason_histogram": {},
+        "ambiguous_rejected_count": 0,
+        "ambiguous_accepted_count": 0,
+        "unsafe_accept_count": 0,
+        "false_accept_count": 0,
+        "ambiguous_accept_proxy_count": 0,
+        "false_accept_is_proxy": true,
+        "false_accept_ground_truth_assessed": false,
+        "false_reject_count": 0,
+        "false_reject_proxy_count": 0,
+        "false_reject_is_proxy": true,
+        "ambiguous_count": 0,
+        "residual_threshold_enabled": false,
+        "max_residual_rms": null,
+        "scientific_ok": true,
+        "scientific_reasons": [],
+        "thresholds": {
+          "min_correlation_valid_fraction": 0.95,
+          "min_strain_valid_fraction": 0.8
+        }
+      }
+    },
+    {
+      "frame": 90,
+      "filename": "dir_000090.tif",
+      "sha256": "942d509e4db93030ed7c813e5eebd58cce0b0e6b3d3e76959f5e95c0749cec8d",
+      "elapsed_s": 1.6010010000318289,
+      "eligible_n": 150,
+      "valid_n": 73,
+      "strain_valid_n": 60,
+      "invalid_reason_counts": {
+        "ZNCC_BELOW_THRESHOLD": 77
+      },
+      "strain_invalid_reason_counts": {
+        "INSUFFICIENT_NEIGHBORS": 13,
+        "INVALID_CENTER": 77
+      },
+      "median_zncc": 0.847323518731769,
+      "initial_transform": {
+        "matrix": [
+          [
+            1.0681226568200561,
+            -0.0023360445031203347,
+            -277.418036562833
+          ],
+          [
+            -0.007078613885315212,
+            0.9716397127899797,
+            9.934812975503187
+          ]
+        ],
+        "matches": 32,
+        "inliers": 30,
+        "median_reprojection_error_px": 1.5932546585057616
+      },
+      "effective_search_radius_px": 20,
+      "quality": {
+        "point_count": 150,
+        "eligible_point_count": 150,
+        "masked_point_count": 0,
+        "spatial_outlier_count": 0,
+        "correlation_valid_count": 73,
+        "strain_valid_count": 60,
+        "correlation_valid_fraction": 0.4866666666666667,
+        "strain_valid_fraction": 0.4,
+        "converged_count": 150,
+        "convergence_known_count": 150,
+        "converged_fraction": 1.0,
+        "accepted_converged_count": 73,
+        "rejected_converged_count": 77,
+        "invalid_reason_histogram": {
+          "ZNCC_BELOW_THRESHOLD": 77
+        },
+        "ambiguous_rejected_count": 0,
+        "ambiguous_accepted_count": 0,
+        "unsafe_accept_count": 0,
+        "false_accept_count": 0,
+        "ambiguous_accept_proxy_count": 0,
+        "false_accept_is_proxy": true,
+        "false_accept_ground_truth_assessed": false,
+        "false_reject_count": 77,
+        "false_reject_proxy_count": 77,
+        "false_reject_is_proxy": true,
+        "ambiguous_count": 0,
+        "residual_threshold_enabled": false,
+        "max_residual_rms": null,
+        "scientific_ok": false,
+        "scientific_reasons": [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        "thresholds": {
+          "min_correlation_valid_fraction": 0.95,
+          "min_strain_valid_fraction": 0.8
+        }
+      }
+    },
+    {
+      "frame": 130,
+      "filename": "dir_000130.tif",
+      "sha256": "82e89ceb2e3595a904aa7fe53eaef703f889aef0b5ce21161251cae7156ba14d",
+      "elapsed_s": 3.01461479999125,
+      "eligible_n": 150,
+      "valid_n": 0,
+      "strain_valid_n": 0,
+      "invalid_reason_counts": {
+        "AMBIGUOUS_PEAK": 23,
+        "ZNCC_BELOW_THRESHOLD": 127
+      },
+      "strain_invalid_reason_counts": {
+        "INVALID_CENTER": 150
+      },
+      "median_zncc": null,
+      "initial_transform": null,
+      "effective_search_radius_px": 20,
+      "quality": {
+        "point_count": 150,
+        "eligible_point_count": 150,
+        "masked_point_count": 0,
+        "spatial_outlier_count": 0,
+        "correlation_valid_count": 0,
+        "strain_valid_count": 0,
+        "correlation_valid_fraction": 0.0,
+        "strain_valid_fraction": 0.0,
+        "converged_count": 10,
+        "convergence_known_count": 127,
+        "converged_fraction": 0.07874015748031496,
+        "accepted_converged_count": 0,
+        "rejected_converged_count": 10,
+        "invalid_reason_histogram": {
+          "AMBIGUOUS_PEAK": 23,
+          "ZNCC_BELOW_THRESHOLD": 127
+        },
+        "ambiguous_rejected_count": 23,
+        "ambiguous_accepted_count": 0,
+        "unsafe_accept_count": 0,
+        "false_accept_count": 0,
+        "ambiguous_accept_proxy_count": 0,
+        "false_accept_is_proxy": true,
+        "false_accept_ground_truth_assessed": false,
+        "false_reject_count": 127,
+        "false_reject_proxy_count": 127,
+        "false_reject_is_proxy": true,
+        "ambiguous_count": 23,
+        "residual_threshold_enabled": false,
+        "max_residual_rms": null,
+        "scientific_ok": false,
+        "scientific_reasons": [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        "thresholds": {
+          "min_correlation_valid_fraction": 0.95,
+          "min_strain_valid_fraction": 0.8
+        }
+      }
+    },
+    {
+      "frame": 185,
+      "filename": "dir_000185.tif",
+      "sha256": "025450dcd1c5338126c70b939be6cc82d91395b4f35600eecb9572c337697811",
+      "elapsed_s": 2.9872491999994963,
+      "eligible_n": 150,
+      "valid_n": 0,
+      "strain_valid_n": 0,
+      "invalid_reason_counts": {
+        "ZNCC_BELOW_THRESHOLD": 119,
+        "AMBIGUOUS_PEAK": 31
+      },
+      "strain_invalid_reason_counts": {
+        "INVALID_CENTER": 150
+      },
+      "median_zncc": null,
+      "initial_transform": null,
+      "effective_search_radius_px": 20,
+      "quality": {
+        "point_count": 150,
+        "eligible_point_count": 150,
+        "masked_point_count": 0,
+        "spatial_outlier_count": 0,
+        "correlation_valid_count": 0,
+        "strain_valid_count": 0,
+        "correlation_valid_fraction": 0.0,
+        "strain_valid_fraction": 0.0,
+        "converged_count": 14,
+        "convergence_known_count": 119,
+        "converged_fraction": 0.11764705882352941,
+        "accepted_converged_count": 0,
+        "rejected_converged_count": 14,
+        "invalid_reason_histogram": {
+          "ZNCC_BELOW_THRESHOLD": 119,
+          "AMBIGUOUS_PEAK": 31
+        },
+        "ambiguous_rejected_count": 31,
+        "ambiguous_accepted_count": 0,
+        "unsafe_accept_count": 0,
+        "false_accept_count": 0,
+        "ambiguous_accept_proxy_count": 0,
+        "false_accept_is_proxy": true,
+        "false_accept_ground_truth_assessed": false,
+        "false_reject_count": 119,
+        "false_reject_proxy_count": 119,
+        "false_reject_is_proxy": true,
+        "ambiguous_count": 31,
+        "residual_threshold_enabled": false,
+        "max_residual_rms": null,
+        "scientific_ok": false,
+        "scientific_reasons": [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        "thresholds": {
+          "min_correlation_valid_fraction": 0.95,
+          "min_strain_valid_fraction": 0.8
+        }
+      }
+    },
+    {
+      "frame": 193,
+      "filename": "dir_000193.tif",
+      "sha256": "2196148541ce432c0b0ec942c692b1f1145bfa37d0eadcfc4729e7559af5b7f3",
+      "elapsed_s": 2.0621653001289815,
+      "eligible_n": 150,
+      "valid_n": 0,
+      "strain_valid_n": 0,
+      "invalid_reason_counts": {
+        "AMBIGUOUS_PEAK": 86,
+        "ZNCC_BELOW_THRESHOLD": 64
+      },
+      "strain_invalid_reason_counts": {
+        "INVALID_CENTER": 150
+      },
+      "median_zncc": null,
+      "initial_transform": null,
+      "effective_search_radius_px": 20,
+      "quality": {
+        "point_count": 150,
+        "eligible_point_count": 150,
+        "masked_point_count": 0,
+        "spatial_outlier_count": 0,
+        "correlation_valid_count": 0,
+        "strain_valid_count": 0,
+        "correlation_valid_fraction": 0.0,
+        "strain_valid_fraction": 0.0,
+        "converged_count": 7,
+        "convergence_known_count": 64,
+        "converged_fraction": 0.109375,
+        "accepted_converged_count": 0,
+        "rejected_converged_count": 7,
+        "invalid_reason_histogram": {
+          "AMBIGUOUS_PEAK": 86,
+          "ZNCC_BELOW_THRESHOLD": 64
+        },
+        "ambiguous_rejected_count": 86,
+        "ambiguous_accepted_count": 0,
+        "unsafe_accept_count": 0,
+        "false_accept_count": 0,
+        "ambiguous_accept_proxy_count": 0,
+        "false_accept_is_proxy": true,
+        "false_accept_ground_truth_assessed": false,
+        "false_reject_count": 64,
+        "false_reject_proxy_count": 64,
+        "false_reject_is_proxy": true,
+        "ambiguous_count": 86,
+        "residual_threshold_enabled": false,
+        "max_residual_rms": null,
+        "scientific_ok": false,
+        "scientific_reasons": [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        "thresholds": {
+          "min_correlation_valid_fraction": 0.95,
+          "min_strain_valid_fraction": 0.8
+        }
+      }
+    }
+  ],
+  "scope": "Sparse fixed-reference FIO83 image diagnostic; no independent truth or VIC equivalence. The displayed user curve's specimen identity is unverified. Frame 193 has an open fracture."
+}

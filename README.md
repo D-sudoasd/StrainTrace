@@ -418,6 +418,14 @@ the ranking AUC must not be read as experimental accuracy, uncertainty, or
 natural-texture performance.
 In plain terms, this quality threshold is **not calibrated**.
 
+The historical v6 ranking labels rejected outcomes as bad and assigns them a
+zero score. Its AUC is an outcome-ranking regression metric, not evidence that
+the score discriminates accurate from inaccurate candidates. Current reports
+also include `candidate_accuracy`, which labels finite raw candidates by known
+synthetic displacement error independently of acceptance and counts unavailable
+candidates as unknown. Rates are conditional on finite candidates; an absent
+bad class gives a null false-accept rate. See the [necking investigation](docs/NECKING_VALIDATION_20261028.md).
+
 The canonical evidence CSV SHA-256 is
 `39d4e52f35cd3161a1e877b6edcd5187568bf275c6c8d552422605b73b4c0bfb`.
 

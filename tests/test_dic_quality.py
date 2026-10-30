@@ -78,7 +78,11 @@ def test_real_speckle_quality_does_not_regress_and_has_audit_fields():
         assert key in field
     assert np.isfinite(np.asarray(field["residual_rms"], dtype=float)[valid]).all()
     assert np.isfinite(np.asarray(field["hessian_condition_number"], dtype=float)[valid]).all()
-    assert 0 < field["quality_summary"]["converged_count"] <= int(valid.sum())
+    # A solver may converge numerically and then be rejected as ambiguous.
+    summary = field["quality_summary"]
+    assert 0 < summary["converged_count"] <= summary["convergence_known_count"]
+    assert 0 < summary["accepted_converged_count"] <= int(valid.sum())
+    assert summary["converged_count"] == summary["accepted_converged_count"] + summary["rejected_converged_count"]
 
 
 def test_convergence_is_not_high_zncc_only_and_uses_affine_increment():

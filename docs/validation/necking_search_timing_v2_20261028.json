@@ -1,0 +1,117 @@
+{
+  "report_version": "necking-search-timing-v1",
+  "baseline_commit": "be10c58ca7b4dac70e707775b1ed708ff9a1e95d",
+  "baseline_core_sha256": "7ee6de2f9d5d4aab43ce90de65a23cc516b4361d32b4c0c2025fa621777afcb6",
+  "current_core_sha256": "7c3516f8d71156d84fc5c0ea45e3ac3d24462c5255ca7a7f3ef70da90d2a0d3d",
+  "validation_script_sha256": "ae96ddfea3fbd8295da93c72c9c66d27ea4c2498e4aa16e79aa5944446cdd08c",
+  "timing_script_sha256": "3d669c0e352698c5343171ea296cf3dd2f28d9dadbc0f3c8b7732c1e2838021a",
+  "environment": {
+    "core_sha256": "7ee6de2f9d5d4aab43ce90de65a23cc516b4361d32b4c0c2025fa621777afcb6",
+    "script_sha256": "ae96ddfea3fbd8295da93c72c9c66d27ea4c2498e4aa16e79aa5944446cdd08c",
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "settings": {
+    "subset_size": 21,
+    "step": 30,
+    "search_radius": 18,
+    "zncc_min": 0.75,
+    "strain_window": 3,
+    "outlier_threshold_px": 1000000.0,
+    "max_iter": 40,
+    "initialization": "auto",
+    "roi": [
+      30,
+      30,
+      360,
+      360
+    ]
+  },
+  "repeats_per_version": 6,
+  "order": "baseline/current on even iterations, current/baseline on odd iterations",
+  "limitations": [
+    "Timers measure run_2d_dic, including automatic initialization, but exclude image generation and Python startup.",
+    "These small synthetic inputs are not representative of full-scale experiment processing.",
+    "Shared machine load and power state were not controlled; elapsed time is descriptive."
+  ],
+  "cases": [
+    {
+      "case": "localized_shear_band",
+      "input_sha256": "d7584bfaf53fae72ed126cc7a71ea8544972ec6c93f418e44456c69b30b8f304",
+      "baseline_seconds": [
+        0.3962705999147147,
+        0.3617728999815881,
+        0.3755321998614818,
+        0.3671283998992294,
+        0.40427469997666776,
+        0.45353069994598627
+      ],
+      "current_seconds": [
+        0.25992620014585555,
+        0.2384405001066625,
+        0.2447284001391381,
+        0.23986540012992918,
+        0.30835719988681376,
+        0.2632509001996368
+      ],
+      "baseline_median_seconds": 0.38590139988809824,
+      "current_median_seconds": 0.2523273001424968,
+      "baseline_valid_count": [
+        125,
+        125,
+        125,
+        125,
+        125,
+        125
+      ],
+      "current_valid_count": [
+        144,
+        144,
+        144,
+        144,
+        144,
+        144
+      ]
+    },
+    {
+      "case": "uniform_affine",
+      "input_sha256": "5c8f7d4f5bb146161462eef815186d6fa3edb100386bff348351f631540ef2a3",
+      "baseline_seconds": [
+        0.21390069997869432,
+        0.20396640012040734,
+        0.19950840016826987,
+        0.20822959998622537,
+        0.24061849992722273,
+        0.24365620012395084
+      ],
+      "current_seconds": [
+        0.20363439992070198,
+        0.22504169982858002,
+        0.20044509996660054,
+        0.20315519999712706,
+        0.24829160002991557,
+        0.21625639987178147
+      ],
+      "baseline_median_seconds": 0.21106514998245984,
+      "current_median_seconds": 0.20994539989624172,
+      "baseline_valid_count": [
+        144,
+        144,
+        144,
+        144,
+        144,
+        144
+      ],
+      "current_valid_count": [
+        144,
+        144,
+        144,
+        144,
+        144,
+        144
+      ]
+    }
+  ]
+}

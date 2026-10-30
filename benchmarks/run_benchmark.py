@@ -127,6 +127,10 @@ _CSV_FIELDS = (
     "stop_reason",
     "invalid_reason",
     "preflight_code",
+    # Append-only fields: the legacy v6 columns retain their existing meaning.
+    "candidate_truth_label",
+    "candidate_false_accept",
+    "candidate_false_reject",
 )
 
 
@@ -561,8 +565,12 @@ def _observation(
         accepted = bool(valid[index])
         # A rejected/nonfinite measurement is a bad outcome for ranking even
         # when no finite displacement error can be formed.  This keeps AUC
-        # population accounting honest while preserving raw diagnostics.
+        # compatible with the v6 outcome-ranking gate; it is not a truth label.
         label_good = bool(accepted and np.isfinite(error_px[index]) and error_px[index] <= ERROR_TOLERANCE_PX)
+        candidate_label = (
+            "unknown" if not np.isfinite(error_px[index])
+            else "good" if error_px[index] <= ERROR_TOLERANCE_PX else "bad"
+        )
         rows.append(
             {
                 "case_id": str(case["case_id"]),
@@ -594,6 +602,9 @@ def _observation(
                 "quality_label_good": label_good,
                 "false_accept": bool(accepted and label_good is False),
                 "false_reject": bool((not accepted) and label_good is True),
+                "candidate_truth_label": candidate_label,
+                "candidate_false_accept": None if candidate_label == "unknown" else bool(accepted and candidate_label == "bad"),
+                "candidate_false_reject": None if candidate_label == "unknown" else bool(not accepted and candidate_label == "good"),
                 "quality_false_accept": bool(quality_accept is True and label_good is False),
                 "quality_false_reject": bool(quality_accept is False and label_good is True),
                 "quality_score": quality,
@@ -751,6 +762,9 @@ def _near_record(
                 "stop_reason": "preflight_ambiguity",
                 "invalid_reason": str(code or "TEXTURE_PREFLIGHT_ERROR"),
                 "preflight_code": str(code or "TEXTURE_PREFLIGHT_ERROR"),
+                "candidate_truth_label": "unknown",
+                "candidate_false_accept": None,
+                "candidate_false_reject": None,
             }
         )
     return {
@@ -793,6 +807,50 @@ def _csv_value(value: Any) -> Any:
     if isinstance(value, float):
         return format(value, ".17g") if math.isfinite(value) else ""
     return value
+
+
+def _candidate_accuracy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compare finite displacement candidates to truth, independent of validity.
+
+    The core retains finite raw candidates for some later spatial rejections,
+    but most earlier rejection paths have no candidate to evaluate.  Unknowns
+    are excluded from rates and counted separately, rather than treated as
+    either accurate or inaccurate.  Preflight-only rows are counted apart.
+    """
+
+    solver_rows = [row for row in rows if row.get("diagnostic_source") == "solver"]
+    preflight_unknown = sum(row.get("diagnostic_source") == "preflight_rejected" for row in rows)
+    if any(row.get("candidate_truth_label") not in {"good", "bad", "unknown"} for row in solver_rows):
+        raise BenchmarkGateError("solver candidate truth label is missing or invalid")
+    good = [row for row in solver_rows if row.get("candidate_truth_label") == "good"]
+    bad = [row for row in solver_rows if row.get("candidate_truth_label") == "bad"]
+    unknown = [row for row in solver_rows if row.get("candidate_truth_label") == "unknown"]
+    accepted_good = sum(bool(row["accepted"]) for row in good)
+    rejected_good = len(good) - accepted_good
+    accepted_bad = sum(bool(row["accepted"]) for row in bad)
+    rejected_bad = len(bad) - accepted_bad
+    accepted_unknown = sum(bool(row["accepted"]) for row in unknown)
+    return {
+        "version": "candidate_accuracy_v1",
+        "truth_definition": f"finite raw displacement vector error <= {ERROR_TOLERANCE_PX:g} px is good; larger error is bad; otherwise unknown; independent of acceptance",
+        "error_tolerance_px": ERROR_TOLERANCE_PX,
+        "solver_point_count": len(solver_rows),
+        "known_candidate_count": len(good) + len(bad),
+        "unknown_candidate_count": len(unknown),
+        "preflight_unknown_count": preflight_unknown,
+        "good_candidate_count": len(good),
+        "bad_candidate_count": len(bad),
+        "accepted_good_count": accepted_good,
+        "accepted_bad_count": accepted_bad,
+        "rejected_good_count": rejected_good,
+        "rejected_bad_count": rejected_bad,
+        "accepted_unknown_count": accepted_unknown,
+        "rejected_unknown_count": len(unknown) - accepted_unknown,
+        "false_accept_rate": None if not bad else accepted_bad / len(bad),
+        "false_reject_rate": None if not good else rejected_good / len(good),
+        "rate_scope": "conditional on finite raw candidates; unknown and preflight-only outcomes are excluded",
+        "quality_score_discrimination": "not_assessed",
+    }
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -988,6 +1046,7 @@ def run_benchmark(
     ranking_false_reject_rate = None if good_count == 0 else ranking_false_reject / good_count
     quality_error = {
         "version": QUALITY_SCORE_VERSION,
+        "legacy_metrics_notice": "The v6 outcome-ranking AUC is not an error-discrimination AUC: rejected outcomes are scored zero and labelled bad. Legacy labels cannot identify correct rejected candidates; see candidate_accuracy for truth-based counts and unknowns.",
         "threshold_status": "NOT_CALIBRATED",
         "quality_threshold_evaluated": False,
         "quality_threshold_pass": None,
@@ -1098,6 +1157,7 @@ def run_benchmark(
         "texture_preflight_contract": TEXTURE_PREFLIGHT,
         "quality_contract": quality_contract,
         "quality_error": quality_error,
+        "candidate_accuracy": _candidate_accuracy_summary(all_rows),
         "quality_score": {"version": QUALITY_SCORE_VERSION, "components": QUALITY_SCORE_COMPONENTS, "normalization": QUALITY_SCORE_NORMALIZATION, "validity_required": QUALITY_SCORE_VALIDITY_REQUIRED, "ratio_direction": "best_over_second", "threshold_status": "NOT_CALIBRATED", "quality_threshold_evaluated": False, "quality_threshold_pass": None, "illustrative_accept_score_min": float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"]), "error_tolerance_px": float(quality_contract["error_tolerance_px"]), "roc_auc": auc, "roc_auc_min": float(quality_contract["roc_auc_min"])},
         "quality_auc": auc,
         "thresholds": document["thresholds"],

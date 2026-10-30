@@ -1,0 +1,215 @@
+{
+  "schema": "prediction-conflict-validation-v1",
+  "core_sha256": "94206a370750ab269adc2ec6062a4c3f6e55b9e320d64e04b692e0b5f5480157",
+  "tests_sha256": "6706b775fb3daae30459987e4ac13d76f8c8c4726177e04845e91103fd83d362",
+  "environment": {
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "fixture": "130x130 gaussian_filter(default_rng(3).normal, sigma=1.2), true roll +5 x; copy reference[50:71,50:71] to target[67:88,72:93]",
+  "reproduction_tests": [
+    "tests/test_competing_dic_peaks.py::test_prediction_conflict_rejects_noisy_copied_patch",
+    "tests/test_competing_dic_peaks.py::test_wrong_global_prediction_rejects_instead_of_selecting_it",
+    "tests/test_competing_dic_peaks.py::test_wrong_prediction_on_copied_patch_should_reject_or_track_correctly (expected failure)"
+  ],
+  "limitations": [
+    "Synthetic in-plane images only; no 3-D motion or camera calibration.",
+    "The global prediction is not truth; wrong predictions may reject correct local results.",
+    "No global prediction, an undetected secondary candidate, or candidate quality failure can leave a false match accepted.",
+    "The radius and quality thresholds are not calibrated probabilities."
+  ],
+  "cases": {
+    "correct_prediction_reject": {
+      "input_sha256": "8e6d7a51eb9aef4cd631ffa2c59bb6e237d241d13bf6acb52ba6c517b0480e19",
+      "seed_uv_px": [
+        5.0,
+        0.0
+      ],
+      "search_radius_px": 18,
+      "reject_ambiguous_peaks": true,
+      "point_count": 9,
+      "valid_count": 8,
+      "strain_valid_count": 8,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": false,
+      "center_u_v_px": [
+        null,
+        null
+      ],
+      "center_error_px": null,
+      "center_invalid_reason": "AMBIGUOUS_PEAK",
+      "center_stop_reason": "prediction_conflicting_peaks",
+      "center_peak_is_ambiguous": true,
+      "center_candidate_status": "PREDICTION_CONFLICT",
+      "center_candidate_raw_zncc": 0.9162411093711853,
+      "center_candidate_refined_zncc": 0.9187162741632224,
+      "center_candidate_zncc_gap": 0.0812836459804318,
+      "center_prediction_conflict": true,
+      "center_prediction_conflict_tested": true,
+      "center_prediction_radius_px": 3.0,
+      "center_primary_distance_px": 24.04142744937483,
+      "center_candidate_distance_px": 0.08462485985230295,
+      "ambiguous_accept_proxy_count": 0
+    },
+    "correct_prediction_allow": {
+      "input_sha256": "8e6d7a51eb9aef4cd631ffa2c59bb6e237d241d13bf6acb52ba6c517b0480e19",
+      "seed_uv_px": [
+        5.0,
+        0.0
+      ],
+      "search_radius_px": 18,
+      "reject_ambiguous_peaks": false,
+      "point_count": 9,
+      "valid_count": 9,
+      "strain_valid_count": 9,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": true,
+      "center_u_v_px": [
+        21.99993900137568,
+        16.999773755937447
+      ],
+      "center_error_px": 24.04142744937483,
+      "center_invalid_reason": "",
+      "center_stop_reason": "converged_all_affine_increment",
+      "center_peak_is_ambiguous": true,
+      "center_candidate_status": "PREDICTION_CONFLICT",
+      "center_candidate_raw_zncc": 0.9162411093711853,
+      "center_candidate_refined_zncc": 0.9187162741632224,
+      "center_candidate_zncc_gap": 0.0812836459804318,
+      "center_prediction_conflict": true,
+      "center_prediction_conflict_tested": true,
+      "center_prediction_radius_px": 3.0,
+      "center_primary_distance_px": 24.04142744937483,
+      "center_candidate_distance_px": 0.08462485985230295,
+      "ambiguous_accept_proxy_count": 1
+    },
+    "wrong_prediction_reject": {
+      "input_sha256": "32b35e7a84b8011497aed82e3ede09eb8ca4c25823ce1ccea99db123e5623866",
+      "seed_uv_px": [
+        22.0,
+        17.0
+      ],
+      "search_radius_px": 18,
+      "reject_ambiguous_peaks": true,
+      "point_count": 9,
+      "valid_count": 8,
+      "strain_valid_count": 8,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": false,
+      "center_u_v_px": [
+        null,
+        null
+      ],
+      "center_error_px": null,
+      "center_invalid_reason": "AMBIGUOUS_PEAK",
+      "center_stop_reason": "prediction_conflicting_peaks",
+      "center_peak_is_ambiguous": true,
+      "center_candidate_status": "PREDICTION_CONFLICT",
+      "center_candidate_raw_zncc": 0.8933672308921814,
+      "center_candidate_refined_zncc": 0.8997795806186544,
+      "center_candidate_zncc_gap": 0.08783308589422756,
+      "center_prediction_conflict": true,
+      "center_prediction_conflict_tested": true,
+      "center_prediction_radius_px": 3.0,
+      "center_primary_distance_px": 24.04979888979349,
+      "center_candidate_distance_px": 0.17371220702300902,
+      "ambiguous_accept_proxy_count": 0
+    },
+    "wrong_prediction_allow": {
+      "input_sha256": "32b35e7a84b8011497aed82e3ede09eb8ca4c25823ce1ccea99db123e5623866",
+      "seed_uv_px": [
+        22.0,
+        17.0
+      ],
+      "search_radius_px": 18,
+      "reject_ambiguous_peaks": false,
+      "point_count": 9,
+      "valid_count": 9,
+      "strain_valid_count": 9,
+      "numeric_quality_gate_scientific_ok": false,
+      "center_valid": true,
+      "center_u_v_px": [
+        4.9967436704764,
+        -0.008295059529860727
+      ],
+      "center_error_px": 0.008911323951591117,
+      "center_invalid_reason": "",
+      "center_stop_reason": "converged_forward_affine_increment",
+      "center_peak_is_ambiguous": true,
+      "center_candidate_status": "PREDICTION_CONFLICT",
+      "center_candidate_raw_zncc": 0.8933672308921814,
+      "center_candidate_refined_zncc": 0.8997795806186544,
+      "center_candidate_zncc_gap": 0.08783308589422756,
+      "center_prediction_conflict": true,
+      "center_prediction_conflict_tested": true,
+      "center_prediction_radius_px": 3.0,
+      "center_primary_distance_px": 24.04979888979349,
+      "center_candidate_distance_px": 0.17371220702300902,
+      "ambiguous_accept_proxy_count": 1
+    },
+    "no_prediction_reject": {
+      "input_sha256": "8e6d7a51eb9aef4cd631ffa2c59bb6e237d241d13bf6acb52ba6c517b0480e19",
+      "seed_uv_px": null,
+      "search_radius_px": 30,
+      "reject_ambiguous_peaks": true,
+      "point_count": 9,
+      "valid_count": 9,
+      "strain_valid_count": 9,
+      "numeric_quality_gate_scientific_ok": true,
+      "center_valid": true,
+      "center_u_v_px": [
+        21.99993900184494,
+        16.999773758462194
+      ],
+      "center_error_px": 24.041427451491906,
+      "center_invalid_reason": "",
+      "center_stop_reason": "converged_all_affine_increment",
+      "center_peak_is_ambiguous": false,
+      "center_candidate_status": "CANDIDATE_WEAKER_THAN_GAP",
+      "center_candidate_raw_zncc": 0.9162411093711853,
+      "center_candidate_refined_zncc": 0.9187162741632224,
+      "center_candidate_zncc_gap": 0.08128364598217841,
+      "center_prediction_conflict": false,
+      "center_prediction_conflict_tested": false,
+      "center_prediction_radius_px": null,
+      "center_primary_distance_px": null,
+      "center_candidate_distance_px": null,
+      "ambiguous_accept_proxy_count": 0
+    },
+    "wrong_prediction_on_copied_patch_reject": {
+      "input_sha256": "8e6d7a51eb9aef4cd631ffa2c59bb6e237d241d13bf6acb52ba6c517b0480e19",
+      "seed_uv_px": [
+        22.0,
+        17.0
+      ],
+      "search_radius_px": 18,
+      "reject_ambiguous_peaks": true,
+      "point_count": 9,
+      "valid_count": 9,
+      "strain_valid_count": 9,
+      "numeric_quality_gate_scientific_ok": true,
+      "center_valid": true,
+      "center_u_v_px": [
+        21.99993900104976,
+        16.999773755654957
+      ],
+      "center_error_px": 24.04142744894462,
+      "center_invalid_reason": "",
+      "center_stop_reason": "converged_all_affine_increment",
+      "center_peak_is_ambiguous": false,
+      "center_candidate_status": "CANDIDATE_WEAKER_THAN_GAP",
+      "center_candidate_raw_zncc": 0.9162409901618958,
+      "center_candidate_refined_zncc": 0.9187162741632224,
+      "center_candidate_zncc_gap": 0.08128364598019211,
+      "center_prediction_conflict": false,
+      "center_prediction_conflict_tested": true,
+      "center_prediction_radius_px": 3.0,
+      "center_primary_distance_px": 0.00023432322888353985,
+      "center_candidate_distance_px": 23.996611333065623,
+      "ambiguous_accept_proxy_count": 0
+    }
+  },
+  "limits_addendum": "A wrong prediction aligned with the false copy can pass the field quality gate with a large true displacement error."
+}

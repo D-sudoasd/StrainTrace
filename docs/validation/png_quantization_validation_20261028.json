@@ -1,0 +1,109 @@
+{
+  "schema": "png-quantization-validation-v1",
+  "baseline_commit": "be10c58ca7b4dac70e707775b1ed708ff9a1e95d",
+  "baseline_core_sha256": "7ee6de2f9d5d4aab43ce90de65a23cc516b4361d32b4c0c2025fa621777afcb6",
+  "current_core_sha256": "9ec3116182041aa9f9d31786493bd3b29a2d7cca3df15162ac4867e3cf6924de",
+  "script_sha256": "eee4dad048a42e33ec4074b017f2f46e75244b0763dd19ecd71ef2e22d4fded5",
+  "environment": {
+    "python": "3.12.10",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "input": {
+    "shape": [
+      128,
+      128
+    ],
+    "texture_seed": 17,
+    "nominal_translation_uv_px": [
+      0.8,
+      -0.25
+    ],
+    "warped_float_min": 24.889183044433594,
+    "warped_float_max": 272.0418395996094,
+    "samples_above_255": 1274,
+    "samples_differing_between_conversions": 919
+  },
+  "settings": {
+    "subset_size": 15,
+    "step": 12,
+    "search_radius": 12,
+    "strain_window": 5,
+    "zncc_min": 0.65,
+    "pyramid_levels": 2,
+    "pyramid_scale": 0.5,
+    "min_correlation_valid_fraction": 0.0,
+    "min_strain_valid_fraction": 0.0,
+    "roi": [
+      20,
+      20,
+      88,
+      88
+    ]
+  },
+  "cases": {
+    "wrapped_corruption": {
+      "input_sha256": "3d210fa1ca098992607fc8a6587d0f6ea8f8ff43fc0e233a5e516eae4c3938ea",
+      "baseline": {
+        "point_count": 49,
+        "correlation_valid_count": 42,
+        "strain_valid_count": 42,
+        "valid_displacement_mean_error_px": 0.3610875964168144,
+        "valid_displacement_rmse_px": 0.530631215735643,
+        "valid_displacement_max_error_px": 2.218755054539441,
+        "valid_displacement_error_over_0_5_px_count": 7,
+        "invalid_reason_histogram": {
+          "ZNCC_BELOW_THRESHOLD": 3,
+          "SPATIAL_OUTLIER": 3,
+          "AMBIGUOUS_PEAK": 1
+        }
+      },
+      "current": {
+        "point_count": 49,
+        "correlation_valid_count": 36,
+        "strain_valid_count": 36,
+        "valid_displacement_mean_error_px": 0.3554432894290407,
+        "valid_displacement_rmse_px": 0.5259327792584756,
+        "valid_displacement_max_error_px": 2.218755054539441,
+        "valid_displacement_error_over_0_5_px_count": 6,
+        "invalid_reason_histogram": {
+          "ZNCC_BELOW_THRESHOLD": 4,
+          "AMBIGUOUS_PEAK": 6,
+          "SPATIAL_OUTLIER": 3
+        }
+      }
+    },
+    "saturated_png": {
+      "input_sha256": "9e6baea66ab170d0354dd189677caa9698dedc2c1f57ed5e2027e68ce724c3c7",
+      "baseline": {
+        "point_count": 49,
+        "correlation_valid_count": 49,
+        "strain_valid_count": 49,
+        "valid_displacement_mean_error_px": 0.0362325328311342,
+        "valid_displacement_rmse_px": 0.03662523299430325,
+        "valid_displacement_max_error_px": 0.0482359833781654,
+        "valid_displacement_error_over_0_5_px_count": 0,
+        "invalid_reason_histogram": {}
+      },
+      "current": {
+        "point_count": 49,
+        "correlation_valid_count": 48,
+        "strain_valid_count": 48,
+        "valid_displacement_mean_error_px": 0.036287048399313765,
+        "valid_displacement_rmse_px": 0.03668530469404236,
+        "valid_displacement_max_error_px": 0.0482359833781654,
+        "valid_displacement_error_over_0_5_px_count": 0,
+        "invalid_reason_histogram": {
+          "AMBIGUOUS_PEAK": 1
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Nominal translation is an approximate displacement oracle after cubic interpolation, saturation and 8-bit quantization.",
+    "The 0.5 px error threshold is illustrative, not an experimental uncertainty estimate.",
+    "Wrapped data are intentionally corrupted; lower coverage does not itself prove that every rejected point is wrong.",
+    "Different accepted sets mean their error averages are not a paired accuracy comparison."
+  ]
+}

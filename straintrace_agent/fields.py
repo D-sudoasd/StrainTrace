@@ -81,7 +81,8 @@ def _has_jacobian_support(field: Mapping) -> bool:
     if "X" not in field or "Y" not in field:
         return False
     return (
-        all(key in field for key in ("dudx", "dudy", "dvdx", "dvdy"))
+        "deformation_jacobian" in field
+        or all(key in field for key in ("dudx", "dudy", "dvdx", "dvdy"))
         or "P" in field
         or all(key in field for key in ("U", "V"))
         or all(key in field for key in ("u", "v"))
@@ -117,7 +118,8 @@ def _base_strain(field: Mapping, measure: str) -> tuple[np.ndarray, np.ndarray, 
 def jacobian_determinant(field: Mapping) -> np.ndarray:
     """Return a det(F) diagnostic using the most direct available gradients.
 
-    Direct derivative arrays take precedence. The core's ``P`` array is next;
+    The core's strain-fit determinant takes precedence, followed by direct
+    derivative arrays. The core's ``P`` array is next;
     its entries use ``[u, du/dx, du/dy, v, dv/dx, dv/dy]`` and describe the
     subset affine warp, so that diagnostic is distinct from the local
     polynomial strain fit. If neither is supplied, a bilinear estimate is
@@ -127,6 +129,12 @@ def jacobian_determinant(field: Mapping) -> np.ndarray:
     X, Y = _coordinates(field, "image")
     if X.ndim != 2 or min(X.shape) < 2:
         raise ValueError("Jacobian estimation requires a two-dimensional X/Y POI grid with at least 2 rows and columns")
+    if "deformation_jacobian" in field:
+        det = _array(field, "deformation_jacobian").astype(float, copy=False)
+        valid = _array(field, "valid", required=False, dtype=bool)
+        if valid is not None:
+            det = np.where(valid, det, np.nan)
+        return np.where(np.isfinite(det), det, np.nan)
     direct_keys = ("dudx", "dudy", "dvdx", "dvdy")
     if all(key in field for key in direct_keys):
         dudx, dudy, dvdx, dvdy = (_array(field, key).astype(float, copy=False) for key in direct_keys)
@@ -195,13 +203,29 @@ def jacobian_determinant(field: Mapping) -> np.ndarray:
 
 
 def nonpositive_jacobian_poi_mask(field: Mapping) -> np.ndarray:
-    """Mark original POIs with a supported nonpositive det(F) diagnostic."""
+    """Mark POIs where either fitted or subset-warp mapping folds.
+
+    These describe different spatial supports. When the strain-fit
+    determinant is available, do not discard a contradictory fold in P.
+    """
     cells = jacobian_determinant(field)
     points = np.zeros(_shape(field), dtype=bool)
     if cells.shape == points.shape:
-        return np.isfinite(cells) & (cells <= 0)
-    for i, j in zip(*np.nonzero(np.isfinite(cells) & (cells <= 0))):
-        points[i:i + 2, j:j + 2] = True
+        points |= np.isfinite(cells) & (cells <= 0)
+    else:
+        for i, j in zip(*np.nonzero(np.isfinite(cells) & (cells <= 0))):
+            points[i:i + 2, j:j + 2] = True
+    if "deformation_jacobian" in field and "P" in field:
+        p = np.asarray(field["P"], dtype=float)
+        if p.size != points.size * 6:
+            raise ValueError("P must contain six parameters per POI")
+        p = p.reshape(points.shape + (6,))
+        subset_det = (1.0 + p[..., 1]) * (1.0 + p[..., 5]) - p[..., 2] * p[..., 4]
+        valid = _array(field, "valid", required=False, dtype=bool)
+        support = np.isfinite(p).all(axis=-1)
+        if valid is not None:
+            support &= valid
+        points |= support & (subset_det <= 0)
     return points
 
 
