@@ -1472,7 +1472,56 @@ def _require_current_run_binding(
             or manifest.get("run_fingerprint") != expected_fingerprint
             or run_root.name != str(run_state.get("run_id"))):
         raise AgentError("RUN_STALE_BINDING", "run identity does not match current inputs, configuration, and code")
+    _require_recorded_run_integrity(run_root, manifest)
     return records, input_sha, current_code
+
+
+def _require_recorded_run_integrity(run_root: Path, manifest: Mapping[str, Any]) -> None:
+    """Check saved bytes before a derived operation can refresh their hashes.
+
+    Only recorded outputs are required, so a cancelled run can still export
+    its completed frames. Missing frames remain an execution/quality issue.
+    """
+    from .reporting import _safe_file
+
+    issues = []
+    for relative, expected in (manifest.get("artifacts") or {}).items():
+        path = _safe_file(run_root, relative)
+        if not path.is_file():
+            issues.append({"code": "ARTIFACT_MISSING", "path": relative})
+        elif _sha256(path) != expected:
+            issues.append({"code": "ARTIFACT_CHECKSUM_MISMATCH", "path": relative})
+    receipts = manifest.get("checkpoint_receipts") or {}
+    recorded_names = set(receipts)
+    actual_names = {path.name for path in (run_root / "checkpoints").glob("frame_native_*.json")}
+    for name in sorted(actual_names - recorded_names):
+        issues.append({"code": "UNREGISTERED_FRAME_RECEIPT", "path": name})
+    expected_checkpoints = {str(Path(name).with_suffix(".npz")) for name, receipt in receipts.items()
+                            if receipt.get("checkpoint_sha256") is not None}
+    actual_checkpoints = {path.name for path in (run_root / "checkpoints").glob("frame_native_*.npz")}
+    for name in sorted(actual_checkpoints - expected_checkpoints):
+        issues.append({"code": "UNREGISTERED_FRAME_CHECKPOINT", "path": name})
+    for name, receipt in receipts.items():
+        path = _safe_file(run_root, f"checkpoints/{name}")
+        if not path.is_file():
+            issues.append({"code": "FRAME_RECEIPT_MISSING", "path": name})
+            continue
+        if _sha256(path) != receipt.get("sha256"):
+            issues.append({"code": "RECEIPT_CHECKSUM_MISMATCH", "path": name})
+            continue
+        if receipt.get("checkpoint_sha256") is not None:
+            checkpoint = path.with_suffix(".npz")
+            checkpoint = _safe_file(run_root, checkpoint.relative_to(run_root).as_posix())
+            if not checkpoint.is_file():
+                issues.append({"code": "CHECKPOINT_MISSING", "path": checkpoint.name})
+            elif _sha256(checkpoint) != receipt["checkpoint_sha256"]:
+                issues.append({"code": "CHECKPOINT_CHECKSUM_MISMATCH", "path": checkpoint.name})
+    if issues:
+        raise AgentError(
+            "RUN_ARTIFACT_INVALID",
+            "saved run files changed or are missing; rerun analyze to regenerate outputs from verified checkpoints before plotting, extracting or exporting",
+            details=issues,
+        )
 
 
 def run(
@@ -1883,7 +1932,7 @@ def _build_outputs(
             metadata_path.name: {"sha256": _sha256(metadata_path), "checkpoint_sha256": _read_json(metadata_path).get("checkpoint_sha256"), "native_frame": _read_json(metadata_path).get("native_frame"), "status": _read_json(metadata_path).get("status")}
             for metadata_path in sorted((run_root / "checkpoints").glob("frame_native_*.json"))
         },
-        "checkpoint_count": sum(1 for path in (run_root / "checkpoints").glob("*.npz")),
+        "checkpoint_count": sum(1 for metadata in _iter_checkpoint_metadata(run_root) if metadata.get("checkpoint_sha256") is not None),
         "checkpoint_failures": sum(1 for path in (run_root / "checkpoints").glob("frame_native_*.json") if _read_json(path).get("status") == "failed"),
         "scientific_ok": quality["scientific_ok"], "numerical_quality_passed": quality["numerical_quality_passed"],
         "quality_gate_scope": QUALITY_GATE_SCOPE, "scientific_acceptance": "not_assessed",
@@ -2232,7 +2281,7 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
             native = int(record["native_frame"])
             meta = by_native.get(native)
             if meta is None:
-                rows.append({"frame": index, "native_frame": native, "time_s": record.get("time_s"), "status": "pending", "quality_status": "unavailable", "scientific_ok": False, "engineering_strain": None, **_mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)})
+                rows.append({"frame_position_1based": index, "native_frame": native, "time_s": record.get("time_s"), "status": "pending", "quality_status": "unavailable", "scientific_ok": False, "engineering_strain": None, **_mechanics_at(record.get("time_s"), mechanics, config, displacement_reference_mm=displacement_reference, displacement_reference_alignment=displacement_reference_alignment)})
                 continue
             row = dict(meta.get("summary_row") or {})
             if row.get("status") == "failed":
@@ -2250,6 +2299,49 @@ def export(project: str | os.PathLike[str], *, field_csv: bool = False) -> dict[
                 "artifacts": output["artifacts"]}
 
 
+@contextmanager
+def _extraction_transaction(run_root: Path):
+    """Publish a complete extraction and its hashes, or retain the old files."""
+    from .reporting import _safe_file
+
+    staging_root = run_root / "_postprocess_staging" / f"extract-{uuid.uuid4().hex}"
+    staged = staging_root / "new"
+    staged.mkdir(parents=True)
+    previous_manifest = (run_root / "manifest.json").read_bytes()
+    destination_existed = (run_root / "extractions").exists()
+    replaced = []
+    cleanup = True
+    try:
+        yield staged
+        for source in sorted(staged.iterdir()):
+            target = _safe_file(run_root, f"extractions/{source.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            backup = staging_root / "previous" / source.name
+            if target.exists():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                _replace_with_retry(target, backup)
+            replaced.append((target, backup))
+            _replace_with_retry(source, target)
+        _refresh_manifest_artifacts(run_root)
+    except BaseException:
+        # Keep backup bytes available if rollback itself is interrupted.
+        cleanup = False
+        for target, backup in reversed(replaced):
+            target.unlink(missing_ok=True)
+            if backup.exists():
+                _replace_with_retry(backup, target)
+        if replaced:
+            _atomic_bytes(run_root / "manifest.json", previous_manifest)
+        destination = run_root / "extractions"
+        if not destination_existed and destination.is_dir() and not any(destination.iterdir()):
+            destination.rmdir()
+        cleanup = True
+        raise
+    finally:
+        if cleanup:
+            shutil.rmtree(staging_root)
+
+
 def extract(
     project: str | os.PathLike[str], *, component: str = "exx",
     roi: Sequence[float] | None = None, path_points: Sequence[Sequence[float]] | None = None,
@@ -2260,8 +2352,30 @@ def extract(
         from . import fields
     except ImportError as exc:
         raise AgentError("FIELD_API_UNAVAILABLE", "spatial field extraction support is not installed") from exc
+    if roi is None and path_points is None:
+        raise AgentError("CONFIG_EXTRACTION_QUERY_REQUIRED", "provide an ROI or path points for extraction")
+    if coordinate_system not in {"image", "calibrated"}:
+        raise AgentError("CONFIG_COORDINATE_SYSTEM", "coordinate_system must be image or calibrated", path="$.coordinate_system")
+    if roi is not None:
+        try:
+            roi = fields._validate_roi(roi)
+        except ValueError as exc:
+            raise AgentError("CONFIG_EXTRACTION_ROI", str(exc), path="$.roi") from exc
+    if path_points is not None:
+        if max_distance is None:
+            raise AgentError("PATH_TOLERANCE_REQUIRED", "max_distance is required for path extraction", path="$.max_distance")
+        max_distance = _positive_number(max_distance, "max_distance", allow_zero=True)
+        try:
+            points = np.asarray(path_points, dtype=float)
+            if points.ndim != 2 or points.shape[1] != 2 or not len(points) or not np.isfinite(points).all():
+                raise ValueError("path_points must be a nonempty finite N by 2 array")
+        except (TypeError, ValueError) as exc:
+            raise AgentError("CONFIG_EXTRACTION_PATH", str(exc), path="$.path_points") from exc
+        path_points = points.tolist()
     root = _project_root(project)
     config = _read_config(root)
+    if coordinate_system == "calibrated" and not config.get("calibration"):
+        raise AgentError("CONFIG_CALIBRATION_REQUIRED", "calibrated extraction requires an explicit project calibration", path="$.calibration")
     with _project_lock(root, purpose="extract"):
         pointer, run_root = _load_run_pointer(root)
         plan = _read_json(_plan_path(root, pointer))
@@ -2270,8 +2384,6 @@ def extract(
         output: dict[str, Any] = {"run_id": run_root.name, "component": component, "coordinate_system": coordinate_system}
         checkpoint_root = run_root / "checkpoints"
         metadata_by_native = {int(meta["native_frame"]): meta for meta in _iter_checkpoint_metadata(run_root)}
-        dest = run_root / "extractions"
-        dest.mkdir(exist_ok=True)
 
         def load_field(record: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
             meta = metadata_by_native.get(int(record["native_frame"]))
@@ -2283,57 +2395,63 @@ def extract(
                 field.update(fields.calibrate_field(field, config["calibration"]))
             return field, loaded
 
-        if roi is not None:
-            output["rois"] = []
-            def roi_rows():
-                for record in records:
-                    field, meta = load_field(record)
-                    native = int(record["native_frame"])
-                    if field is None:
-                        continue
-                    summary = fields.summarize_roi(field, component, roi, coordinate_system=coordinate_system)
-                    output["rois"].append({"native_frame": native, "time_s": meta.get("time_s"), **_json_safe(summary)})
-                    for row in fields.iter_roi_rows(field, component, roi, coordinate_system=coordinate_system):
-                        yield {"native_frame": native, "time_s": meta.get("time_s"), **row}
-            component_slug = _component_file_slug(component)
-            roi_csv = fields.write_rows_csv(roi_rows(), dest / f"roi_{component_slug}.csv", fieldnames=["native_frame", "time_s", "poi_index", "x", "y", "coordinate_system", "component", "value", "value_unit", "status", "interpolation"])
-            _atomic_json(dest / f"roi_{component_slug}_summary.json", output["rois"])
-            output["roi_csv"] = str(roi_csv)
-            output["roi_summary"] = str(dest / f"roi_{component_slug}_summary.json")
-        if path_points is not None:
-            if max_distance is None:
-                raise AgentError("PATH_TOLERANCE_REQUIRED", "max_distance is required for path extraction", path="$.max_distance")
-            def sample_rows():
-                for record in records:
-                    field, meta = load_field(record)
-                    native = int(record["native_frame"])
-                    if field is None:
-                        for index, point in enumerate(path_points):
-                            yield {"native_frame": native, "time_s": record.get("time_s"), "run_status": "unavailable", "path_index": index, "target_x": point[0], "target_y": point[1], "poi_index": None, "poi_x": None, "poi_y": None, "distance": None, "coordinate_system": coordinate_system, "interpolation": "none", component: None, "status": "frame_failed"}
-                        continue
-                    for row in fields.sample_path(field, path_points, [component], max_distance, coordinate_system=coordinate_system):
-                        yield {"native_frame": native, "time_s": meta.get("time_s"), "run_status": meta.get("status"), **row}
-            component_slug = _component_file_slug(component)
-            path_csv = fields.write_rows_csv(sample_rows(), dest / f"path_{component_slug}.csv")
-            output["paths_csv"] = str(path_csv)
-            frame_axis = config.get("time_basis") == "frame_index"
-            times = [record["native_frame"] if frame_axis else record.get("time_s") for record in records]
-            def plot_fields():
-                for record in records:
-                    field, _meta = load_field(record)
-                    yield field
-            finite_steps = np.diff([float(value) for value in times]) if len(times) > 1 else np.asarray([])
-            max_time_gap = float(np.median(finite_steps) * 1.5) if finite_steps.size and not frame_axis else None
-            figure_path = dest / f"position_{'frame' if frame_axis else 'time'}_{component_slug}.png"
-            fig, _ax, _artist, plot_summary = fields.plot_position_time(plot_fields(), times, path_points, component, max_distance,
-                         max_time_gap_s=max_time_gap, axis_unit="frame" if frame_axis else "s", axis_label="Native frame" if frame_axis else "Time (s)")
-            fig.savefig(figure_path, dpi=220, bbox_inches="tight")
-            import matplotlib.pyplot as plt
-            plt.close(fig)
-            output["position_time_plot"] = str(figure_path)
-            output["position_time_summary"] = plot_summary
-        _refresh_manifest_artifacts(run_root)
+        with _extraction_transaction(run_root) as dest:
+            if roi is not None:
+                output["rois"] = []
+                def roi_rows():
+                    for record in records:
+                        field, meta = load_field(record)
+                        native = int(record["native_frame"])
+                        if field is None:
+                            continue
+                        summary = fields.summarize_roi(field, component, roi, coordinate_system=coordinate_system)
+                        output["rois"].append({"native_frame": native, "time_s": meta.get("time_s"), **_json_safe(summary)})
+                        for row in fields.iter_roi_rows(field, component, roi, coordinate_system=coordinate_system):
+                            yield {"native_frame": native, "time_s": meta.get("time_s"), **row}
+                component_slug = _component_file_slug(component)
+                roi_csv = fields.write_rows_csv(roi_rows(), dest / f"roi_{component_slug}.csv", fieldnames=["native_frame", "time_s", "poi_index", "x", "y", "coordinate_system", "component", "value", "value_unit", "status", "interpolation"])
+                _atomic_json(dest / f"roi_{component_slug}_summary.json", output["rois"])
+                output["roi_csv"] = str(roi_csv)
+                output["roi_summary"] = str(dest / f"roi_{component_slug}_summary.json")
+            if path_points is not None:
+                def sample_rows():
+                    for record in records:
+                        field, meta = load_field(record)
+                        native = int(record["native_frame"])
+                        if field is None:
+                            for index, point in enumerate(path_points):
+                                yield {"native_frame": native, "time_s": record.get("time_s"), "run_status": "unavailable", "path_index": index, "target_x": point[0], "target_y": point[1], "poi_index": None, "poi_x": None, "poi_y": None, "distance": None, "coordinate_system": coordinate_system, "interpolation": "none", component: None, "status": "frame_failed"}
+                            continue
+                        for row in fields.sample_path(field, path_points, [component], max_distance, coordinate_system=coordinate_system):
+                            yield {"native_frame": native, "time_s": meta.get("time_s"), "run_status": meta.get("status"), **row}
+                component_slug = _component_file_slug(component)
+                path_csv = fields.write_rows_csv(sample_rows(), dest / f"path_{component_slug}.csv")
+                output["paths_csv"] = str(path_csv)
+                frame_axis = config.get("time_basis") == "frame_index"
+                times = [record["native_frame"] if frame_axis else record.get("time_s") for record in records]
+                def plot_fields():
+                    for record in records:
+                        field, _meta = load_field(record)
+                        yield field
+                finite_steps = np.diff([float(value) for value in times]) if len(times) > 1 else np.asarray([])
+                max_time_gap = float(np.median(finite_steps) * 1.5) if finite_steps.size and not frame_axis else None
+                figure_path = dest / f"position_{'frame' if frame_axis else 'time'}_{component_slug}.png"
+                fig, _ax, _artist, plot_summary = fields.plot_position_time(plot_fields(), times, path_points, component, max_distance,
+                             coordinate_system=coordinate_system, max_time_gap_s=max_time_gap,
+                             axis_unit="frame" if frame_axis else "s", axis_label="Native frame" if frame_axis else "Time (s)")
+                import matplotlib.pyplot as plt
+                try:
+                    fig.savefig(figure_path, dpi=220, bbox_inches="tight")
+                finally:
+                    plt.close(fig)
+                output["position_time_plot"] = str(figure_path)
+                output["position_time_summary"] = plot_summary
+        final_destination = run_root / "extractions"
+        for key, value in list(output.items()):
+            if isinstance(value, str) and value.startswith(str(dest) + os.sep):
+                output[key] = str(final_destination / Path(value).relative_to(dest))
         return output
+
 
 
 def _current_plan_if_fresh(root: Path, config: Mapping[str, Any]) -> dict[str, Any] | None:

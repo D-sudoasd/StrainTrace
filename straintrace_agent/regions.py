@@ -172,7 +172,7 @@ def summarize_regions(
                 coordinates[system] = fields._coordinates(working, system)
             x, y = coordinates[system]
             xmin, xmax, ymin, ymax = region["bounds"]
-            inside = np.isfinite(x) & np.isfinite(y) & (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+            inside = fields._inside_roi(x, y, (xmin, xmax, ymin, ymax))
             support_bounds = _field_bounds(working, system, x, y)
             if support_bounds is not None:
                 sxmin, sxmax, symin, symax = support_bounds

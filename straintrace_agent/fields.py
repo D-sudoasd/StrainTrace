@@ -367,6 +367,17 @@ def _validate_roi(roi: Sequence[float]) -> tuple[float, float, float, float]:
     return xmin, xmax, ymin, ymax
 
 
+def _inside_roi(x: np.ndarray, y: np.ndarray, bounds: Sequence[float]) -> np.ndarray:
+    """Inclusive reference coordinates, allowing only unit-conversion roundoff."""
+    xmin, xmax, ymin, ymax = bounds
+    epsilon = 8 * np.finfo(float).eps
+    xtol = epsilon * max(1.0, abs(xmin), abs(xmax))
+    ytol = epsilon * max(1.0, abs(ymin), abs(ymax))
+    return (np.isfinite(x) & np.isfinite(y)
+            & (x >= xmin - xtol) & (x <= xmax + xtol)
+            & (y >= ymin - ytol) & (y <= ymax + ytol))
+
+
 def iter_roi_rows(
     field: Mapping,
     component: str,
@@ -379,7 +390,7 @@ def iter_roi_rows(
     x, y = _coordinates(field, coordinate_system)
     values = component_values(field, component)
     valid = _component_valid(field, component, values)
-    inside = np.isfinite(x) & np.isfinite(y) & (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+    inside = _inside_roi(x, y, (xmin, xmax, ymin, ymax))
     for index in np.flatnonzero(inside.ravel()):
         ok = bool(valid.ravel()[index])
         yield {
@@ -525,7 +536,11 @@ def sample_path(
             "coordinate_system": coordinate_system,
             "interpolation": "none",
         }
-        if poi_distance > tolerance:
+        distance_roundoff = 16 * np.finfo(float).eps * max(
+            1.0, tolerance, abs(float(target[0])), abs(float(target[1])),
+            abs(float(px[poi_index])), abs(float(py[poi_index])),
+        )
+        if poi_distance > tolerance + distance_roundoff:
             row["status"] = "outside_tolerance"
             row.update({component: None for component in component_list})
         else:
@@ -651,12 +666,11 @@ def plot_field_map(
     if coordinate_system == "image":
         ax.set_xlabel("Image x (px; + right)")
         ax.set_ylabel("Image y (px; + down)")
-        ax.invert_yaxis()
+        ax.yaxis.set_inverted(True)
     else:
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        if y_axis_sign > 0:
-            ax.invert_yaxis()
+        ax.yaxis.set_inverted(y_axis_sign > 0)
     ax.set_aspect("equal", adjustable="box")
     if colorbar:
         label = f"{component} ({component_unit(component)}"

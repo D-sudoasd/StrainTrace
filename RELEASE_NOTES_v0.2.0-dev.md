@@ -8,6 +8,19 @@ or publication claim is made by this note.
 
 ## Scope of this iteration
 
+### 30 October 2026: numerical, delivery and desktop regression fixes
+
+Core strain masks now reject folded/collapsed deformation consistently with
+Agent extraction. Calibrated path plots share CSV coordinates, and mechanics,
+ROI and path boundaries preserve exact samples across floating-point roundoff.
+Reports and derived operations retain the original source/checkpoint hashes;
+failed extraction restores the previous files and manifest. Desktop fixes cover
+identity-only frame maps, source-specific metadata, explicitly cleared geometry,
+operation errors, contextual help and installed Chinese font fallbacks.
+Keystone imports now resolve CURRENT pointers consistently across platforms,
+and the desktop offers the supported directory input. See the
+[review and validation record](docs/REVIEW_20261030.md).
+
 ### 26 October 2026: autonomous analysis and traceable comparisons
 
 The Agent workflow now connects experiment-folder discovery and explicit analysis

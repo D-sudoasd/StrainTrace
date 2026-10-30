@@ -83,11 +83,16 @@ def _interpolate_bounded_detail(
     if source_rows.size != times.size or not np.isfinite(times).all() or not np.isfinite(values).all() or np.any(np.diff(times) <= 0):
         return {"value": None, "alignment_kind": "channel_unavailable", "left_time_s": None, "right_time_s": None, "left_source_row": None, "right_source_row": None}
     index = int(np.searchsorted(times, time_s, side="left"))
-    if index < len(times) and math.isclose(float(times[index]), float(time_s), rel_tol=0.0, abs_tol=1e-10):
+    # Unit conversion/clock arithmetic can place an exact acquisition time a
+    # few ulps above its recorded sample. Check both insertion neighbors before
+    # applying an interpolation-gap rule; no interpolation is needed there.
+    adjacent = [candidate for candidate in (index - 1, index) if 0 <= candidate < len(times)]
+    exact = min(adjacent, key=lambda candidate: abs(float(times[candidate]) - float(time_s)))
+    if math.isclose(float(times[exact]), float(time_s), rel_tol=0.0, abs_tol=1e-10):
         return {
-            "value": float(values[index]), "alignment_kind": "exact_sample",
-            "left_time_s": float(times[index]), "right_time_s": float(times[index]),
-            "left_source_row": int(source_rows[index]), "right_source_row": int(source_rows[index]),
+            "value": float(values[exact]), "alignment_kind": "exact_sample",
+            "left_time_s": float(times[exact]), "right_time_s": float(times[exact]),
+            "left_source_row": int(source_rows[exact]), "right_source_row": int(source_rows[exact]),
         }
     if index == 0 or index >= len(times):
         return {"value": None, "alignment_kind": "outside_time_support", "left_time_s": None, "right_time_s": None, "left_source_row": None, "right_source_row": None}
@@ -97,7 +102,8 @@ def _interpolate_bounded_detail(
         "left_time_s": float(times[left]), "right_time_s": float(times[right]),
         "left_source_row": int(source_rows[left]), "right_source_row": int(source_rows[right]),
     }
-    if gap > max_gap_s:
+    gap_roundoff = 8 * np.finfo(float).eps * max(1.0, abs(float(times[left])), abs(float(times[right])), abs(float(max_gap_s)))
+    if gap > max_gap_s + gap_roundoff:
         return {"value": None, "alignment_kind": "gap_exceeds_max_gap", **support}
     alpha = float((time_s - times[left]) / gap)
     return {"value": float(values[left] + alpha * (values[right] - values[left])), "alignment_kind": "bounded_linear_interpolation", **support}

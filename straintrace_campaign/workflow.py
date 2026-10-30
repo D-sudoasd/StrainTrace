@@ -458,16 +458,22 @@ def _keystone_source_info(source: str | os.PathLike[str]) -> tuple[str, str]:
     """Resolve the immutable version identity used by delivery.import_keystone."""
     candidate = Path(source).expanduser().resolve()
     pointer_root: Path | None = None
+    pointer: Path | None = None
     if candidate.is_file() and candidate.name.lower() == "current.json":
-        pointer_root = candidate.parent.resolve()
-        current = strict_json_load(candidate)
-        relative = validate_relative_path(current.get("version_relative_path", current.get("version_path")), "CURRENT.version path")
-        version = (pointer_root / Path(relative)).resolve()
-    elif candidate.is_dir() and (candidate / "current.json").is_file():
-        pointer_root = candidate.resolve()
-        current = strict_json_load(candidate / "current.json")
-        relative = validate_relative_path(current.get("version_relative_path", current.get("version_path")), "CURRENT.version path")
-        version = (pointer_root / Path(relative)).resolve()
+        pointer = candidate
+    elif (candidate.is_dir() and (candidate / "CURRENT.json").is_file()
+          and not ((candidate / "catalog.json").is_file() and (candidate / "samples").is_dir())):
+        # Match delivery's explicit-version precedence and the producer's
+        # actual filename on case-sensitive filesystems.
+        pointer = candidate / "CURRENT.json"
+    if pointer is not None:
+        pointer_root = pointer.parent.resolve()
+        current = strict_json_load(pointer)
+        if not isinstance(current, Mapping):
+            raise CampaignError("IMPORT_SOURCE_INVALID", "CURRENT.json must contain an object")
+        relative = validate_relative_path(current.get("version_path") or current.get("version_relative_path"), "CURRENT.version path")
+        # A Windows-written pointer can be imported on another platform.
+        version = (pointer_root / Path(relative.replace("\\", "/"))).resolve()
     else:
         version = candidate
     if pointer_root is not None:

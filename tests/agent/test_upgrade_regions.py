@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 import ezdic_core as core
-from straintrace_agent.fields import calibrate_field, plot_position_time, summarize_roi
-from straintrace_agent.mechanics import _auto_gauge_candidates, _mechanics_at, _measure_gauges, _resolve_gauge_geometry
+from straintrace_agent.fields import calibrate_field, plot_field_map, plot_position_time, sample_path, summarize_roi
+from straintrace_agent.mechanics import _auto_gauge_candidates, _interpolate_bounded_detail, _mechanics_at, _measure_gauges, _resolve_gauge_geometry
 from straintrace_agent.regions import normalize_regions, recommend_regions, summarize_regions
 
 
@@ -319,3 +319,68 @@ def test_missing_time_never_aligns_loads_and_frame_axis_never_invents_seconds():
     plt.close(figure)
     with pytest.raises(ValueError, match="seconds"):
         plot_position_time([], [], [[14, 24]], "Exx", 0, axis_unit="frame", max_time_gap_s=1)
+
+
+@pytest.mark.parametrize("timestamp", [0.1 + 0.2, 0.3, 0.3 - 1e-16])
+def test_roundoff_at_exact_mechanics_sample_does_not_require_gap_interpolation(timestamp):
+    detail = _interpolate_bounded_detail(timestamp, [.3, 1.3], [10., 20.], .1, [4, 9])
+    assert detail["value"] == 10.
+    assert detail["alignment_kind"] == "exact_sample"
+    assert detail["left_source_row"] == detail["right_source_row"] == 4
+    assert detail["left_time_s"] == detail["right_time_s"] == .3
+    # An actual interior sample still obeys the configured interpolation gap.
+    unsupported = _interpolate_bounded_detail(.31, [.3, 1.3], [10., 20.], .1)
+    assert unsupported["value"] is None
+    assert unsupported["alignment_kind"] == "gap_exceeds_max_gap"
+
+
+def test_nominal_mechanics_gap_limit_is_inclusive_after_time_arithmetic():
+    detail = _interpolate_bounded_detail(.7, [.6, .8], [60., 80.], .2)
+    assert detail["alignment_kind"] == "bounded_linear_interpolation"
+    assert detail["value"] == pytest.approx(70.)
+    unsupported = _interpolate_bounded_detail(.7, [.6, .8 + 1e-8], [60., 80.], .2)
+    assert unsupported["value"] is None
+    assert unsupported["alignment_kind"] == "gap_exceeds_max_gap"
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_calibrated_inclusive_roi_keeps_boundary_pois_after_unit_conversion(sign):
+    x, y = np.meshgrid(np.arange(5, dtype=float), np.arange(5, dtype=float))
+    field = {"X": x, "Y": y, "u": x.copy(), "v": y.copy(),
+             "valid": np.ones(x.shape, bool), "roi": [0, 0, 5, 5]}
+    field.update(calibrate_field(field, {"mm_per_px": .1, "origin_px": [0, 0],
+                                         "origin_mm": [0, 0], "axis_sign": [sign, sign]}))
+    bounds = [.1, .3, .1, .3] if sign == 1 else [-.3, -.1, -.3, -.1]
+    region = {"name": "inclusive", "bounds": bounds, "coordinate_system": "calibrated"}
+    single = summarize_roi(field, "u_mm", bounds, coordinate_system="calibrated")
+    multiple = summarize_regions(field, [region], ["u_mm"])[0]
+    assert single["n_poi_total"] == multiple["n_poi_total"] == 9
+    assert single["mean"] == pytest.approx(sign*.2)
+    assert multiple["mean"] == pytest.approx(sign*.2)
+    point = sample_path(field, [[sign*.3, sign*.3]], "u_mm", 0., coordinate_system="calibrated")[0]
+    assert point["status"] == "valid"
+    assert point["poi_index"] == 18
+    assert point["u_mm"] == pytest.approx(sign*.3)
+    outside_point = sample_path(field, [[sign*.3 + 1e-8, sign*.3]], "u_mm", 0., coordinate_system="calibrated")[0]
+    assert outside_point["status"] == "outside_tolerance"
+    # Keep points genuinely outside the requested rectangle excluded.
+    inner_bounds = [bounds[0]+1e-8, bounds[1]-1e-8, bounds[2]+1e-8, bounds[3]-1e-8]
+    assert summarize_roi(field, "u_mm", inner_bounds, coordinate_system="calibrated")["n_poi_total"] == 1
+
+
+def test_reusing_field_plot_axes_does_not_reverse_image_coordinates():
+    import matplotlib.pyplot as plt
+
+    field = _field([[1.04, 0], [0, 1]])
+    field.update(calibrate_field(field, CALIBRATION))
+    figure, axes, _ = plot_field_map(field, "Exx", colorbar=False)
+    try:
+        assert axes.yaxis_inverted()
+        plot_field_map(field, "Eyy", ax=axes, colorbar=False)
+        assert axes.yaxis_inverted()
+        plot_field_map(field, "u_mm", ax=axes, coordinate_system="calibrated", colorbar=False)
+        assert not axes.yaxis_inverted()  # Explicit physical +y points upward.
+        plot_field_map(field, "Exx", ax=axes, colorbar=False)
+        assert axes.yaxis_inverted()
+    finally:
+        plt.close(figure)

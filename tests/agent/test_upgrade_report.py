@@ -603,3 +603,150 @@ def test_derived_plan_binding_and_attention_status_preserve_source_dic_gate(save
     assert data["quality"]["postprocessing_quality"] == status
     assert "数值质量 通过" in html and "本次后处理：attention_required" in html
     assert "逐帧 ROI/分量测量行" in html and "<td>16</td>" in html
+
+
+@pytest.mark.parametrize("filename", ["gauges.csv", "regions.csv", "quality.json"])
+def test_report_rejects_missing_registered_measurements_and_quality(saved_run, filename):
+    run, config, plan = saved_run
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    source["artifacts"]["quality.json"] = _digest(run / "quality.json")
+    _json(run / "manifest.json", source)
+    build_report(run, config=config, plan=plan)
+    before = (run / "report/index.html").read_bytes()
+    (run / filename).unlink()
+    with pytest.raises(ValueError, match="Registered report input is missing"):
+        build_report(run, config=config, plan=plan)
+    assert (run / "report/index.html").read_bytes() == before
+    assert verify_report(run / "report")["valid"]
+
+
+def test_report_rejects_quality_changed_after_run_manifest(saved_run):
+    run, config, plan = saved_run
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    source["artifacts"]["quality.json"] = _digest(run / "quality.json")
+    _json(run / "manifest.json", source)
+    _json(run / "quality.json", {"numerical_quality_passed": True, "scientific_acceptance": "not_assessed"})
+    with pytest.raises(ValueError, match="quality.*disagrees with source manifest"):
+        build_report(run, config=config, plan=plan)
+
+
+@pytest.mark.parametrize("table_name,column", [("summary", "force_N"), ("gauges", "engineering_strain"), ("regions", "mean")])
+def test_verifier_binds_resigned_csv_and_derivatives_to_original_source(saved_run, table_name, column):
+    from straintrace_agent.reporting import _curves, _html
+    run, config, plan = saved_run
+    build_report(run, config=config, plan=plan)
+    package = run / "report"
+    data_path = package / "data/report_data.json"
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    table = data["tables"][table_name]
+    table["rows"][0][column] = "123.456789"
+    _csv(package / table["path"], table["rows"])
+    data["curves"] = _curves(data["tables"], data["frames"], data["time_basis"])
+    _json(data_path, data)
+    (package / "index.html").write_text(_html(data), encoding="utf-8")
+    _resign_package_files(package)
+    checked = verify_report(package)
+    assert checked["valid"] is False
+    assert f"CSV source checksum mismatch: {table_name}" in checked["errors"]
+    result = subprocess.run([sys.executable, "-I", str(package / "verify_report.py"), str(package)],
+                            capture_output=True, text=True, encoding="utf-8", check=False)
+    assert result.returncode == 1 and "CSV source checksum mismatch" in result.stdout
+
+
+def test_report_preserves_registered_quality_bytes_and_binds_portable_copy(saved_run):
+    from straintrace_agent.reporting import _html
+    run, config, plan = saved_run
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    quality_path = run / "quality.json"
+    # A valid JSON file need not use the report writer's indentation or newline.
+    quality_path.write_text('{"numerical_quality_passed":false,"scientific_acceptance":"not_assessed"}', encoding="utf-8")
+    source["artifacts"]["quality.json"] = _digest(quality_path)
+    _json(run / "manifest.json", source)
+    build_report(run, config=config, plan=plan)
+    package = run / "report"
+    assert (package / "data/quality.json").read_bytes() == quality_path.read_bytes()
+    data = json.loads((package / "data/report_data.json").read_text(encoding="utf-8"))
+    data["quality"]["numerical_quality_passed"] = True
+    _json(package / "data/quality.json", data["quality"])
+    _json(package / "data/report_data.json", data)
+    (package / "index.html").write_text(_html(data), encoding="utf-8")
+    _resign_package_files(package)
+    checked = verify_report(package)
+    assert checked["valid"] is False
+    assert "Quality source checksum mismatch" in checked["errors"]
+
+
+def test_verifier_accepts_legacy_reformatted_canonical_quality(saved_run):
+    from straintrace_agent.reporting import _write_json
+    run, config, plan = saved_run
+    quality = json.loads((run / "quality.json").read_text(encoding="utf-8"))
+    canonical = json.dumps(quality, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    (run / "quality.json").write_text(canonical, encoding="utf-8")
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    source["artifacts"]["quality.json"] = _digest(run / "quality.json")
+    _json(run / "manifest.json", source)
+    build_report(run, config=config, plan=plan)
+    package = run / "report"
+    # Earlier v1 packages reformatted the API's canonical quality JSON and did
+    # not carry a table_sources map. Both forms still have the same source.
+    data = json.loads((package / "data/report_data.json").read_text(encoding="utf-8"))
+    data.pop("table_sources")
+    _json(package / "data/report_data.json", data)
+    _write_json(package / "data/quality.json", quality)
+    assert _digest(package / "data/quality.json") != source["artifacts"]["quality.json"]
+    _resign_package_files(package)
+    assert verify_report(package)["valid"]
+
+
+@pytest.mark.parametrize("outside", [False, True])
+def test_report_rejects_unregistered_region_override(saved_run, tmp_path, outside):
+    run, config, plan = saved_run
+    override = (tmp_path if outside else run) / "unregistered-regions.csv"
+    shutil.copyfile(run / "regions.csv", override)
+    with pytest.raises(ValueError, match="registered"):
+        build_report(run, config=config, plan=plan, regions_csv=override)
+
+
+def test_report_binds_registered_region_override_to_its_source_path(saved_run):
+    run, config, plan = saved_run
+    override = run / "extractions" / "regions.csv"
+    override.parent.mkdir()
+    (run / "regions.csv").rename(override)
+    source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    source["artifacts"]["extractions/regions.csv"] = source["artifacts"].pop("regions.csv")
+    _json(run / "manifest.json", source)
+    receipt = build_report(run, config=config, plan=plan, regions_csv=override)
+    data = json.loads(Path(receipt["report_data"]).read_text(encoding="utf-8"))
+    assert data["table_sources"]["regions"] == "extractions/regions.csv"
+    assert receipt["verification"]["valid"]
+
+
+def test_malformed_manifest_returns_invalid_without_traceback(saved_run):
+    run, config, plan = saved_run
+    build_report(run, config=config, plan=plan)
+    package = run / "report"
+    _json(package / "manifest.json", [])
+    checked = verify_report(package)
+    assert not checked["valid"]
+    result = subprocess.run([sys.executable, "-I", str(package / "verify_report.py"), str(package)],
+                            capture_output=True, text=True, encoding="utf-8", check=False)
+    assert result.returncode == 1 and not result.stderr
+    assert json.loads(result.stdout)["valid"] is False
+
+
+@pytest.mark.parametrize("document,key", [("data/report_data.json", "tables"), ("provenance/source_manifest.json", "artifacts")])
+def test_nested_malformed_report_returns_invalid_without_traceback(saved_run, document, key):
+    run, config, plan = saved_run
+    build_report(run, config=config, plan=plan)
+    package = run / "report"
+    path = package / document
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data[key] = ["not an object"]
+    _json(path, data)
+    _resign_package_files(package)
+    checked = verify_report(package)
+    assert not checked["valid"]
+    result = subprocess.run([sys.executable, "-I", str(package / "verify_report.py"), str(package)],
+                            capture_output=True, text=True, encoding="utf-8", check=False)
+    assert result.returncode == 1 and not result.stderr
+    assert json.loads(result.stdout)["valid"] is False

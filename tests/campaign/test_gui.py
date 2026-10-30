@@ -169,6 +169,34 @@ def _wait(root, page, timeout=3.0):
     assert not page._busy, "campaign operation did not finish before timeout"
 
 
+@pytest.mark.parametrize("cancelled", (False, True))
+def test_keystone_import_dialog_only_offers_supported_directory(campaign_case, monkeypatch, cancelled):
+    root, page, wf, tmp_path = campaign_case
+    source = tmp_path / "keystone-version"
+    source.mkdir()
+    dialogs = []
+
+    def choose_directory(**kwargs):
+        dialogs.append(kwargs)
+        return "" if cancelled else str(source)
+
+    def reject_archive_dialog(*_args, **_kwargs):
+        pytest.fail("Keystone import does not support ZIP archives")
+
+    monkeypatch.setattr("straintrace_campaign.gui.filedialog.askdirectory", choose_directory)
+    monkeypatch.setattr("straintrace_campaign.gui.filedialog.askopenfilename", reject_archive_dialog)
+    monkeypatch.setattr("straintrace_campaign.gui.messagebox.askyesno", reject_archive_dialog)
+    page.import_button.invoke()
+    _wait(root, page)
+    assert len(dialogs) == 1
+    assert dialogs[0]["parent"] is page.winfo_toplevel()
+    imports = [call for call in wf.calls if call[0] == "import_keystone"]
+    assert imports == ([] if cancelled else [("import_keystone", str(source))])
+    help_text = page._control_help_text(page.import_button)
+    assert "CURRENT.json" in help_text and "目录" in help_text
+    assert "ZIP" not in help_text
+
+
 def test_campaign_page_scans_edits_reviews_and_runs_on_worker(campaign_case):
     root, page, wf, tmp_path = campaign_case
     page.scan_root()

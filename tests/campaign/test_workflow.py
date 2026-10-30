@@ -528,3 +528,48 @@ def test_current_pointer_variants_and_strict_jsonl(tmp_path: Path):
     with pytest.raises(CampaignError):
         write_jsonl_atomic(rows, [{"strain": float("inf")}])
     assert not rows.exists()
+
+
+@pytest.mark.parametrize("current", [
+    {"version_relative_path": "versions/v1"},
+    {"version_path": "versions/v1"},
+    {"version_path": "versions\\v1"},
+    {"version_relative_path": None, "version_path": "versions/v1"},
+    {"version_relative_path": "unused/version", "version_path": "versions/v1"},
+])
+def test_keystone_preflight_matches_delivery_pointer_resolution(tmp_path: Path, current):
+    from straintrace_campaign import delivery
+
+    root = tmp_path / "keystone"
+    version = root / "versions/v1"
+    (version / "samples").mkdir(parents=True)
+    (version / "catalog.json").write_text("[]", encoding="utf-8")
+    checksums = version / "CHECKSUMS.json"
+    checksums.write_text("{}", encoding="utf-8")
+    pointer = root / "CURRENT.json"
+    pointer.write_text(json.dumps(current), encoding="utf-8")
+    for source in (root, pointer, version):
+        resolved = delivery._resolve_keystone_version(source)
+        assert resolved == version.resolve()
+        assert workflow._keystone_source_info(source) == (resolved.name, sha256_file(checksums))
+
+
+def test_keystone_explicit_version_keeps_same_identity_when_it_contains_pointer(tmp_path: Path):
+    from straintrace_campaign import delivery
+
+    version = tmp_path / "v1"
+    (version / "samples").mkdir(parents=True)
+    (version / "catalog.json").write_text("[]", encoding="utf-8")
+    (version / "CURRENT.json").write_text(json.dumps({"version_path": "not-the-selected-version"}), encoding="utf-8")
+    assert delivery._resolve_keystone_version(version) == version.resolve()
+    assert workflow._keystone_source_info(version) == (version.name, sha256_file(version / "catalog.json"))
+
+
+@pytest.mark.parametrize("relative", ["../outside", "..\\outside", "/outside", "C:\\outside"])
+def test_keystone_current_rejects_escaping_version_paths(tmp_path: Path, relative):
+    root = tmp_path / "keystone"
+    root.mkdir()
+    (root / "CURRENT.json").write_text(json.dumps({"version_path": relative}), encoding="utf-8")
+    with pytest.raises(CampaignError) as exc:
+        workflow._keystone_source_info(root)
+    assert exc.value.code == "PROJECT_PATH_ESCAPE"

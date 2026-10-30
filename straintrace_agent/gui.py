@@ -23,6 +23,7 @@ from PIL import Image, ImageTk
 
 OBJECTIVES = {"全场位移与应变": "full_field", "虚拟标距应变": "virtual_gauge", "应力与应变": "stress_strain"}
 KINDS = ("统计 ROI", "虚拟标距", "排除区")
+GEOMETRY_KEYS = dict(zip(KINDS, ("regions", "gauges", "exclusions_px")))
 DRAW_TARGETS = ("计算区域", "统计 ROI", "排除区", "标距 A", "标距 B")
 
 
@@ -35,6 +36,21 @@ def _project_file(project, relative):
     path = (project / relative).resolve()
     path.relative_to(project.resolve())
     return path
+
+
+def _time_basis(api, config):
+    """Resolve supplied timing in a worker, using the API's frame-map parser."""
+    if config.get("frame_interval_s") is not None or config.get("loads") or config.get("loads_csv"):
+        return "physical_time"
+    if not config.get("frame_map_csv"):
+        return "frame_index"
+    from .discovery import source_files
+    image_root = Path(config["image_dir"]).expanduser().resolve()
+    mask = Path(config["mask_file"]).expanduser().resolve() if config.get("mask_file") else None
+    paths = [path.resolve() for path in source_files(image_root)
+             if path.suffix.lower() in api.IMAGE_SUFFIXES and path.resolve() != mask]
+    mapping = api._explicit_frame_map(Path(config["frame_map_csv"]).expanduser().resolve(), image_root, paths)
+    return "physical_time" if any(row["time_s"] is not None for row in mapping.values()) else "frame_index"
 
 
 def _snapshot(api, project):
@@ -83,6 +99,7 @@ class AgentPage(ttk.Frame):
         self._image = self._photo = self._record = None
         self._scale, self._offset, self._drag = 1.0, (0, 0), None
         self._discovered_options = {}
+        self._geometry_edited = set()
         self._controls = []
         self._build()
         self._poll_id = self._scheduler.after(60, self._poll)
@@ -234,6 +251,7 @@ class AgentPage(ttk.Frame):
     def _build_input(self):
         p = self.input_page
         self.source_var = self._var()
+        self.source_var.trace_add("write", self._source_changed)
         self.interval_var, self.map_var = self._var(), self._var()
         self.reference_var, self.step_var, self.mask_var = self._var(), self._var(), self._var()
         self.reference_var.trace_add("write", lambda *_: self._show_geometry_reference())
@@ -356,6 +374,9 @@ class AgentPage(ttk.Frame):
 
     def _init_options(self):
         options = copy.deepcopy(self._discovered_options)
+        # Discovery's inferred axis is not experimental metadata. Re-evaluate it
+        # when the user changes or removes the interval / mapping inputs.
+        options.pop("time_basis", None)
         options["image_dir"] = self.source_var.get().strip()
         options["frame_interval_s"] = float(self.interval_var.get()) if self.interval_var.get().strip() else None
         options["frame_map_csv"] = self.map_var.get().strip() or None
@@ -363,6 +384,20 @@ class AgentPage(ttk.Frame):
         if options["frame_interval_s"] is not None:
             options["time_basis"] = "physical_time"
         return options
+
+    def _source_changed(self, *_args):
+        if not self._loading:
+            # Directly typing a path must have the same semantics as browsing
+            # for it: hidden load channels / calibration belong to one source.
+            self._discovered_options = {}
+
+    def _discovery_options(self, options):
+        # Initial blanks leave experiment.json available for discovery. Once a
+        # field has been discovered or geometry explicitly edited, an empty
+        # value is an intentional override, not permission to restore metadata.
+        explicit = set(self._discovered_options) | self._geometry_edited
+        return {key: value for key, value in options.items()
+                if (value is not None and value != []) or key in explicit}
 
     def _changes(self):
         if self._editor_dirty:
@@ -383,10 +418,6 @@ class AgentPage(ttk.Frame):
             raise ValueError("参考帧已修改；请先还原计算区域并保存设置，显示新参考图后再编辑坐标。")
         changes["frame_interval_s"] = float(self.interval_var.get()) if self.interval_var.get().strip() else None
         changes["frame_map_csv"] = self.map_var.get().strip() or None
-        if changes["frame_interval_s"] is not None or changes["frame_map_csv"]:
-            changes["time_basis"] = "physical_time"
-        elif not self.config.get("loads"):
-            changes["time_basis"] = "frame_index"
         return changes
 
     def _get_project(self):
@@ -459,8 +490,10 @@ class AgentPage(ttk.Frame):
             self.open_project(path)
 
     def open_project(self, path):
-        project = Path(path).expanduser().resolve()
-        self._launch("读取项目", lambda api, emit: _snapshot(api, project), self._accept_snapshot)
+        def start():
+            project = Path(path).expanduser().resolve()
+            self._launch("读取项目", lambda api, emit: _snapshot(api, project), self._accept_snapshot)
+        self._guard(start)
 
     def discover(self):
         def start():
@@ -468,7 +501,7 @@ class AgentPage(ttk.Frame):
             options = self._init_options()
             # Discovery should be free to locate a nested sequence.
             options.pop("image_dir", None)
-            options = {k: v for k, v in options.items() if v is not None and v != []}
+            options = self._discovery_options(options)
             objective = OBJECTIVES[self.objective_var.get()]
             self._launch("发现实验输入", lambda api, emit: api.discover_experiment(folder, objective=objective, options=options), self._accept_discovery)
         self._guard(start)
@@ -496,9 +529,8 @@ class AgentPage(ttk.Frame):
                 raise ValueError("请填写新项目目录。")
             project, options = Path(path).expanduser().resolve(), self._init_options()
             image_dir = options.pop("image_dir")
-            if not options.get("frame_interval_s") and not options.get("frame_map_csv") and not options.get("loads_csv"):
-                options.setdefault("time_basis", "frame_index")
             def operation(api, emit):
+                options["time_basis"] = _time_basis(api, {**options, "image_dir": image_dir})
                 api.init_project(project, image_dir, **options)
                 return _snapshot(api, project)
             self._launch("建立项目与图像索引", operation, self._accept_snapshot)
@@ -514,7 +546,7 @@ class AgentPage(ttk.Frame):
             # Allow discovery to choose a nested sequence unless one was found.
             if not self._discovered_options.get("image_dir"):
                 options.pop("image_dir", None)
-            options = {k: v for k, v in options.items() if v is not None and v != []}
+            options = self._discovery_options(options)
             def operation(api, emit):
                 try:
                     result = api.auto_analyze(folder, project, objective=objective, options=options, progress=emit)
@@ -529,7 +561,9 @@ class AgentPage(ttk.Frame):
     def save_project(self):
         def start():
             project, changes = self._get_project(), self._project_changes()
+            config = copy.deepcopy(self.config)
             def operation(api, emit):
+                changes["time_basis"] = _time_basis(api, {**config, **changes})
                 api.update_project(project, changes)
                 return _snapshot(api, project)
             self._launch("保存项目设置", operation, self._accept_snapshot)
@@ -538,7 +572,9 @@ class AgentPage(ttk.Frame):
     def make_plan(self):
         def start():
             project, changes = self._get_project(), self._project_changes()
+            config = copy.deepcopy(self.config)
             def operation(api, emit):
+                changes["time_basis"] = _time_basis(api, {**config, **changes})
                 api.update_project(project, changes)
                 api.plan_project(project, progress=emit)
                 return _snapshot(api, project)
@@ -594,6 +630,7 @@ class AgentPage(ttk.Frame):
 
     def _accept_snapshot(self, snapshot):
         self._discovered_options = {}
+        self._geometry_edited.clear()
         self.project_dir, self.config, self.plan = snapshot["project"], snapshot["config"], snapshot["plan"]
         self.run_dir, self.artifacts = snapshot["run_dir"], snapshot["artifacts"]
         self._image, self._record = snapshot["image"], snapshot["record"]
@@ -643,7 +680,7 @@ class AgentPage(ttk.Frame):
     def _launch(self, label, operation, accept, cancellable=None):
         if self._busy:
             return
-        if self.app is not None and getattr(self.app, "is_processing", False):
+        if self.app is not None and (getattr(self.app, "is_processing", False) or getattr(self.app, "_completion_pending", False)):
             raise ValueError("手动分析仍在运行；完成后再启动自动分析任务。")
         self._busy, self._cancel_project = True, cancellable
         self.status_var.set(label + "…")
@@ -825,9 +862,12 @@ class AgentPage(ttk.Frame):
             else:
                 value = self._numbers(self.a_var.get(), (4,), integer=True)
             item = {"kind": kind, "value": value}
+            self._geometry_edited.add(GEOMETRY_KEYS[kind])
             if self._selected is None:
                 self.items.append(item)
             else:
+                previous_kind = self.items[self._selected]["kind"]
+                self._geometry_edited.add(GEOMETRY_KEYS[previous_kind])
                 self.items[self._selected] = item
             self._refresh_tree()
             self.new_item()
@@ -839,6 +879,8 @@ class AgentPage(ttk.Frame):
 
     def delete_item(self):
         if self._selected is not None:
+            kind = self.items[self._selected]["kind"]
+            self._geometry_edited.add(GEOMETRY_KEYS[kind])
             self.items.pop(self._selected)
             self._refresh_tree()
             self.new_item()

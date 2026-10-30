@@ -146,7 +146,7 @@ class CampaignPage(ttk.Frame):
             help_by_button = {
                 "新建项目": "创建一个 campaign 项目并登记至少一个数据根目录。",
                 "打开项目": "打开已有 project.json，继续使用其来源、审核和恢复记录。",
-                "导入 Keystone": "只读导入已接受的 Keystone 版本或 ZIP，并保留 acquisition ID 和结果。",
+                "导入 Keystone": "只读导入 Keystone 正式版本文件夹，或含 CURRENT.json 的版本根目录；保留 acquisition ID 和原始结果。",
                 "导出": "将当前项目生成经过校验的版本化数据包。",
                 "核验": "检查项目、阶段文件、校验和及逐帧数据的一致性。",
                 "取消运行": "向当前后台运行发送取消请求；安全检查点完成后停止。",
@@ -595,10 +595,9 @@ class CampaignPage(ttk.Frame):
     def import_keystone_dialog(self):
         if not self._require_project():
             return
-        archive = messagebox.askyesno(
-            "Keystone 导入来源", "从完整 Keystone ZIP 导入？\n选择“否”将从版本文件夹导入。")
-        source = (filedialog.askopenfilename(title="选择 Keystone ZIP", filetypes=(("ZIP", "*.zip"),))
-                  if archive else filedialog.askdirectory(title="选择 Keystone 正式版本或版本根目录"))
+        source = filedialog.askdirectory(
+            parent=self.winfo_toplevel(),
+            title="选择 Keystone 正式版本文件夹或含 CURRENT.json 的版本根目录")
         if source:
             self._start_operation("正在只读导入 Keystone…",
                                   lambda wf, _progress, _cancel: wf.import_keystone(self.project_dir, source),
