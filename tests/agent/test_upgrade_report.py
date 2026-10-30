@@ -676,12 +676,14 @@ def test_report_preserves_registered_quality_bytes_and_binds_portable_copy(saved
     assert "Quality source checksum mismatch" in checked["errors"]
 
 
-def test_verifier_accepts_legacy_reformatted_canonical_quality(saved_run):
+@pytest.mark.parametrize("package_newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_verifier_accepts_legacy_reformatted_canonical_quality(saved_run, package_newline):
     from straintrace_agent.reporting import _write_json
     run, config, plan = saved_run
     quality = json.loads((run / "quality.json").read_text(encoding="utf-8"))
     canonical = json.dumps(quality, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    (run / "quality.json").write_text(canonical, encoding="utf-8")
+    # The API writes binary canonical JSON with LF on every platform.
+    (run / "quality.json").write_bytes(canonical.encode("utf-8"))
     source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
     source["artifacts"]["quality.json"] = _digest(run / "quality.json")
     _json(run / "manifest.json", source)
@@ -692,10 +694,15 @@ def test_verifier_accepts_legacy_reformatted_canonical_quality(saved_run):
     data = json.loads((package / "data/report_data.json").read_text(encoding="utf-8"))
     data.pop("table_sources")
     _json(package / "data/report_data.json", data)
-    _write_json(package / "data/quality.json", quality)
-    assert _digest(package / "data/quality.json") != source["artifacts"]["quality.json"]
+    quality_copy = package / "data/quality.json"
+    _write_json(quality_copy, quality)
+    # The legacy report writer used text mode and the host's newline convention.
+    reformatted = quality_copy.read_text(encoding="utf-8").replace("\n", package_newline)
+    quality_copy.write_bytes(reformatted.encode("utf-8"))
+    assert _digest(quality_copy) != source["artifacts"]["quality.json"]
     _resign_package_files(package)
-    assert verify_report(package)["valid"]
+    checked = verify_report(package)
+    assert checked["valid"], checked
 
 
 @pytest.mark.parametrize("outside", [False, True])
