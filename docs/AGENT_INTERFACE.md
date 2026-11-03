@@ -67,6 +67,8 @@ Python 包级 `straintrace_agent.report` 是可调用的报告入口，实现模
 
 run/checkpoint 复用依赖当前输入指纹、plan、代码和环境匹配。配置或输入变更后应建立新计划；不要把旧 run 的检查点并入新配置。cancel 是可协作停止，不会删除已经写入的检查点。异常结束后用 status 核对锁；只有本机且确认 PID 死亡时才能执行 recover-lock --expected-pid。无需常驻轮询高频 status，可在进度事件或定时低频读取。
 
+2026-11-03 起，pilot、计划和逐帧计算均显式使用 `reject_nonconverged=true`，拒绝内置求解器报告的未收敛点。此策略参与检查点匹配；缺少明确策略的计划不能执行，应重新 `plan`（`PLAN_SOLVER_POLICY_INVALID`；代码身份已变化时先返回 `PLAN_STALE_CODE`）。旧结果仍可保留读取；一侧缺少策略或策略不同的检查点不能直接复用。研究用完整搜索开关不接入 Agent 自动参数选择，详见[颈缩可靠性记录](NECKING_RELIABILITY_20261103.md)。
+
 Agent 可将 JSON Lines 标准输出转成进度面板、审查节点或任务队列事件。事件名包括 project_initialized、plan_complete、run_started、frame_started、dic_progress、frame_complete、frame_reused、frame_failed、run_finished、analysis_complete；命令最终记录为结构化 JSON。不要只看进程退出码：quality-gate 退出码表示现有数值 QC 未通过，须查看失败帧和各指标；完整性校验的退出状态另看 verify.valid。
 
 ## CLI 参数语义
