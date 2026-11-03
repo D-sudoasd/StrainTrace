@@ -1,0 +1,222 @@
+{
+  "schema": "straintrace-necking-regression-evidence-v1",
+  "date": "2026-11-03",
+  "baseline_main_commit": "edb4fc271309fde60247858d37e57346a13c8d07",
+  "core_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf",
+  "agent_api_sha256": "813c50c6ca80eb5f4962bc17da2836e24c21373e95ea34d71191f2eb06cf4863",
+  "full_regression": {
+    "command": "MPLCONFIGDIR=<writable-temp> EZDIC_STATE_DIR=<writable-temp> xvfb-run -a -s '-screen 0 1920x1080x24' python -m pytest -q -ra --junitxml=<new-path>",
+    "platform": "Linux x86_64; Tk tests enabled with Xvfb",
+    "python": "3.12.14",
+    "pytest": "9.2.0",
+    "tests": 701,
+    "passed": 688,
+    "skipped": 13,
+    "failures": 0,
+    "errors": 0,
+    "warnings": 360,
+    "duration_seconds": 266.38,
+    "source_state": "Final core including experimental-state NPZ round-trip fix, with no subsequent core or Agent changes",
+    "skip_reasons": [
+      "SKIPPED [1] tests/test_gui_workflow.py:635: No monitor with negative horizontal coordinates is available",
+      "SKIPPED [1] tests/test_manifest_transaction.py:109: Windows case-insensitive lock-key contract",
+      "SKIPPED [1] tests/test_manifest_transaction.py:465: junction replacement requires Windows directory sharing semantics",
+      "SKIPPED [1] tests/test_packaging_metadata.py:947: Windows launcher smoke test requires cmd.exe",
+      "SKIPPED [1] tests/test_packaging_metadata.py:968: Windows launcher stale-venv test requires cmd.exe",
+      "SKIPPED [1] tests/test_packaging_metadata.py:997: PowerShell build smoke test requires Windows",
+      "SKIPPED [1] tests/test_packaging_metadata.py:1033: PowerShell build smoke test requires Windows",
+      "SKIPPED [1] tests/test_packaging_metadata.py:2314: requires a real Windows junction",
+      "SKIPPED [1] tests/test_release_upgrade.py:274: bundle inventory uses PowerShell",
+      "SKIPPED [1] tests/test_release_upgrade.py:290: reparse-point guard requires Windows filesystem attributes",
+      "SKIPPED [1] tests/test_release_upgrade.py:311: reparse-point guard requires Windows filesystem attributes",
+      "SKIPPED [1] tests/test_release_upgrade.py:335: reparse-point guard requires Windows filesystem attributes",
+      "SKIPPED [1] tests/test_release_upgrade.py:354: reparse-point guard requires Windows filesystem attributes"
+    ],
+    "pytest_log_sha256": "3c4ca446e9e37f823cb07679ffbf67bf2a2c22f8340dc00c3c94a11bd1558e57",
+    "junit_xml_sha256": "b43ee1d1fa25d4ab51cd6e11c3e6da93453c497f9390bf9209c141a70378ee7c"
+  },
+  "locked_benchmark": {
+    "command": "python -m benchmarks.run_benchmark --output <new-output-directory>",
+    "report_version": "ezdic-benchmark-report-v6",
+    "cases_version": "ezdic-benchmark-cases-v4",
+    "locked_cases_hash": "0fb244586def285fe0ca6b816eac588ddae8d4a0de0ce1a313b183bf369db138",
+    "overall_pass": true,
+    "exit_code": 0,
+    "gates": {
+      "code_provenance": true,
+      "csv_exists": true,
+      "csv_rows": true,
+      "near_1d_preflight_pass": true,
+      "numeric_baseline_pass": true,
+      "quality_ranking_pass": true,
+      "quality_threshold_evaluated": false,
+      "quality_threshold_pass": null
+    },
+    "thresholds": {
+      "large_translation": {
+        "max_error_px_max": 0.005,
+        "p95_error_px_max": 0.002,
+        "rmse_px_max": 0.001,
+        "valid_fraction_min": 0.95
+      },
+      "near_1d_periodic": {
+        "expected_failure_code": "AMBIGUOUS_TEXTURE",
+        "max_successful_export_artifacts": 0
+      },
+      "small_affine_strain": {
+        "max_error_px_max": 0.005,
+        "p95_error_px_max": 0.002,
+        "rmse_px_max": 0.001,
+        "strain_component_abs_error_max": 0.0001,
+        "strain_consistency_abs_error_max": 0.0001,
+        "strain_valid_fraction_min": 0.8,
+        "valid_fraction_min": 0.95
+      },
+      "small_translation": {
+        "max_error_px_max": 0.005,
+        "p95_error_px_max": 0.002,
+        "rmse_px_max": 0.001,
+        "valid_fraction_min": 0.95
+      }
+    },
+    "code": {
+      "benchmark_facade": {
+        "module": "ezdic_benchmark",
+        "source_sha256": "500166303fc7570738eb73507e817d02e44f6ab710cb182c4fb3c8a01fb5851c"
+      },
+      "benchmark_runner_source_sha256": "32a9391e88e1be5b3c37925cf2cd23e3c0395ca7bc99e52e6bfff39bd9ae982e",
+      "benchmark_source_sha256": "500166303fc7570738eb73507e817d02e44f6ab710cb182c4fb3c8a01fb5851c",
+      "cases_json_sha256": "ea0e318ee68d873903f3d2a817a2f66070db9842a52daaeda6c4650cc5913192",
+      "cli": {
+        "module": "ezdic_cli",
+        "source_sha256": "4a7284d41dda4a0d04e85fb0d8c911277ee37a9bb826df253017ca1bb3bd88d5"
+      },
+      "cli_source_sha256": "4a7284d41dda4a0d04e85fb0d8c911277ee37a9bb826df253017ca1bb3bd88d5",
+      "core": {
+        "module": "ezdic_core",
+        "source_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf"
+      },
+      "core_source_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf",
+      "module": "benchmarks.run_benchmark",
+      "source_sha256": "32a9391e88e1be5b3c37925cf2cd23e3c0395ca7bc99e52e6bfff39bd9ae982e",
+      "synthetic_cases_source_sha256": "d8060102cf90ab5ae692ef404e90efc3742b5113770fe25aebcb03a982395df9"
+    },
+    "cases": [
+      {
+        "case_id": "small_translation",
+        "benchmark_pass": true,
+        "status": "PASS",
+        "failure_code": null,
+        "metrics": {
+          "false_accept_count": 0,
+          "false_reject_count": 0,
+          "max_error_px": 0.0005412102858657181,
+          "p95_error_px": 0.0004715256091038335,
+          "quality_false_accept_count": 0,
+          "quality_false_reject_count": 0,
+          "raw_finite_count": 81,
+          "rejected_count": 0,
+          "rmse_px": 0.00024287058561544607,
+          "strain_valid_fraction": 1.0,
+          "valid_fraction": 1.0
+        }
+      },
+      {
+        "case_id": "large_translation",
+        "benchmark_pass": true,
+        "status": "PASS",
+        "failure_code": null,
+        "metrics": {
+          "false_accept_count": 0,
+          "false_reject_count": 0,
+          "max_error_px": 0.0006494292963994175,
+          "p95_error_px": 0.00019960526812842552,
+          "quality_false_accept_count": 0,
+          "quality_false_reject_count": 0,
+          "raw_finite_count": 81,
+          "rejected_count": 0,
+          "rmse_px": 0.00014275647253382122,
+          "strain_valid_fraction": 1.0,
+          "valid_fraction": 1.0
+        }
+      },
+      {
+        "case_id": "small_affine_strain",
+        "benchmark_pass": true,
+        "status": "PASS",
+        "failure_code": null,
+        "metrics": {
+          "estimated_E": [
+            0.012079896182933036,
+            -0.010915076254658762,
+            0.0015638385906567946
+          ],
+          "estimated_F": [
+            [
+              1.0119998971664041,
+              0.006999742630669121
+            ],
+            [
+              -0.004000062631187444,
+              0.9889999247187974
+            ]
+          ],
+          "false_accept_count": 0,
+          "false_reject_count": 0,
+          "fit_count": 81,
+          "fit_rank": 3,
+          "max_error_px": 0.0006392583408684285,
+          "oracle_E": [
+            0.01207999999999998,
+            -0.010915000000000008,
+            0.001564
+          ],
+          "oracle_F": [
+            [
+              1.012,
+              0.007
+            ],
+            [
+              -0.004,
+              0.989
+            ]
+          ],
+          "p95_error_px": 0.0003568109065302277,
+          "quality_false_accept_count": 0,
+          "quality_false_reject_count": 0,
+          "raw_finite_count": 81,
+          "rejected_count": 0,
+          "rmse_px": 0.00014490881946479945,
+          "strain_component_abs_error_max": 1.280968801226079e-05,
+          "strain_consistency_abs_error_max": 1.273343335350674e-05,
+          "strain_valid_fraction": 1.0,
+          "valid_fraction": 1.0
+        }
+      },
+      {
+        "case_id": "near_1d_periodic",
+        "benchmark_pass": true,
+        "status": "REJECTED",
+        "failure_code": "AMBIGUOUS_TEXTURE",
+        "metrics": null
+      }
+    ],
+    "quality_status": "NOT_CALIBRATED; existing ranking gate is not an accuracy or experimental-uncertainty calibration"
+  },
+  "installed_wheel_smoke": {
+    "build_command": "python -m build --wheel --no-isolation --outdir <temporary-directory>",
+    "package_version": "0.1.4 (unchanged)",
+    "wheel_sha256": "764d529b51e66a61f746066ea4e86eed3bae71c33ea5e7da8794931c4548cd69",
+    "installed_core_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf",
+    "comparison_cli": "passed outside source checkout, using installed benchmarks.compare_dic_exports",
+    "assertions": {
+      "common_strain_points": 3,
+      "fixed_domain_points": 4,
+      "comparison_strain_valid_fraction": 0.75,
+      "prescribed_u_difference_rmse_px": 0.1,
+      "missing_second_frame_preserved": true,
+      "equivalence_claim": false
+    }
+  },
+  "interpretation": "These are numerical/software checks. No paired VIC-2D experimental data or experimental uncertainty calibration was evaluated."
+}

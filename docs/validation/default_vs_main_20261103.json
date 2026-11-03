@@ -1,0 +1,1057 @@
+{
+  "schema": "straintrace-necking-study-comparison-v1",
+  "before_report_sha256": "f8bd79ccae73ed06ab6d238ac5c93a60381817c1d9ed7f748f8da022cb360115",
+  "after_report_sha256": "36352cf7c5c93729c5946167fc1bd564bd0ef68722e8f31bb790d174d82de971",
+  "before_core_sha256": "76e9096b51afa41bb8dae44715ef4027a7c9304565459cf28092faa4efc750ff",
+  "after_core_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf",
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "cases": {
+    "uniform": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 8.198108193833196e-05,
+        "max_abs": 0.0003549082233089853
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 8.198108193833196e-05,
+        "max_abs": 0.0003549082233089853
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 120.0,
+          "eyy": 0.020200325138338915
+        },
+        {
+          "y_px": 120.0,
+          "eyy": 0.020200325138338915
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        0,
+        0
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "broad_localization": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.08772574262098856,
+        "max_abs": 0.17030754810271395
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.08772574262098856,
+        "max_abs": 0.17030754810271395
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.12848230626503643
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.12848230626503643
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        0,
+        0
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_localization": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.19023796420883754
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.19023796420883754
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        12,
+        12
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_window3": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        140,
+        140
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 140,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 140,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.216227718216363
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.216227718216363
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        12,
+        12
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_window7": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.3060613566971913,
+        "max_abs": 1.1005246995202964
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.16289703430279612
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.16289703430279612
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        12,
+        12
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_subset15": {
+      "correlation_valid_before_after": [
+        143,
+        143
+      ],
+      "strain_valid_before_after": [
+        143,
+        143
+      ],
+      "common_valid_count": 143,
+      "common_strain_valid_count": 143,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 143,
+        "rmse": 0.13210088762244523,
+        "max_abs": 0.5735414286593491
+      },
+      "common_displacement_error_after_px": {
+        "count": 143,
+        "rmse": 0.13210088762244523,
+        "max_abs": 0.5735414286593491
+      },
+      "common_displacement_change_px": {
+        "count": 143,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 143,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.9722222222222222,
+        0.9722222222222222
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.20574109774054927
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.20574109774054927
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        2,
+        2
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "SPATIAL_OUTLIER": 1
+        },
+        {
+          "SPATIAL_OUTLIER": 1
+        }
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_subset15_window3": {
+      "correlation_valid_before_after": [
+        143,
+        143
+      ],
+      "strain_valid_before_after": [
+        137,
+        137
+      ],
+      "common_valid_count": 143,
+      "common_strain_valid_count": 137,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 143,
+        "rmse": 0.13210088762244523,
+        "max_abs": 0.5735414286593491
+      },
+      "common_displacement_error_after_px": {
+        "count": 143,
+        "rmse": 0.13210088762244523,
+        "max_abs": 0.5735414286593491
+      },
+      "common_displacement_change_px": {
+        "count": 143,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 137,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.9166666666666666,
+        0.9166666666666666
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.24873319460144339
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.24873319460144339
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        2,
+        2
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "SPATIAL_OUTLIER": 1
+        },
+        {
+          "SPATIAL_OUTLIER": 1
+        }
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_noise1_5": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.30787709579149475,
+        "max_abs": 1.1062908295280756
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.30787709579149475,
+        "max_abs": 1.1062908295280756
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.19020945845491843
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.19020945845491843
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        14,
+        14
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "narrow_subset15_noise1_5": {
+      "correlation_valid_before_after": [
+        143,
+        143
+      ],
+      "strain_valid_before_after": [
+        143,
+        143
+      ],
+      "common_valid_count": 143,
+      "common_strain_valid_count": 143,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 143,
+        "rmse": 0.13200977486566412,
+        "max_abs": 0.5574098345394002
+      },
+      "common_displacement_error_after_px": {
+        "count": 143,
+        "rmse": 0.13200977486566412,
+        "max_abs": 0.5574098345394002
+      },
+      "common_displacement_change_px": {
+        "count": 143,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 143,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.9722222222222222,
+        0.9722222222222222
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.2058144287502126
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.2058144287502126
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        1,
+        1
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "SPATIAL_OUTLIER": 1
+        },
+        {
+          "SPATIAL_OUTLIER": 1
+        }
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "broad_texture_mix_0.25": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.11207660442695941,
+        "max_abs": 0.4061173342799877
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.11207660442695941,
+        "max_abs": 0.4061173342799877
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.13235994980338495
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.13235994980338495
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        0,
+        0
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    },
+    "broad_texture_mix_0.5": {
+      "correlation_valid_before_after": [
+        122,
+        122
+      ],
+      "strain_valid_before_after": [
+        122,
+        122
+      ],
+      "common_valid_count": 122,
+      "common_strain_valid_count": 122,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 122,
+        "rmse": 0.259235183686298,
+        "max_abs": 1.2137707572963563
+      },
+      "common_displacement_error_after_px": {
+        "count": 122,
+        "rmse": 0.259235183686298,
+        "max_abs": 1.2137707572963563
+      },
+      "common_displacement_change_px": {
+        "count": 122,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 122,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.6333333333333333,
+        0.6333333333333333
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 96.0,
+          "eyy": 0.10622440699434998
+        },
+        {
+          "y_px": 96.0,
+          "eyy": 0.10622440699434998
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        8,
+        8
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "ZNCC_BELOW_THRESHOLD": 22
+        },
+        {
+          "ZNCC_BELOW_THRESHOLD": 22
+        }
+      ],
+      "scientific_ok_before_after": [
+        false,
+        false
+      ],
+      "scientific_reasons_before_after": [
+        [
+          "correlation_valid_fraction_below_threshold"
+        ],
+        [
+          "correlation_valid_fraction_below_threshold"
+        ]
+      ]
+    },
+    "broad_texture_mix_0.75": {
+      "correlation_valid_before_after": [
+        97,
+        97
+      ],
+      "strain_valid_before_after": [
+        97,
+        97
+      ],
+      "common_valid_count": 97,
+      "common_strain_valid_count": 97,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 97,
+        "rmse": 0.32058542232464504,
+        "max_abs": 1.2557098216541422
+      },
+      "common_displacement_error_after_px": {
+        "count": 97,
+        "rmse": 0.32058542232464504,
+        "max_abs": 1.2557098216541422
+      },
+      "common_displacement_change_px": {
+        "count": 97,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 97,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.36666666666666664,
+        0.36666666666666664
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 32.0,
+          "eyy": 0.06493856431185785
+        },
+        {
+          "y_px": 32.0,
+          "eyy": 0.06493856431185785
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        13,
+        13
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "ZNCC_BELOW_THRESHOLD": 45,
+          "AMBIGUOUS_PEAK": 1,
+          "NOT_CONVERGED": 1
+        },
+        {
+          "ZNCC_BELOW_THRESHOLD": 45,
+          "AMBIGUOUS_PEAK": 1,
+          "NOT_CONVERGED": 1
+        }
+      ],
+      "scientific_ok_before_after": [
+        false,
+        false
+      ],
+      "scientific_reasons_before_after": [
+        [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ]
+      ]
+    },
+    "broad_texture_mix_1": {
+      "correlation_valid_before_after": [
+        82,
+        82
+      ],
+      "strain_valid_before_after": [
+        82,
+        82
+      ],
+      "common_valid_count": 82,
+      "common_strain_valid_count": 82,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 82,
+        "rmse": 0.29955037800745504,
+        "max_abs": 1.0322726961432038
+      },
+      "common_displacement_error_after_px": {
+        "count": 82,
+        "rmse": 0.29955037800745504,
+        "max_abs": 1.0322726961432038
+      },
+      "common_displacement_change_px": {
+        "count": 82,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 82,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        0.26666666666666666,
+        0.26666666666666666
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 32.0,
+          "eyy": 0.06939872869768304
+        },
+        {
+          "y_px": 32.0,
+          "eyy": 0.06939872869768304
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        10,
+        10
+      ],
+      "invalid_reasons_before_after": [
+        {
+          "ZNCC_BELOW_THRESHOLD": 58,
+          "AMBIGUOUS_PEAK": 3,
+          "SPATIAL_OUTLIER": 1
+        },
+        {
+          "ZNCC_BELOW_THRESHOLD": 58,
+          "AMBIGUOUS_PEAK": 3,
+          "SPATIAL_OUTLIER": 1
+        }
+      ],
+      "scientific_ok_before_after": [
+        false,
+        false
+      ],
+      "scientific_reasons_before_after": [
+        [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ],
+        [
+          "correlation_valid_fraction_below_threshold",
+          "strain_valid_fraction_below_threshold"
+        ]
+      ]
+    },
+    "broad_blur2": {
+      "correlation_valid_before_after": [
+        144,
+        144
+      ],
+      "strain_valid_before_after": [
+        144,
+        144
+      ],
+      "common_valid_count": 144,
+      "common_strain_valid_count": 144,
+      "gained_valid_count": 0,
+      "lost_valid_count": 0,
+      "newly_rejected_old_error_le_0_5_px": 0,
+      "newly_rejected_old_error_gt_0_5_px": 0,
+      "newly_accepted_error_le_0_5_px": 0,
+      "newly_accepted_error_gt_0_5_px": 0,
+      "gained_valid_xy_px": [],
+      "lost_valid_xy_px": [],
+      "common_displacement_error_before_px": {
+        "count": 144,
+        "rmse": 0.1480996253273029,
+        "max_abs": 0.33468874507986845
+      },
+      "common_displacement_error_after_px": {
+        "count": 144,
+        "rmse": 0.1480996253273029,
+        "max_abs": 0.33468874507986845
+      },
+      "common_displacement_change_px": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "common_Eyy_change": {
+        "count": 144,
+        "rmse": 0.0,
+        "max_abs": 0.0
+      },
+      "neck_strain_coverage_before_after": [
+        1.0,
+        1.0
+      ],
+      "centerline_peak_before_after": [
+        {
+          "y_px": 80.0,
+          "eyy": 0.13624868073612506
+        },
+        {
+          "y_px": 80.0,
+          "eyy": 0.13624868073612506
+        }
+      ],
+      "accepted_error_gt_0_5_px_before_after": [
+        0,
+        0
+      ],
+      "invalid_reasons_before_after": [
+        {},
+        {}
+      ],
+      "scientific_ok_before_after": [
+        true,
+        true
+      ],
+      "scientific_reasons_before_after": [
+        [],
+        []
+      ]
+    }
+  },
+  "comparison_kind": "matched_solver_comparison",
+  "permitted_parameter_differences": {},
+  "experimental_policy_difference_explicitly_allowed": false,
+  "search_policy_before_after": [
+    {
+      "experimental_full_search": false,
+      "interpretation": "Default solver policy; no experimental parameter is supplied to the core."
+    },
+    {
+      "experimental_full_search": false,
+      "interpretation": "Default solver policy; no experimental parameter is supplied to the core."
+    }
+  ],
+  "interpretation": "Errors use analytic truth; accepted-only comparisons are accompanied by gained/lost points and local coverage. The 0.5 px error cutoff is descriptive, not a relaxed quality gate."
+}

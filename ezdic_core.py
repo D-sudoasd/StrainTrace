@@ -2739,6 +2739,22 @@ def _correlation_peak_diagnostics(corr, max_loc, *, exclusion_radius=None):
     }
 
 
+def _competing_correlation_peak(corr, max_loc, *, exclusion_radius=2):
+    """Return one distinct local maximum; a broad peak's shoulder is not one."""
+    values = np.asarray(corr, dtype=np.float32)
+    px, py = int(max_loc[0]), int(max_loc[1])
+    neighborhood_max = cv2.dilate(values, np.ones((3, 3), dtype=np.uint8))
+    candidates = np.isfinite(values) & (values >= neighborhood_max)
+    radius = max(1, int(exclusion_radius))
+    candidates[max(0, py-radius):min(values.shape[0], py+radius+1),
+               max(0, px-radius):min(values.shape[1], px+radius+1)] = False
+    if not candidates.any():
+        return None
+    scores = np.where(candidates, values, -np.inf)
+    _, peak, _, location = cv2.minMaxLoc(scores)
+    return {"zncc": float(peak), "location": location}
+
+
 def integer_cc_guess(
     reference,
     deformed,
@@ -2809,6 +2825,16 @@ def integer_cc_guess(
         max_loc,
         exclusion_radius=peak_exclusion_radius,
     )
+    competing = _competing_correlation_peak(
+        safe_corr, max_loc,
+        exclusion_radius=peak_diagnostics["second_peak_exclusion_radius"],
+    )
+    competing_zncc = competing_u = competing_v = np.nan
+    if competing is not None:
+        competing_x, competing_y = competing["location"]
+        competing_zncc = competing["zncc"]
+        competing_u = (sx1 + competing_x) - (ix - half)
+        competing_v = (sy1 + competing_y) - (iy - half)
     peak_ambiguous = bool(
         np.isfinite(peak_diagnostics["peak_margin"])
         and np.isfinite(peak_diagnostics["peak_ratio"])
@@ -2820,6 +2846,9 @@ def integer_cc_guess(
         "v": float(v),
         "zncc": float(max_val),
         **peak_diagnostics,
+        "competing_peak_zncc": float(competing_zncc),
+        "competing_peak_u": float(competing_u),
+        "competing_peak_v": float(competing_v),
         "peak_is_ambiguous": peak_ambiguous,
         "search_level": 0,
         "stop_reason": "peak_found",
@@ -3390,6 +3419,8 @@ DEFAULT_PEAK_RATIO_MIN = 1.02
 DEFAULT_MAX_HESSIAN_CONDITION_NUMBER = 1e12
 DEFAULT_MIN_CORRELATION_VALID_FRACTION = 0.95
 DEFAULT_MIN_STRAIN_VALID_FRACTION = 0.80
+COMPETING_PEAK_RAW_MARGIN = 0.10
+COMPETING_PEAK_MIN_SEPARATION_PX = 2.0
 
 
 def _field_array(field, name, *, dtype=None, size=None, default=None):
@@ -3463,7 +3494,13 @@ def field_quality_summary(
         reasons_out.append("strain_valid_fraction_below_threshold")
     if ambiguous_accepted_count:
         reasons_out.append("ambiguous_peaks_accepted")
+    experimental_search = bool(field.get("experimental_full_search", False))
+    if experimental_search:
+        # Wide search can recover localization, but the copied/degraded-texture
+        # counterexample shows new false matches. It is research output only.
+        reasons_out.append("experimental_search_unvalidated")
     return {
+        "experimental_full_search": experimental_search,
         "point_count": size,
         "eligible_point_count": eligible_count,
         "masked_point_count": size-eligible_count,
@@ -3475,11 +3512,16 @@ def field_quality_summary(
         "converged_count": converged_count,
         "convergence_known_count": convergence_known_count,
         "converged_fraction": convergence_fraction,
+        "accepted_converged_count": int((valid & convergence_known & converged).sum()),
+        "rejected_converged_count": int((~valid & convergence_known & converged).sum()),
         "invalid_reason_histogram": invalid_reason_histogram,
         "ambiguous_rejected_count": ambiguous_rejected_count,
         "ambiguous_accepted_count": ambiguous_accepted_count,
         "unsafe_accept_count": false_accept_count,
         "false_accept_count": false_accept_count,
+        "ambiguous_accept_proxy_count": false_accept_count,
+        "false_accept_is_proxy": True,
+        "false_accept_ground_truth_assessed": False,
         # Kept solely as a compatibility proxy; no ground truth is available
         # to call ordinary quality rejections true false-rejects.
         "false_reject_count": false_reject_proxy_count,
@@ -3569,6 +3611,70 @@ def _coerce_refine_result(result):
     return output
 
 
+def _refine_competing_peak(
+    guess, primary, initial_parameters, refine, reference, deformed, x, y,
+    subset_size, *, max_iter, conv_tol, zncc_min, max_condition_number,
+    max_residual_rms, prepared=None,
+):
+    """Check a second correspondence without treating the predictor as truth.
+
+    Only the strongest distinct integer local maximum within the requested
+    search domain is tested. The raw margin bounds work and the 2 px distance
+    separates refined basins; neither is an accuracy/uncertainty guarantee.
+    An alternative must pass the configured ZNCC/Hessian/residual gates and
+    have known convergence and a positive Jacobian. This is stricter than the
+    compatibility mode for primary solutions, which can retain nonconvergence.
+    A separated valid alternative marks ambiguity even when the primary has
+    a higher ZNCC: a copied/degraded pattern can favor the wrong solution.
+    """
+    diagnostic = {"status": "NO_CANDIDATE", "result": None}
+    try:
+        score, u, v = (float(guess.get(key, np.nan)) for key in
+                       ("competing_peak_zncc", "competing_peak_u", "competing_peak_v"))
+    except (TypeError, ValueError):
+        return diagnostic
+    if not np.isfinite([score, u, v]).all():
+        return diagnostic
+    if score < max(-1.0, float(zncc_min) - COMPETING_PEAK_RAW_MARGIN):
+        diagnostic["status"] = "BELOW_RAW_CANDIDATE_THRESHOLD"
+        return diagnostic
+    if not _displacement_support_is_inside(x, y, u, v, subset_size, deformed.shape):
+        diagnostic["status"] = "CANDIDATE_BOUNDARY_FAILURE"
+        return diagnostic
+    p0 = np.asarray(initial_parameters, dtype=float).reshape(6).copy()
+    p0[0], p0[3] = u, v
+    try:
+        result = _coerce_refine_result(refine(
+            reference, deformed, x, y, subset_size, p0=p0, max_iter=max_iter,
+            tol=conv_tol, **({"_prepared": prepared} if prepared is not None else {}),
+        ))
+    except Exception:
+        result = None
+    if result is None or not result.get("finite"):
+        diagnostic["status"] = "CANDIDATE_REFINE_FAILED"
+        return diagnostic
+    diagnostic["result"] = result
+    condition = result.get("hessian_condition_number", result.get("condition_number"))
+    residual = result.get("residual_rms")
+    if result["zncc"] < float(zncc_min):
+        diagnostic["status"] = "CANDIDATE_ZNCC_BELOW_THRESHOLD"
+    elif condition is not None and (not np.isfinite(float(condition)) or float(condition) > max_condition_number):
+        diagnostic["status"] = "CANDIDATE_ILL_CONDITIONED"
+    elif np.isfinite(max_residual_rms) and (residual is None or not np.isfinite(float(residual)) or float(residual) > max_residual_rms):
+        diagnostic["status"] = "CANDIDATE_RESIDUAL_ABOVE_THRESHOLD"
+    elif result.get("converged") is None:
+        diagnostic["status"] = "CANDIDATE_CONVERGENCE_UNKNOWN"
+    elif not bool(result["converged"]):
+        diagnostic["status"] = "CANDIDATE_NOT_CONVERGED"
+    elif not _positive_deformation_jacobian(1.0+result["p"][1], result["p"][2], result["p"][4], 1.0+result["p"][5]):
+        diagnostic["status"] = "CANDIDATE_NONPOSITIVE_JACOBIAN"
+    elif np.hypot(result["u"] - primary["u"], result["v"] - primary["v"]) <= COMPETING_PEAK_MIN_SEPARATION_PX:
+        diagnostic["status"] = "SAME_REFINED_BASIN"
+    else:
+        diagnostic["status"] = "DISTINCT_VALID_CANDIDATE"
+    return diagnostic
+
+
 def _serializable_float(value):
     try:
         value = float(value)
@@ -3619,6 +3725,7 @@ def _run_2d_dic_multiscale(
     robust_strain=True,
     outlier_threshold_px=1.0,
     initialization="auto",
+    experimental_full_search=False,
     _global_initial_transform=None,
 ):
     """Recover large translations coarse-to-fine, then run the canonical fine solver."""
@@ -3653,6 +3760,7 @@ def _run_2d_dic_multiscale(
     initial_guesses = {}
     prepared_levels = [_prepare_dic_images(f, g) for f, g in zip(reference_pyramid, deformed_pyramid)] if refine is _CANONICAL_REFINERS[solver_name] else []
     pyramid_diagnostics = []
+    pyramid_ambiguous = np.zeros(X.shape, dtype=bool)
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             x_fine, y_fine = float(X[i, j]), float(Y[i, j])
@@ -3712,9 +3820,15 @@ def _run_2d_dic_multiscale(
                 else:
                     refined = None
                 refined_finite = bool(refined is not None and refined.get("finite"))
-                condition = refined.get("hessian_condition_number") if refined else None
+                condition = refined.get("hessian_condition_number", refined.get("condition_number")) if refined else None
                 residual = refined.get("residual_rms") if refined else None
                 converged = refined.get("converged") if refined else None
+                margin, ratio = guess.get("peak_margin"), guess.get("peak_ratio")
+                similar_peak = bool(
+                    margin is not None and ratio is not None
+                    and np.isfinite([margin, ratio]).all()
+                    and margin < peak_margin_min and ratio < peak_ratio_min
+                )
                 layer_accepted = bool(
                     refined_finite
                     and float(refined["zncc"]) >= float(zncc_min)
@@ -3722,7 +3836,28 @@ def _run_2d_dic_multiscale(
                         condition is None
                         or (np.isfinite(float(condition)) and float(condition) <= max_condition_number)
                     )
+                    and (not np.isfinite(max_residual_rms) or
+                         (residual is not None and np.isfinite(float(residual)) and float(residual) <= max_residual_rms))
+                    and (not reject_nonconverged or converged is None or bool(converged))
                 )
+                candidate = {"status": "NOT_EVALUATED", "result": None}
+                if experimental_full_search and layer_accepted and not similar_peak:
+                    candidate = _refine_competing_peak(
+                        guess, refined, p0, refine, reference_level, deformed_level,
+                        x_level, y_level, subset_level, max_iter=max_iter,
+                        conv_tol=conv_tol, zncc_min=zncc_min,
+                        max_condition_number=max_condition_number,
+                        max_residual_rms=max_residual_rms,
+                        prepared=prepared_levels[level_index] if prepared_levels else None,
+                    )
+                # Empty/boundary or rejected coarse matches do not establish
+                # two plausible correspondences. In particular their sentinel
+                # margin=0/ratio=1 must not become a persistent ambiguity.
+                level_ambiguous = experimental_full_search and (
+                    (layer_accepted and similar_peak) or candidate["status"] == "DISTINCT_VALID_CANDIDATE")
+                alternate = candidate["result"]
+                pyramid_ambiguous[i, j] |= level_ambiguous
+                layer_accepted = layer_accepted and not (level_ambiguous and reject_ambiguous_peaks)
                 layer_record = {
                     "level_index": int(level_index),
                     "scale_x": float(sx),
@@ -3742,6 +3877,11 @@ def _run_2d_dic_multiscale(
                     "peak_margin": _serializable_float(guess.get("peak_margin")),
                     "best_to_second_peak_ratio": _serializable_float(guess.get("best_to_second_peak_ratio")),
                     "second_to_best_peak_ratio": _serializable_float(guess.get("second_to_best_peak_ratio")),
+                    "peak_is_ambiguous": level_ambiguous,
+                    "competing_peak_status": candidate["status"],
+                    "competing_peak_refined_u": _serializable_float(alternate.get("u") if alternate else None),
+                    "competing_peak_refined_v": _serializable_float(alternate.get("v") if alternate else None),
+                    "competing_peak_refined_zncc": _serializable_float(alternate.get("zncc") if alternate else None),
                     "refine_u": _serializable_float(refined.get("u") if refined else None),
                     "refine_v": _serializable_float(refined.get("v") if refined else None),
                     "refine_zncc": _serializable_float(refined.get("zncc") if refined else None),
@@ -3756,15 +3896,13 @@ def _run_2d_dic_multiscale(
                     "accepted": layer_accepted,
                 }
                 point_levels.append(layer_record)
-                if not boundary_ok:
-                    seed_p = None
-                    break
-                if refined_finite:
+                if layer_accepted:
                     seed_u, seed_v = float(refined["u"]), float(refined["v"])
                     seed_p = np.asarray(refined["p"], dtype=float).copy()
-                elif np.isfinite([guess_u, guess_v]).all():
-                    seed_u, seed_v = guess_u, guess_v
-                    seed_p = np.asarray(p0, dtype=float)
+                # Keep the last accepted seed when coarse correlation fails.
+                # A finite but rejected solution is not initialization evidence.
+                # A coarse boundary may become supported at the next level;
+                # continue with this seed and its proper coordinate scaling.
                 if level_index + 1 < len(reference_pyramid):
                     seed_u *= scales_x[level_index + 1] / sx
                     seed_v *= scales_y[level_index + 1] / sy
@@ -3802,11 +3940,13 @@ def _run_2d_dic_multiscale(
         pyramid_scale=pyramid_scale,
         _initial_guesses=initial_guesses,
         _pyramid_diagnostics=pyramid_diagnostics,
+        _pyramid_ambiguous=pyramid_ambiguous,
         _coordinate_offset=(0.0, 0.0),
         _output_roi=roi,
         specimen_mask=specimen_mask, strain_degree=strain_degree,
         robust_strain=robust_strain, outlier_threshold_px=outlier_threshold_px,
-        initialization=initialization, _global_initial_transform=_global_initial_transform,
+        initialization=initialization, experimental_full_search=experimental_full_search,
+        _global_initial_transform=_global_initial_transform,
     )
     field["pyramid_levels_requested"] = int(pyramid_levels)
     field["pyramid_levels_used"] = int(pyramid_levels)
@@ -3852,9 +3992,11 @@ def run_2d_dic(
     robust_strain=True,
     outlier_threshold_px=1.0,
     initialization="auto",
+    experimental_full_search=False,
     _global_initial_transform=None,
     _initial_guesses=None,
     _pyramid_diagnostics=None,
+    _pyramid_ambiguous=None,
     _coordinate_offset=None,
     _output_roi=None,
 ):
@@ -3863,9 +4005,16 @@ def run_2d_dic(
 
     Failed or out-of-ROI points stay NaN (not interpolated). Strain is a windowed
     local fit of the displacement field, optionally Gaussian-smoothed first.
+    ``experimental_full_search=True`` enables the studied full-radius and
+    alternative-peak search. Its output always has scientific_ok=False because
+    degraded-texture cases still admit new false matches. Desktop/CLI/Agent
+    workflows do not select this research-only option.
     """
     requested_subset_size = int(subset_size)
     requested_strain_window = int(strain_window)
+    if not isinstance(experimental_full_search, (bool, np.bool_)):
+        raise ValueError("experimental_full_search must be a boolean")
+    experimental_full_search = bool(experimental_full_search)
     try:
         raw_pyramid_levels = float(pyramid_levels)
         pyramid_scale = float(pyramid_scale)
@@ -3945,15 +4094,19 @@ def run_2d_dic(
             pyramid_scale=pyramid_scale,
             specimen_mask=specimen_mask, strain_degree=strain_degree,
             robust_strain=robust_strain, outlier_threshold_px=outlier_threshold_px,
-            initialization=initialization, _global_initial_transform=global_transform,
+            initialization=initialization, experimental_full_search=experimental_full_search,
+            _global_initial_transform=global_transform,
         )
     refine = _legacy_refiner_for(solver_name)
     prepared_images = _prepare_dic_images(reference, deformed) if refine is _CANONICAL_REFINERS[solver_name] else None
     if search_radius is None:
         search_radius = max(8, subset_size // 2)
     effective_search_radius = int(search_radius)
-    if global_transform is not None:
+    if global_transform is not None and not experimental_full_search:
         effective_search_radius = min(effective_search_radius, max(3,int(math.ceil(3*global_transform["median_reprojection_error_px"]))))
+    # Retain the established default while the full requested radius is under
+    # study: RANSAC residuals do not bound local deformation, but wider search
+    # also introduces documented false matches in degraded copied textures.
 
     grid_X, grid_Y = build_poi_grid(roi, subset_size, step, reference.shape)
     if _coordinate_offset is None:
@@ -3980,6 +4133,14 @@ def run_2d_dic(
     peak_margin = np.full((ny, nx), np.nan, dtype=np.float64)
     peak_ratio = np.full((ny, nx), np.nan, dtype=np.float64)
     peak_is_ambiguous = np.zeros((ny, nx), dtype=bool)
+    pyramid_ambiguous = np.zeros((ny, nx), dtype=bool) if _pyramid_ambiguous is None else np.asarray(_pyramid_ambiguous, dtype=bool).reshape(ny, nx)
+    candidate_U = np.full((ny, nx), np.nan)
+    candidate_V = np.full((ny, nx), np.nan)
+    candidate_Z = np.full((ny, nx), np.nan)
+    competing_U = np.full((ny, nx), np.nan)
+    competing_V = np.full((ny, nx), np.nan)
+    competing_Z = np.full((ny, nx), np.nan)
+    competing_status = np.full((ny, nx), "NOT_EVALUATED", dtype=object)
     residual_rms = np.full((ny, nx), np.nan, dtype=np.float64)
     hessian_condition_number = np.full((ny, nx), np.nan, dtype=np.float64)
     iterations = np.zeros((ny, nx), dtype=np.int32)
@@ -4058,7 +4219,7 @@ def run_2d_dic(
                 has_peak_diagnostics
                 and (margin < peak_margin_min and ratio < peak_ratio_min)
             )
-            peak_is_ambiguous[i, j] = ambiguous
+            peak_is_ambiguous[i, j] = ambiguous or pyramid_ambiguous[i, j]
             if ambiguous and reject_ambiguous_peaks:
                 invalid_reason[i, j] = "AMBIGUOUS_PEAK"
                 stop_reason[i, j] = "ambiguous_peak"
@@ -4147,11 +4308,15 @@ def run_2d_dic(
                 except (TypeError, ValueError):
                     pass
             stop_reason[i, j] = str(result.get("stop_reason", ""))
+            if result_finite:
+                # Diagnostic candidates are never inputs to strain fitting or
+                # displayed displacement maps unless all normal gates pass.
+                candidate_U[i, j], candidate_V[i, j], candidate_Z[i, j] = result_u, result_v, result_zncc
             if not result_finite:
                 invalid_reason[i, j] = invalid_reason[i, j] or "NONFINITE_RESULT"
             elif result_zncc < float(zncc_min):
                 invalid_reason[i, j] = invalid_reason[i, j] or "ZNCC_BELOW_THRESHOLD"
-            elif np.isfinite(hessian_condition_number[i, j]) and hessian_condition_number[i, j] > max_condition_number:
+            elif condition_value is not None and (not np.isfinite(hessian_condition_number[i, j]) or hessian_condition_number[i, j] > max_condition_number):
                 invalid_reason[i, j] = invalid_reason[i, j] or "ILL_CONDITIONED_HESSIAN"
             elif np.isfinite(max_residual_rms) and (
                 not np.isfinite(residual_rms[i, j]) or residual_rms[i, j] > max_residual_rms
@@ -4159,6 +4324,27 @@ def run_2d_dic(
                 invalid_reason[i, j] = invalid_reason[i, j] or "RESIDUAL_ABOVE_THRESHOLD"
             elif reject_nonconverged and convergence_known[i, j] and not converged[i, j]:
                 invalid_reason[i, j] = invalid_reason[i, j] or "NOT_CONVERGED"
+            if not invalid_reason[i, j] and experimental_full_search:
+                candidate = _refine_competing_peak(
+                    guess, {"u": result_u, "v": result_v}, p0, refine,
+                    reference, deformed, px, py, subset_size,
+                    max_iter=max_iter, conv_tol=conv_tol, zncc_min=zncc_min,
+                    max_condition_number=max_condition_number,
+                    max_residual_rms=max_residual_rms,
+                    prepared=prepared_images,
+                )
+                competing_status[i, j] = candidate["status"]
+                alternate = candidate["result"]
+                if alternate is not None:
+                    competing_U[i, j], competing_V[i, j], competing_Z[i, j] = alternate["u"], alternate["v"], alternate["zncc"]
+                if candidate["status"] == "DISTINCT_VALID_CANDIDATE":
+                    peak_is_ambiguous[i, j] = True
+                    if reject_ambiguous_peaks:
+                        invalid_reason[i, j] = "AMBIGUOUS_PEAK"
+                        stop_reason[i, j] = "competing_correlation_peaks"
+            if pyramid_ambiguous[i, j] and reject_ambiguous_peaks:
+                invalid_reason[i, j] = "AMBIGUOUS_PEAK"
+                stop_reason[i, j] = "pyramid_ambiguous_correlation_peaks"
             if not invalid_reason[i, j]:
                 U[i, j] = result_u
                 V[i, j] = result_v
@@ -4203,6 +4389,9 @@ def run_2d_dic(
         "v": strains["V"].ravel(),
         "u_raw": raw_U.ravel(),
         "v_raw": raw_V.ravel(),
+        "u_candidate": candidate_U.ravel(),
+        "v_candidate": candidate_V.ravel(),
+        "zncc_candidate": candidate_Z.ravel(),
         "eligible": eligible.ravel(),
         "spatial_outlier": spatial_outlier.ravel(),
         "specimen_mask": specimen_mask,
@@ -4241,6 +4430,11 @@ def run_2d_dic(
             where=np.abs(peak_best.ravel()) > 1e-12,
         ),
         "peak_is_ambiguous": peak_is_ambiguous.ravel(),
+        "pyramid_ambiguous": pyramid_ambiguous.ravel(),
+        "competing_peak_refined_u": competing_U.ravel(),
+        "competing_peak_refined_v": competing_V.ravel(),
+        "competing_peak_refined_zncc": competing_Z.ravel(),
+        "competing_peak_status": competing_status.ravel(),
         "residual_rms": residual_rms.ravel(),
         "hessian_condition_number": hessian_condition_number.ravel(),
         "condition_number": hessian_condition_number.ravel(),
@@ -4272,6 +4466,7 @@ def run_2d_dic(
         "outlier_threshold_px": float(outlier_threshold_px),
         "strain_gauge_span_px": (int(strains["window"])-1)*step,
         "initialization": initialization,
+        "experimental_full_search": experimental_full_search,
         "effective_search_radius_px": effective_search_radius,
         "initial_transform": {key: (value.tolist() if isinstance(value,np.ndarray) else value) for key,value in global_transform.items()} if global_transform is not None else None,
         "requested_subset_size": requested_subset_size,
@@ -4282,6 +4477,9 @@ def run_2d_dic(
         "peak_margin_min": peak_margin_min,
         "peak_ratio_min": peak_ratio_min,
         "reject_ambiguous_peaks": bool(reject_ambiguous_peaks),
+        "competing_peak_policy": "one_distinct_converged_alternative_v1" if experimental_full_search else "disabled",
+        "competing_peak_raw_margin": COMPETING_PEAK_RAW_MARGIN,
+        "competing_peak_min_separation_px": COMPETING_PEAK_MIN_SEPARATION_PX,
         "max_condition_number": max_condition_number,
         "reject_nonconverged": bool(reject_nonconverged),
         "max_residual_rms": max_residual_rms,
@@ -4349,6 +4547,9 @@ def dic_field_to_dataframe(field, *, include_quality=True):
         quality_columns = (
             ("u_raw", float),
             ("v_raw", float),
+            ("u_candidate", float),
+            ("v_candidate", float),
+            ("zncc_candidate", float),
             ("best_peak", float),
             ("second_peak", float),
             ("peak_margin", float),
@@ -4358,6 +4559,11 @@ def dic_field_to_dataframe(field, *, include_quality=True):
             ("second_to_best_peak_ratio", float),
             ("second_peak_ratio", float),
             ("peak_is_ambiguous", bool),
+            ("pyramid_ambiguous", bool),
+            ("competing_peak_refined_u", float),
+            ("competing_peak_refined_v", float),
+            ("competing_peak_refined_zncc", float),
+            ("competing_peak_status", object),
             ("residual_rms", float),
             ("hessian_condition_number", float),
             ("iterations", int),
@@ -4385,6 +4591,7 @@ def dic_field_to_dataframe(field, *, include_quality=True):
                 values = np.asarray(field[name], dtype=dtype).ravel()
                 if values.size == len(table["x"]):
                     table[name] = values
+        table["experimental_full_search"] = np.full(len(table["x"]), bool(field.get("experimental_full_search", False)), dtype=bool)
     return pd.DataFrame(table)
 
 
@@ -4397,9 +4604,9 @@ def write_dic_field_txt(field, path):
     for row in table.itertuples(index=False):
         cells = []
         for col, value in zip(columns, row):
-            if col in {"valid", "strain_valid", "peak_is_ambiguous", "converged", "convergence_known", "eligible", "spatial_outlier"}:
+            if col in {"valid", "strain_valid", "peak_is_ambiguous", "pyramid_ambiguous", "experimental_full_search", "converged", "convergence_known", "eligible", "spatial_outlier"}:
                 cells.append("1" if bool(value) else "0")
-            elif col in {"stop_reason", "invalid_reason", "strain_invalid_reason"}:
+            elif col in {"stop_reason", "invalid_reason", "strain_invalid_reason", "competing_peak_status"}:
                 cells.append("" if value is None else str(value))
             elif pd.isna(value) or not np.isfinite(float(value)):
                 cells.append("NaN")
@@ -4412,6 +4619,7 @@ def write_dic_field_txt(field, path):
 
 def write_dic_field_parameters(field, path):
     """Write human-readable provenance and solver parameters for one field."""
+    field, _ = _restore_dic_archive_metadata(field)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     provenance = dict(field.get("provenance") or {})
@@ -4434,12 +4642,16 @@ def write_dic_field_parameters(field, path):
         "strain_gauge_span_px": field.get("strain_gauge_span_px"),
         "outlier_threshold_px": field.get("outlier_threshold_px"),
         "initialization": field.get("initialization"),
+        "experimental_full_search": field.get("experimental_full_search", False),
         "initial_transform": field.get("initial_transform"),
         "effective_search_radius_px": field.get("effective_search_radius_px"),
         "mask": field.get("mask_provenance"),
         "display": field.get("display_options", {}),
         "peak_margin_min": field.get("peak_margin_min"),
         "peak_ratio_min": field.get("peak_ratio_min"),
+        "competing_peak_policy": field.get("competing_peak_policy"),
+        "competing_peak_raw_margin": field.get("competing_peak_raw_margin"),
+        "competing_peak_min_separation_px": field.get("competing_peak_min_separation_px"),
         "max_condition_number": field.get("max_condition_number"),
         "reject_nonconverged": field.get("reject_nonconverged"),
         "max_residual_rms": field.get("max_residual_rms"),
@@ -4647,7 +4859,83 @@ def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap=
     return out
 
 
+_DIC_ARCHIVE_PARAMETER_KEYS = (
+    "subset_size", "requested_subset_size", "effective_subset_size", "step", "solver", "zncc_min",
+    "strain_window", "requested_strain_window", "effective_strain_window", "smooth_sigma", "strain_degree",
+    "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px",
+    "peak_margin_min", "peak_ratio_min", "reject_ambiguous_peaks", "max_condition_number", "reject_nonconverged",
+    "max_residual_rms", "min_correlation_valid_fraction", "min_strain_valid_fraction", "pyramid_levels_requested",
+    "pyramid_levels_used", "pyramid_scale", "pyramid_degradation_reason", "strain_type", "strain_convention",
+    "competing_peak_policy", "competing_peak_raw_margin", "competing_peak_min_separation_px", "experimental_full_search",
+)
+
+
+def _restore_dic_archive_metadata(field):
+    """Restore saved export context while keeping explicit current fields.
+
+    An archive can be passed back as a plain mapping of its safe NPZ arrays.
+    Its metadata must be restored before exporting tables, figures or parameters.
+    Either record marking experimental search keeps the output experimental.
+    """
+    restored = dict(field)
+    metadata = {}
+    if "metadata_json" in restored:
+        try:
+            raw = np.asarray(restored["metadata_json"])
+            if raw.shape != ():
+                raise ValueError("expected one JSON string")
+            metadata = json.loads(raw.item())
+            if not isinstance(metadata, dict):
+                raise ValueError("expected a JSON object")
+            parameters = metadata.get("parameters", {})
+            if not isinstance(parameters, dict):
+                raise ValueError("parameters must be an object")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid DIC metadata_json: {exc}") from exc
+        for key in _DIC_ARCHIVE_PARAMETER_KEYS:
+            if key not in restored and key in parameters:
+                restored[key] = parameters[key]
+        for saved_key, field_key in (
+            ("roi", "roi"), ("provenance", "provenance"), ("interpolation", "interpolation"),
+            ("strain_gauge_span_px", "strain_gauge_span_px"), ("mask", "mask_provenance"),
+            ("display", "display_options"), ("pyramid_level_diagnostics", "pyramid_level_diagnostics"),
+            ("quality_summary", "quality_summary"),
+        ):
+            if field_key not in restored and saved_key in metadata:
+                restored[field_key] = metadata[saved_key]
+        experimental = False
+        for value in (restored.get("experimental_full_search", False), parameters.get("experimental_full_search", False)):
+            scalar = np.asarray(value)
+            if scalar.shape != () or scalar.dtype.kind != "b":
+                raise ValueError("invalid DIC metadata_json: experimental_full_search must be a boolean")
+            experimental |= bool(scalar)
+        restored["experimental_full_search"] = experimental
+    if bool(restored.get("experimental_full_search", False)):
+        if restored.get("quality_summary"):
+            quality = dict(restored["quality_summary"])
+            quality["experimental_full_search"] = True
+            quality["scientific_ok"] = False
+            reasons = list(quality.get("scientific_reasons") or [])
+            if "experimental_search_unvalidated" not in reasons:
+                reasons.append("experimental_search_unvalidated")
+            quality["scientific_reasons"] = reasons
+            restored["quality_summary"] = quality
+        # Provenance is printed with setdefault by the parameter writer. Old
+        # pass flags must not override the current research classification.
+        provenance = dict(restored.get("provenance") or {})
+        provenance["experimental_full_search"] = True
+        provenance["scientific_ok"] = False
+        reasons = list((restored.get("quality_summary") or {}).get("scientific_reasons")
+                       or provenance.get("quality_scientific_reasons") or [])
+        if "experimental_search_unvalidated" not in reasons:
+            reasons.append("experimental_search_unvalidated")
+        provenance["quality_scientific_reasons"] = reasons
+        restored["provenance"] = provenance
+    return restored, metadata
+
+
 def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name="publication"):
+    field, archived_metadata = _restore_dic_archive_metadata(field)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     table_path = write_dic_field_txt(field, output_dir / f"{stem}.txt")
@@ -4665,12 +4953,26 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
     dic_field_to_dataframe(field).to_csv(csv_path, index=False)
     parameters_path = write_dic_field_parameters(field, output_dir / f"{stem}_parameters.txt")
     arrays = {key: np.asarray(value) for key, value in field.items()
-              if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" and not key.endswith("_image")}
-    parameters = {key: field.get(key) for key in ("subset_size", "step", "strain_window", "smooth_sigma", "strain_degree",
-                  "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px")}
-    arrays["metadata_json"] = np.asarray(json.dumps({"roi": field.get("roi"), "parameters": parameters, "provenance": field.get("provenance", {}),
-                       "interpolation": field.get("interpolation"), "strain_gauge_span_px": field.get("strain_gauge_span_px"),
-                       "mask": field.get("mask_provenance"), "display": field.get("display_options", {})}))
+              if isinstance(value, np.ndarray) and value.dtype.kind in "biufSU" and not key.endswith("_image")}
+    # A reloaded NPZ is also a valid field mapping. Keep the experimental flag
+    # at its top level so quality recomputation and CSV re-export cannot silently
+    # downgrade research output to the established production search policy.
+    arrays["experimental_full_search"] = np.asarray(bool(field.get("experimental_full_search", False)), dtype=bool)
+    for key in ("invalid_reason", "stop_reason", "strain_invalid_reason", "competing_peak_status"):
+        if key in field:
+            arrays[key] = np.asarray(field[key], dtype=str)
+    parameters = dict(archived_metadata.get("parameters", {}))
+    parameters.update({key: field.get(key) for key in _DIC_ARCHIVE_PARAMETER_KEYS})
+    parameters["experimental_full_search"] = bool(field.get("experimental_full_search", False))
+    residual_limit = parameters.get("max_residual_rms")
+    if residual_limit is not None and not np.isfinite(float(residual_limit)):
+        parameters["max_residual_rms"] = None
+    metadata = {**archived_metadata, "roi": field.get("roi"), "parameters": parameters,
+                "provenance": field.get("provenance", {}), "interpolation": field.get("interpolation"),
+                "strain_gauge_span_px": field.get("strain_gauge_span_px"), "mask": field.get("mask_provenance"),
+                "display": field.get("display_options", {}), "quality_summary": field.get("quality_summary"),
+                "pyramid_level_diagnostics": field.get("pyramid_level_diagnostics", [])}
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
     array_path = output_dir / f"{stem}.npz"
     np.savez_compressed(array_path, **arrays)
     return {"txt": table_path, "csv": csv_path, "plots": plot_paths, "parameters": parameters_path, "arrays": array_path}

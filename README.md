@@ -16,6 +16,8 @@ A dual-mode desktop and headless workstation for image-based strain analysis. Ch
 
 2026-10-26 的 [Review-Pro 修订记录](docs/REVIEW_PRO_20261026.md)说明并发交付、取消恢复、报告校验和桌面状态修复；修订版便携包名称为 `StrainTrace-reviewed-20261026-Windows.zip`。
 
+2026-11-03 的[颈缩可靠性研究](docs/NECKING_RELIABILITY_20261103.md)分离有限应变窗口、局部相关偏差和纹理失效，补充多尺度初值／条件数／Agent 收敛修复，以及[同条件 VIC-2D 逐帧比较工具](docs/VIC2D_COMPARISON.md)。强局部化测试仍存在峰值低估；完整搜索只供显式研究，不能自动通过科学质量门。本次没有同条件 VIC-2D 实验结果，未宣称精度等效。
+
 [Windows / 源码启动](#windows-quick-start) · [桌面工作流](docs/UI_WORKBENCH.md) · [二维验证与参数](docs/2D_DIC_VALIDATION.md) · [输出约定](#full-field-output-contract) · [引用](#cite)
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20222465.svg)](https://doi.org/10.5281/zenodo.20222465) [![MIT](https://img.shields.io/badge/License-MIT-455A64)](LICENSE.txt)

@@ -3,3 +3,6 @@
 *.txt text eol=lf
 *.ps1 text eol=crlf
 *.spec text eol=lf
+# Validation reports contain byte hashes; preserve their recorded file bytes.
+docs/validation/*.json -text
+docs/validation/*.points.csv -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

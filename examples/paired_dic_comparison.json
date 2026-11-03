@@ -1,0 +1,90 @@
+{
+  "schema": "straintrace-paired-dic-comparison-v1",
+  "coordinate_tolerance_px": 0.000001,
+  "comparison_grid": {
+    "csv": "comparison-grid.csv",
+    "columns": {"x": "x", "y": "y", "eligible": "eligible"}
+  },
+  "sources": {
+    "straintrace": {
+      "metadata": {
+        "reference_image_sha256": "REPLACE_WITH_ACTUAL_REFERENCE_IMAGE_SHA256",
+        "reference_frame": "REPLACE_WITH_REFERENCE_FRAME_ID",
+        "coordinate_frame": "reference_image_x_right_y_down",
+        "coordinate_unit": "px",
+        "displacement_unit": "px",
+        "displacement_reference": "total_from_reference",
+        "strain_measure": "green_lagrange",
+        "strain_unit": "1",
+        "shear_convention": "tensor",
+        "roi_xywh_px": [0, 0, 100, 100]
+      },
+      "parameters": {
+        "subset_size_px": 31,
+        "step_px": 8,
+        "strain_window_points": 5,
+        "shape_function": "affine",
+        "reference_strategy": "fixed",
+        "strain_filter": "REPLACE_WITH_ACTUAL_LOCAL_FIT_SETTINGS",
+        "displacement_smoothing": 0,
+        "quality_policy": "REPLACE_WITH_ACTUAL_QUALITY_SETTINGS"
+      },
+      "rows_representation": "complete_grid",
+      "columns": {
+        "x": "x", "y": "y", "u": "u", "v": "v",
+        "strain_xx": "Exx", "strain_yy": "Eyy", "strain_xy": "Exy",
+        "eligible": "eligible", "correlation_valid": "valid", "strain_valid": "strain_valid",
+        "quality": "zncc", "invalid_reason": "invalid_reason", "strain_invalid_reason": "strain_invalid_reason"
+      },
+      "quality": {"name": "ZNCC", "unit": "1", "meaning": "Normalized correlation; larger values mean closer image agreement"}
+    },
+    "comparison": {
+      "metadata": {
+        "reference_image_sha256": "REPLACE_WITH_ACTUAL_REFERENCE_IMAGE_SHA256",
+        "reference_frame": "REPLACE_WITH_REFERENCE_FRAME_ID",
+        "coordinate_frame": "reference_image_x_right_y_down",
+        "coordinate_unit": "px",
+        "displacement_unit": "px",
+        "displacement_reference": "total_from_reference",
+        "strain_measure": "green_lagrange",
+        "strain_unit": "1",
+        "shear_convention": "tensor",
+        "roi_xywh_px": [0, 0, 100, 100]
+      },
+      "parameters": {
+        "subset_size_px": 31,
+        "step_px": 8,
+        "strain_window_points": 5,
+        "shape_function": "REPLACE_WITH_ACTUAL_VIC_SETTING",
+        "reference_strategy": "REPLACE_WITH_ACTUAL_VIC_SETTING",
+        "strain_filter": "REPLACE_WITH_ACTUAL_VIC_FILTER_TYPE_AND_SIZE",
+        "displacement_smoothing": "REPLACE_WITH_ACTUAL_VIC_SETTING",
+        "quality_policy": "REPLACE_WITH_VIC_ACCEPTANCE_AND_EXPORT_RULES"
+      },
+      "rows_representation": "partial_rows",
+      "columns": {
+        "x": "x", "y": "y", "u": "u", "v": "v",
+        "strain_xx": "exx", "strain_yy": "eyy", "strain_xy": "exy",
+        "eligible": "eligible", "correlation_valid": "valid", "strain_valid": "strain_valid",
+        "quality": "sigma"
+      },
+      "quality": {"name": "VIC sigma", "unit": "px", "meaning": "REPLACE_WITH_DEFINITION_FOR_THE_EXPORTED_VIC_VERSION"}
+    }
+  },
+  "frames": [
+    {
+      "frame_id": "REPLACE_WITH_TARGET_FRAME_ID",
+      "stage": "REPLACE_WITH_OBSERVED_DEFORMATION_STAGE",
+      "image_sha256": "REPLACE_WITH_ACTUAL_TARGET_IMAGE_SHA256",
+      "straintrace": {"csv": "straintrace/frame.csv", "image_sha256": "REPLACE_WITH_ACTUAL_TARGET_IMAGE_SHA256"},
+      "comparison": {"csv": "vic2d/frame.csv", "image_sha256": "REPLACE_WITH_ACTUAL_TARGET_IMAGE_SHA256"}
+    },
+    {
+      "frame_id": "REPLACE_WITH_LATE_TARGET_FRAME_ID",
+      "stage": "late_necking",
+      "image_sha256": "REPLACE_WITH_ACTUAL_LATE_IMAGE_SHA256",
+      "straintrace": {"csv": "straintrace/late.csv", "image_sha256": "REPLACE_WITH_ACTUAL_LATE_IMAGE_SHA256"},
+      "comparison": null
+    }
+  ]
+}

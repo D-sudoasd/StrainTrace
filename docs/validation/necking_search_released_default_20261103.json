@@ -1,0 +1,120 @@
+{
+  "report_version": "necking-search-validation-v3",
+  "purpose": "Known-displacement assessment of global initialization and local search radius",
+  "limitations": [
+    "Localized case is in-plane shear, not a complete optical or mechanical tensile-neck model.",
+    "Uses directly sampled floating-point synthetic images, not the experimental image-import path.",
+    "Uses the normal 1 px spatial outlier threshold and explicit strict convergence.",
+    "Error statistics use accepted points only; inspect valid counts to detect selection bias.",
+    "Timing is a single elapsed run on this machine and is not a calibrated performance benchmark.",
+    "No VIC-2D data or independent experimental ground truth is evaluated.",
+    "Full-radius search is explicitly experimental and cannot pass the scientific gate, even at full coverage."
+  ],
+  "provenance": {
+    "core_sha256": "389414c97354f6b4ee27129e994c52195b0d51ab3106ffec2492340986957fcf",
+    "script_sha256": "787393f7b12e95a465feeb3c7ca24026005631a0c0e38d4162ad920ee0c76b54",
+    "python": "3.12.14",
+    "numpy": "2.4.1",
+    "scipy": "1.17.0",
+    "opencv": "4.13.0"
+  },
+  "settings": {
+    "subset_size": 21,
+    "step": 30,
+    "search_radius": 18,
+    "zncc_min": 0.75,
+    "strain_window": 3,
+    "outlier_threshold_px": 1.0,
+    "max_iter": 40,
+    "initialization": "auto",
+    "reject_nonconverged": true,
+    "roi": [
+      30,
+      30,
+      360,
+      360
+    ],
+    "experimental_full_search": false
+  },
+  "cases": [
+    {
+      "case": "localized_shear_band",
+      "input_sha256": "d7584bfaf53fae72ed126cc7a71ea8544972ec6c93f418e44456c69b30b8f304",
+      "field_point_count": 144,
+      "correlation_valid_count": 125,
+      "local_band_point_count": 24,
+      "local_band_valid_count": 5,
+      "valid_displacement_mean_error_px": 0.03950122583007956,
+      "valid_displacement_rmse_px": 0.06839343683760307,
+      "valid_displacement_max_error_px": 0.2522717791672307,
+      "valid_error_over_1_px_count": 0,
+      "accepted_error_over_0_5_px_count": 0,
+      "known_converged_count": 125,
+      "invalid_reasons": {
+        "ZNCC_BELOW_THRESHOLD": 19
+      },
+      "effective_search_radius_px": 3,
+      "initial_transform": {
+        "matrix": [
+          [
+            0.9999536996890958,
+            0.0001438754249898712,
+            15.115794925218488
+          ],
+          [
+            5.097076513501696e-06,
+            0.9999997586243697,
+            4.999807902461721
+          ]
+        ],
+        "matches": 1146,
+        "inliers": 863,
+        "median_reprojection_error_px": 0.12326355971054613
+      },
+      "elapsed_seconds": 0.7806620199999088,
+      "experimental_full_search": false,
+      "scientific_ok": false,
+      "scientific_reasons": [
+        "correlation_valid_fraction_below_threshold",
+        "strain_valid_fraction_below_threshold"
+      ]
+    },
+    {
+      "case": "uniform_affine",
+      "input_sha256": "5c8f7d4f5bb146161462eef815186d6fa3edb100386bff348351f631540ef2a3",
+      "field_point_count": 144,
+      "correlation_valid_count": 144,
+      "local_band_point_count": 24,
+      "local_band_valid_count": 24,
+      "valid_displacement_mean_error_px": 0.00024437951762198117,
+      "valid_displacement_rmse_px": 0.0003503399030895218,
+      "valid_displacement_max_error_px": 0.0008355709266279918,
+      "valid_error_over_1_px_count": 0,
+      "accepted_error_over_0_5_px_count": 0,
+      "known_converged_count": 144,
+      "invalid_reasons": {},
+      "effective_search_radius_px": 3,
+      "initial_transform": {
+        "matrix": [
+          [
+            0.9799952527435728,
+            0.010004728220918607,
+            17.248997584751244
+          ],
+          [
+            0.005018005253056798,
+            1.0599813357627246,
+            -9.641992104414198
+          ]
+        ],
+        "matches": 1075,
+        "inliers": 1075,
+        "median_reprojection_error_px": 0.029003151621128685
+      },
+      "elapsed_seconds": 0.6685875430002852,
+      "experimental_full_search": false,
+      "scientific_ok": true,
+      "scientific_reasons": []
+    }
+  ]
+}
