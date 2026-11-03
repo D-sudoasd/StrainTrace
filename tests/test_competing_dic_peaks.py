@@ -163,6 +163,36 @@ def test_failed_coarse_refinement_does_not_move_the_next_search(monkeypatch):
         assert levels[1]["seed_u"] == 5.
 
 
+@pytest.mark.parametrize("condition", [np.inf, np.nan, 1e13])
+def test_legacy_condition_alias_cannot_propagate_rejected_coarse_seed(monkeypatch, condition):
+    from benchmarks.synthetic_cases import analytic_texture
+
+    y, x = np.indices((200, 200), dtype=float)
+    reference = analytic_texture(x, y, seed=593).astype("float32")
+    target = analytic_texture(x-5., y, seed=593).astype("float32")
+    native_refine = core.refine_subset_icgn
+
+    def ill_conditioned_coarse(ref, target, *args, **kwargs):
+        if ref.shape[0] < 200:
+            return {"u": 31., "v": 0., "p": np.array([31., 0., 0., 0., 0., 0.]),
+                    "zncc": 1., "condition_number": condition, "converged": True}
+        return native_refine(ref, target, *args, **kwargs)
+
+    monkeypatch.setattr(core, "refine_subset_icgn", ill_conditioned_coarse)
+    transform = {"matrix": np.array([[1., 0., 5.], [0., 1., 0.]]), "median_reprojection_error_px": .1}
+    field = core.run_2d_dic(
+        reference, target, (50, 50, 61, 61), subset_size=21, step=20,
+        search_radius=6, pyramid_levels=2, reject_nonconverged=True,
+        _global_initial_transform=transform,
+    )
+    assert field["valid"].all()
+    np.testing.assert_allclose(field["u"], 5., atol=.01)
+    for levels in field["pyramid_level_diagnostics"]:
+        assert levels[0]["refine_u"] == 31.
+        assert not levels[0]["accepted"]
+        assert levels[1]["seed_u"] == 5.
+
+
 def test_coarse_boundary_failure_retains_seed_in_full_resolution_coordinates():
     from benchmarks.synthetic_cases import analytic_texture
 

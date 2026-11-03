@@ -3820,7 +3820,7 @@ def _run_2d_dic_multiscale(
                 else:
                     refined = None
                 refined_finite = bool(refined is not None and refined.get("finite"))
-                condition = refined.get("hessian_condition_number") if refined else None
+                condition = refined.get("hessian_condition_number", refined.get("condition_number")) if refined else None
                 residual = refined.get("residual_rms") if refined else None
                 converged = refined.get("converged") if refined else None
                 margin, ratio = guess.get("peak_margin"), guess.get("peak_ratio")
@@ -4619,6 +4619,7 @@ def write_dic_field_txt(field, path):
 
 def write_dic_field_parameters(field, path):
     """Write human-readable provenance and solver parameters for one field."""
+    field, _ = _restore_dic_archive_metadata(field)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     provenance = dict(field.get("provenance") or {})
@@ -4858,7 +4859,83 @@ def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap=
     return out
 
 
+_DIC_ARCHIVE_PARAMETER_KEYS = (
+    "subset_size", "requested_subset_size", "effective_subset_size", "step", "solver", "zncc_min",
+    "strain_window", "requested_strain_window", "effective_strain_window", "smooth_sigma", "strain_degree",
+    "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px",
+    "peak_margin_min", "peak_ratio_min", "reject_ambiguous_peaks", "max_condition_number", "reject_nonconverged",
+    "max_residual_rms", "min_correlation_valid_fraction", "min_strain_valid_fraction", "pyramid_levels_requested",
+    "pyramid_levels_used", "pyramid_scale", "pyramid_degradation_reason", "strain_type", "strain_convention",
+    "competing_peak_policy", "competing_peak_raw_margin", "competing_peak_min_separation_px", "experimental_full_search",
+)
+
+
+def _restore_dic_archive_metadata(field):
+    """Restore saved export context while keeping explicit current fields.
+
+    An archive can be passed back as a plain mapping of its safe NPZ arrays.
+    Its metadata must be restored before exporting tables, figures or parameters.
+    Either record marking experimental search keeps the output experimental.
+    """
+    restored = dict(field)
+    metadata = {}
+    if "metadata_json" in restored:
+        try:
+            raw = np.asarray(restored["metadata_json"])
+            if raw.shape != ():
+                raise ValueError("expected one JSON string")
+            metadata = json.loads(raw.item())
+            if not isinstance(metadata, dict):
+                raise ValueError("expected a JSON object")
+            parameters = metadata.get("parameters", {})
+            if not isinstance(parameters, dict):
+                raise ValueError("parameters must be an object")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid DIC metadata_json: {exc}") from exc
+        for key in _DIC_ARCHIVE_PARAMETER_KEYS:
+            if key not in restored and key in parameters:
+                restored[key] = parameters[key]
+        for saved_key, field_key in (
+            ("roi", "roi"), ("provenance", "provenance"), ("interpolation", "interpolation"),
+            ("strain_gauge_span_px", "strain_gauge_span_px"), ("mask", "mask_provenance"),
+            ("display", "display_options"), ("pyramid_level_diagnostics", "pyramid_level_diagnostics"),
+            ("quality_summary", "quality_summary"),
+        ):
+            if field_key not in restored and saved_key in metadata:
+                restored[field_key] = metadata[saved_key]
+        experimental = False
+        for value in (restored.get("experimental_full_search", False), parameters.get("experimental_full_search", False)):
+            scalar = np.asarray(value)
+            if scalar.shape != () or scalar.dtype.kind != "b":
+                raise ValueError("invalid DIC metadata_json: experimental_full_search must be a boolean")
+            experimental |= bool(scalar)
+        restored["experimental_full_search"] = experimental
+    if bool(restored.get("experimental_full_search", False)):
+        if restored.get("quality_summary"):
+            quality = dict(restored["quality_summary"])
+            quality["experimental_full_search"] = True
+            quality["scientific_ok"] = False
+            reasons = list(quality.get("scientific_reasons") or [])
+            if "experimental_search_unvalidated" not in reasons:
+                reasons.append("experimental_search_unvalidated")
+            quality["scientific_reasons"] = reasons
+            restored["quality_summary"] = quality
+        # Provenance is printed with setdefault by the parameter writer. Old
+        # pass flags must not override the current research classification.
+        provenance = dict(restored.get("provenance") or {})
+        provenance["experimental_full_search"] = True
+        provenance["scientific_ok"] = False
+        reasons = list((restored.get("quality_summary") or {}).get("scientific_reasons")
+                       or provenance.get("quality_scientific_reasons") or [])
+        if "experimental_search_unvalidated" not in reasons:
+            reasons.append("experimental_search_unvalidated")
+        provenance["quality_scientific_reasons"] = reasons
+        restored["provenance"] = provenance
+    return restored, metadata
+
+
 def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name="publication"):
+    field, archived_metadata = _restore_dic_archive_metadata(field)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     table_path = write_dic_field_txt(field, output_dir / f"{stem}.txt")
@@ -4876,21 +4953,26 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
     dic_field_to_dataframe(field).to_csv(csv_path, index=False)
     parameters_path = write_dic_field_parameters(field, output_dir / f"{stem}_parameters.txt")
     arrays = {key: np.asarray(value) for key, value in field.items()
-              if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" and not key.endswith("_image")}
+              if isinstance(value, np.ndarray) and value.dtype.kind in "biufSU" and not key.endswith("_image")}
     # A reloaded NPZ is also a valid field mapping. Keep the experimental flag
     # at its top level so quality recomputation and CSV re-export cannot silently
     # downgrade research output to the established production search policy.
     arrays["experimental_full_search"] = np.asarray(bool(field.get("experimental_full_search", False)), dtype=bool)
-    if "competing_peak_status" in field:
-        arrays["competing_peak_status"] = np.asarray(field["competing_peak_status"], dtype=str)
-    parameters = {key: field.get(key) for key in ("subset_size", "step", "strain_window", "smooth_sigma", "strain_degree",
-                  "robust_strain", "outlier_threshold_px", "initialization", "initial_transform", "effective_search_radius_px",
-                  "competing_peak_policy", "competing_peak_raw_margin", "competing_peak_min_separation_px", "experimental_full_search")}
+    for key in ("invalid_reason", "stop_reason", "strain_invalid_reason", "competing_peak_status"):
+        if key in field:
+            arrays[key] = np.asarray(field[key], dtype=str)
+    parameters = dict(archived_metadata.get("parameters", {}))
+    parameters.update({key: field.get(key) for key in _DIC_ARCHIVE_PARAMETER_KEYS})
     parameters["experimental_full_search"] = bool(field.get("experimental_full_search", False))
-    arrays["metadata_json"] = np.asarray(json.dumps({"roi": field.get("roi"), "parameters": parameters, "provenance": field.get("provenance", {}),
-                       "interpolation": field.get("interpolation"), "strain_gauge_span_px": field.get("strain_gauge_span_px"),
-                       "mask": field.get("mask_provenance"), "display": field.get("display_options", {}),
-                       "pyramid_level_diagnostics": field.get("pyramid_level_diagnostics", [])}))
+    residual_limit = parameters.get("max_residual_rms")
+    if residual_limit is not None and not np.isfinite(float(residual_limit)):
+        parameters["max_residual_rms"] = None
+    metadata = {**archived_metadata, "roi": field.get("roi"), "parameters": parameters,
+                "provenance": field.get("provenance", {}), "interpolation": field.get("interpolation"),
+                "strain_gauge_span_px": field.get("strain_gauge_span_px"), "mask": field.get("mask_provenance"),
+                "display": field.get("display_options", {}), "quality_summary": field.get("quality_summary"),
+                "pyramid_level_diagnostics": field.get("pyramid_level_diagnostics", [])}
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
     array_path = output_dir / f"{stem}.npz"
     np.savez_compressed(array_path, **arrays)
     return {"txt": table_path, "csv": csv_path, "plots": plot_paths, "parameters": parameters_path, "arrays": array_path}

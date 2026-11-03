@@ -328,6 +328,10 @@ def compare(manifest: Path, output: Path):
         "script_sha256": _sha256(Path(__file__).read_bytes()), "comparison_grid": grid_identity,
         "environment": {"python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__},
         "fixed_domain_n": len(domain), "coordinate_tolerance_px": tolerance,
+        "roi_membership": {
+            "native_roi": "Reported coordinates inside the closed ROI; no boundary expansion.",
+            "fixed_domain": "Fixed grid coordinates inside the closed ROI; export coordinates match only within coordinate_tolerance_px, including rounding across an ROI edge.",
+        },
         "difference_direction": "straintrace_minus_comparison", "sources": sources,
         "parameter_differences": {key: {label: source["parameters"][key] for label, source in sources.items()}
                                   for key in PARAMETER_FIELDS if sources["straintrace"]["parameters"][key] != sources["comparison"]["parameters"][key]},
@@ -344,7 +348,12 @@ def compare(manifest: Path, output: Path):
                     rows, identity = _read_csv((base / item["csv"]).resolve(strict=True), source["columns"])
                 _unique(rows, tolerance, f"{frame['frame_id']}:{label}")
                 native[label] = [row for row in rows if _inside(row, roi)]
-                aligned[label] = _align(domain, native[label], tolerance)
+                # Membership of the fixed domain was established from the
+                # reference grid. Cropping export rows first loses valid edge
+                # matches when coordinate rounding falls just outside the ROI.
+                # Keep the native ROI strict so unrelated outside peaks cannot
+                # enter its extrema through a blanket tolerance expansion.
+                aligned[label] = _align(domain, rows, tolerance)
                 identities[label] = identity
             pairs = list(zip(aligned["straintrace"], aligned["comparison"]))
             common_correlation = [(a, b) for a, b in pairs if a is not None and b is not None and a["eligible"] and b["eligible"] and a["correlation_valid"] and b["correlation_valid"]]

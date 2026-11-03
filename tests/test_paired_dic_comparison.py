@@ -188,6 +188,60 @@ def test_rounding_tolerance_does_not_allow_multi_pixel_rematching(tmp_path):
         compare(path, tmp_path / "out")
 
 
+@pytest.mark.parametrize("axis,boundary,direction", [
+    ("x", 0, -1), ("x", 3, 1), ("y", 0, -1), ("y", 1, 1),
+])
+def test_fixed_grid_matches_rounding_across_each_roi_boundary(tmp_path, axis, boundary, direction):
+    path, config = _fixture(tmp_path)
+    # The fixed grid lies exactly on one ROI edge. CSV rounding places the
+    # comparison coordinates just outside it without moving the material POIs.
+    other_axis = "y" if axis == "x" else "x"
+    for filename, names in (("grid.csv", {"x": "x", "y": "y"}),
+                            ("left.csv", {"x": "x", "y": "y"}),
+                            ("right.csv", {"x": "X", "y": "Y"})):
+        with (tmp_path / filename).open() as stream:
+            rows = list(csv.DictReader(stream))
+        for index, row in enumerate(rows):
+            row[names[axis]] = boundary
+            row[names[other_axis]] = index / 3 if axis == "x" else index
+            if filename == "right.csv":
+                row[names[axis]] += direction * config["coordinate_tolerance_px"] / 2
+        _write_csv(tmp_path / filename, rows)
+    frame = compare(path, tmp_path / "out")["frames"][0]
+    assert frame["common_displacement_n"] == frame["common_strain_n"] == 3
+    assert frame["fixed_domain"]["comparison"]["strain_valid_fraction"] == 0.75
+    assert frame["component_differences"]["u"]["rmse"] == pytest.approx(0.1)
+    # Native ROI membership still uses the actual exported coordinates.
+    assert frame["native_roi"]["comparison"]["present_n"] == 0
+
+
+def test_outside_roi_peak_cannot_enter_native_or_fixed_domain_by_rounding_tolerance(tmp_path):
+    path, config = _fixture(tmp_path)
+    with (tmp_path / "right.csv").open() as stream:
+        rows = list(csv.DictReader(stream))
+    rows.append({**rows[0], "X": 0.5, "Y": -config["coordinate_tolerance_px"] / 2,
+                 "eyy": 1000})
+    _write_csv(tmp_path / "right.csv", rows)
+    frame = compare(path, tmp_path / "out")["frames"][0]
+    assert frame["common_strain_n"] == 3
+    assert frame["native_roi"]["comparison"]["present_n"] == 3
+    for region in ("native_roi", "fixed_domain"):
+        assert frame[region]["comparison"]["strain_peaks"]["strain_yy"]["value"] == pytest.approx(0.038)
+
+
+def test_roi_edge_match_does_not_expand_coordinate_tolerance(tmp_path):
+    path, config = _fixture(tmp_path)
+    with (tmp_path / "right.csv").open() as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["Y"] = -2 * config["coordinate_tolerance_px"]
+    _write_csv(tmp_path / "right.csv", rows)
+    frame = compare(path, tmp_path / "out")["frames"][0]
+    assert frame["common_displacement_n"] == frame["common_strain_n"] == 0
+    assert frame["fixed_domain"]["comparison"]["missing_n"] == 4
+    assert frame["component_differences"]["u"]["rmse"] is None
+
+
 def test_existing_output_is_preserved(tmp_path):
     path, _ = _fixture(tmp_path)
     compare(path, tmp_path / "out")
