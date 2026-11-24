@@ -60,3 +60,11 @@ def test_intact_texture_and_corrupted_patches_are_distinguished():
     assert coverage["clear"]["accepted"] == coverage["clear"]["count"]
     assert unrelated["corruption_acceptance"]["no_physical_correspondence"]["accepted"] == 0
     assert unrelated["displacement_vector_error_px"] is None
+
+
+def test_necking_validation_rejects_negative_noise_and_reports_tied_peak_count():
+    with pytest.raises(ValueError, match="noise_sigma"):
+        bench.run_case(bench.CASES["uniform"], noise_sigma=-1.0)
+    uniform = bench.run_case(bench.CASES["uniform"])
+    assert uniform["accepted_without_displacement_count"] == 0
+    assert uniform["true_peak_tied_point_count"] == uniform["point_count"]

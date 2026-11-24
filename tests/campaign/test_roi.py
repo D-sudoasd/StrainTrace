@@ -7,8 +7,6 @@ import pytest
 
 import ezdic_core as core
 from straintrace_campaign import roi
-from straintrace_campaign.models import CampaignError
-from straintrace_campaign.storage import read_jsonl
 
 
 def _save(path: Path, image: np.ndarray) -> None:
@@ -95,8 +93,7 @@ def test_exclusion_geometry_is_rejected_if_user_edits_a_gauge_into_the_mask(tmp_
     acquisition, _image, _path = _vertical_specimen(tmp_path)
     acquisition["roi"] = {"exclusions": [[100, 100, 30, 30]]}
     proposal = roi.propose(acquisition, tmp_path, free_region=[65, 5, 110, 310])
-    if not proposal["groups"]:
-        pytest.skip("synthetic body did not yield an accepted texture window")
+    assert proposal["groups"]
     broken = {**proposal, "groups": [dict(proposal["groups"][0], roi1=[105, 105, 15, 15]), *proposal["groups"][1:]]}
     broken["proposal_hash"] = roi.proposal_hash(broken)
     acquisition["roi"] = broken
@@ -105,4 +102,46 @@ def test_exclusion_geometry_is_rejected_if_user_edits_a_gauge_into_the_mask(tmp_
         "reviewer": "reviewer", "approved_at": "2026-01-01T00:00:00Z", "specimen_confirmed": True,
     }
     with pytest.raises(core.CoreError, match="ROI_OVERLAPS_EXCLUSION"):
+        roi.validate_approval(acquisition)
+
+
+def test_manual_free_region_interior_subset_high_mask_occupancy_proposes_gauges(tmp_path):
+    acquisition, _image, _path = _vertical_specimen(tmp_path)
+    # Interior subset completely inside the specimen (mask occupancy ~ 100% >= 70%).
+    proposal = roi.propose(acquisition, tmp_path, free_region=[82, 55, 76, 190])
+    assert proposal["diagnostics"]["manual_free_region_override"] is True
+    assert len(proposal["groups"]) > 0
+    for group in proposal["groups"]:
+        for key in ("roi1", "roi2"):
+            assert roi._inside(group[key], proposal["free_region"])
+
+
+def test_validate_rect_rejects_strings_booleans_and_fullfield_exclusion_overlap(tmp_path):
+    acquisition, _image, _path = _vertical_specimen(tmp_path)
+    for bad in ("1234", [True, 0, 20, 20], [1.5, 0, 20, 20]):
+        with pytest.raises(core.CoreError, match="INVALID_ROI"):
+            roi._validate_rect(bad, (320, 240), "test")
+
+    acquisition["analysis_mode"] = "fullfield"
+    proposal = roi.propose(acquisition, tmp_path, free_region=[82, 55, 76, 190])
+    proposal["exclusions"] = [[90, 70, 20, 20]]
+    proposal["proposal_hash"] = roi.proposal_hash(proposal)
+    with pytest.raises(core.CoreError, match="ROI_OVERLAPS_EXCLUSION"):
+        roi.validate_proposal(acquisition, proposal)
+
+    acquisition["roi"] = proposal
+    acquisition["approval"] = {
+        "proposal_hash": proposal["proposal_hash"], "reference_sha256": proposal["reference_sha256"],
+        "reviewer": "reviewer", "approved_at": "2026-01-01T00:00:00Z", "specimen_confirmed": True,
+    }
+    with pytest.raises(core.CoreError, match="ROI_OVERLAPS_EXCLUSION"):
+        roi.validate_approval(acquisition)
+
+    # Mismatched reference_frame in image_frames is also rejected by validate_approval.
+    proposal["exclusions"] = []
+    proposal["proposal_hash"] = roi.proposal_hash(proposal)
+    acquisition["roi"] = proposal
+    acquisition["approval"]["proposal_hash"] = proposal["proposal_hash"]
+    acquisition["image_frames"][0]["frame"] = 999
+    with pytest.raises(core.CoreError, match="ROI_REFERENCE_FRAME_MISMATCH"):
         roi.validate_approval(acquisition)

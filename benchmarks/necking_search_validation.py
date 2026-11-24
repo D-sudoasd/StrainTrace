@@ -9,25 +9,28 @@ does not reproduce all optical or mechanical features of a tensile neck.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import json
 from pathlib import Path
-import platform
 import sys
 import time
 
-import cv2
 import numpy as np
-import scipy
 
 # Support both direct execution from any working directory and ``python -m``.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import ezdic_core as core
-from benchmarks.synthetic_cases import analytic_texture
+import ezdic_core as core  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    load_core_module,
+    runtime_environment,
+    set_deterministic_rng,
+    sha256_bytes,
+    sha256_file,
+    write_json_lf,
+)
+from benchmarks.synthetic_cases import analytic_texture  # noqa: E402
 
 
 IMAGE_SIZE = 450
@@ -95,11 +98,13 @@ def exact_global_seed(case_name: str) -> dict:
     return {"matrix": np.column_stack((linear, offset)), "median_reprojection_error_px": 0.1}
 
 
-def evaluate_case(case_name: str, *, experimental_full_search=False) -> tuple[dict, dict]:
+def evaluate_case(case_name: str, *, experimental_full_search=False, solver_core=None) -> tuple[dict, dict]:
+    active_core = core if solver_core is None else solver_core
+    set_deterministic_rng(0)
     reference, deformed = make_case(case_name)
     start = time.perf_counter()
     options = {"experimental_full_search": True} if experimental_full_search else {}
-    field = core.run_2d_dic(reference, deformed, ROI, **SETTINGS, **options)
+    field = active_core.run_2d_dic(reference, deformed, ROI, **SETTINGS, **options)
     elapsed = time.perf_counter() - start
     expected_u, expected_v = displacement_truth(case_name, field["x"], field["y"])
     error = np.hypot(field["u_raw"] - expected_u, field["v_raw"] - expected_v)
@@ -107,7 +112,10 @@ def evaluate_case(case_name: str, *, experimental_full_search=False) -> tuple[di
     band = np.abs(np.asarray(field["y"]) - CENTER[1]) < 35.0
     valid_errors = error[valid]
     reasons, counts = np.unique(np.asarray(field["invalid_reason"], dtype=str), return_counts=True)
-    input_hash = hashlib.sha256(reference.tobytes() + deformed.tobytes()).hexdigest()
+    input_hash = sha256_bytes(reference.tobytes() + deformed.tobytes())
+    conv_known = np.asarray(field.get("convergence_known", np.ones(valid.size, dtype=bool)), dtype=bool)
+    conv = np.asarray(field.get("converged", np.zeros(valid.size, dtype=bool)), dtype=bool)
+    eff_radius = field.get("effective_search_radius_px")
     metrics = {
         "case": case_name,
         "input_sha256": input_hash,
@@ -120,10 +128,10 @@ def evaluate_case(case_name: str, *, experimental_full_search=False) -> tuple[di
         "valid_displacement_max_error_px": float(valid_errors.max()) if valid_errors.size else None,
         "valid_error_over_1_px_count": int((valid_errors > 1.0).sum()),
         "accepted_error_over_0_5_px_count": int((valid_errors > 0.5).sum()),
-        "known_converged_count": int((valid & np.asarray(field["convergence_known"], dtype=bool) & np.asarray(field["converged"], dtype=bool)).sum()),
+        "known_converged_count": int((valid & conv_known & conv).sum()),
         "invalid_reasons": {str(reason): int(count) for reason, count in zip(reasons, counts) if reason},
-        "effective_search_radius_px": int(field["effective_search_radius_px"]),
-        "initial_transform": field["initial_transform"],
+        "effective_search_radius_px": int(eff_radius) if eff_radius is not None else None,
+        "initial_transform": field.get("initial_transform"),
         "elapsed_seconds": float(elapsed),
         "experimental_full_search": bool(field.get("experimental_full_search", False)),
         "scientific_ok": bool(field["quality_summary"]["scientific_ok"]),
@@ -132,8 +140,9 @@ def evaluate_case(case_name: str, *, experimental_full_search=False) -> tuple[di
     return field, metrics
 
 
-def report(*, experimental_full_search=False) -> dict:
-    cases = [evaluate_case(name, experimental_full_search=experimental_full_search)[1]
+def report(*, experimental_full_search=False, solver_core=None) -> dict:
+    active_core = core if solver_core is None else solver_core
+    cases = [evaluate_case(name, experimental_full_search=experimental_full_search, solver_core=active_core)[1]
              for name in ("localized_shear_band", "uniform_affine")]
     return {
         "report_version": "necking-search-validation-v3",
@@ -148,12 +157,9 @@ def report(*, experimental_full_search=False) -> dict:
             "Full-radius search is explicitly experimental and cannot pass the scientific gate, even at full coverage.",
         ],
         "provenance": {
-            "core_sha256": hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
-            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "scipy": scipy.__version__,
-            "opencv": cv2.__version__,
+            "core_sha256": sha256_file(active_core.__file__),
+            "script_sha256": sha256_file(__file__),
+            **runtime_environment(include_opencv=True),
         },
         "settings": {**SETTINGS, "roi": list(ROI), "experimental_full_search": bool(experimental_full_search)},
         "cases": cases,
@@ -167,21 +173,20 @@ def main() -> int:
     parser.add_argument("--experimental-full-search", action="store_true",
                         help="Explicitly evaluate the unvalidated full-radius/secondary-peak research mode")
     args = parser.parse_args()
-    global core
+    if args.output and args.output.exists():
+        raise FileExistsError(f"Use a new output path; refusing to overwrite existing report: {args.output}")
+    solver_core = core
     if args.core_file:
-        spec = importlib.util.spec_from_file_location("necking_search_frozen_core", args.core_file.resolve())
-        if spec is None or spec.loader is None:
+        try:
+            solver_core = load_core_module(args.core_file.resolve(), "necking_search_frozen_core")
+        except ValueError:
             parser.error("cannot load the requested core file")
-        core = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(core)
-    output = json.dumps(report(experimental_full_search=args.experimental_full_search), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    payload = report(experimental_full_search=args.experimental_full_search, solver_core=solver_core)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
         # An explicit destination is required; refuse to overwrite historical results.
-        with args.output.open("x", encoding="utf-8") as handle:
-            handle.write(output)
+        write_json_lf(args.output, payload, exclusive=True, indent=2, ensure_ascii=False, allow_nan=False)
     else:
-        print(output, end="")
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
     return 0
 
 

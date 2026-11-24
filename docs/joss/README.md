@@ -8,6 +8,7 @@ Preparation record: 27 September 2026. This is a preparation candidate, not a su
 - [Author, policy, and evidence record](submission-record.json).
 - [Research-use record](research-use.md).
 - [Validation instructions](validation.md).
+- [Visual sources and reproduction](visual-provenance.md).
 
 The manuscript date is a **draft preparation date**. Set it to the actual submission day before sending. The software source version is 0.1.4; identify every tested and submitted candidate by its Git commit as well as version. Do not attach a historical archive DOI to this new source as an exact-version archive.
 

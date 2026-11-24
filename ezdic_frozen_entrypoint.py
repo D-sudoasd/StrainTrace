@@ -8,60 +8,11 @@ normal invocation delegates to the established GUI ``main`` function.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 from typing import Any, Sequence
-
-
-def _runtime_root() -> Path:
-    """Return the source directory or PyInstaller's unpacked runtime root."""
-
-    frozen_root = getattr(sys, "_MEIPASS", None)
-    if frozen_root:
-        return Path(frozen_root).resolve()
-    return Path(__file__).resolve().parent
-
-
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _module_hash(module: Any) -> str:
-    candidates = []
-    module_path = getattr(module, "__file__", None)
-    if module_path:
-        candidates.append(Path(module_path))
-    module_name = str(getattr(module, "__name__", "")).rsplit(".", 1)[-1]
-    if module_name:
-        candidates.append(_runtime_root() / "sources" / f"{module_name}.py")
-    for candidate in candidates:
-        try:
-            if candidate.is_file():
-                return _sha256_path(candidate)
-        except (OSError, TypeError, ValueError):
-            pass
-    return "unavailable"
-
-
-def _schema_path(cli_module: Any) -> Path:
-    """Resolve schema data for both source and onedir PyInstaller layouts."""
-
-    candidates = [
-        Path(getattr(cli_module, "SCHEMA_PATH", "")),
-        _runtime_root() / "schemas" / "run_config_v1.json",
-        Path(__file__).resolve().parent / "schemas" / "run_config_v1.json",
-    ]
-    for candidate in candidates:
-        if candidate and candidate.is_file():
-            return candidate.resolve()
-    raise RuntimeError("run_config_v1.json was not found in source or frozen bundle")
 
 
 def _support_paths(runtime_root: Path) -> dict[str, Path]:
@@ -89,7 +40,7 @@ def _write_marker(path: Path, payload: dict[str, Any]) -> None:
     path = path.expanduser()
     if not path.parent.is_dir():
         raise RuntimeError(f"smoke marker parent does not exist: {path.parent}")
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
 def smoke_test() -> int:
@@ -106,8 +57,13 @@ def smoke_test() -> int:
     if not tk_was_loaded and "tkinter" in sys.modules:
         raise RuntimeError("smoke path imported tkinter")
 
-    schema_path = _schema_path(cli)
-    support_paths = _support_paths(_runtime_root())
+    runtime_root = core._runtime_code_root()
+    resolved_paths = core.resolve_code_paths(include_cli=True, include_benchmark=True, include_schema=True)
+    by_name = {path.name.casefold(): path for path in resolved_paths}
+    schema_path = by_name.get("run_config_v1.json")
+    if schema_path is None or not schema_path.is_file():
+        raise RuntimeError("run_config_v1.json was not found in source or frozen bundle")
+    support_paths = _support_paths(runtime_root)
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     if not isinstance(schema, dict):
         raise RuntimeError("bundled schema root is not an object")
@@ -115,6 +71,8 @@ def smoke_test() -> int:
         raise RuntimeError("bundled schema is not run_config_v1")
     if schema.get("properties", {}).get("schema_version", {}).get("const") != 1:
         raise RuntimeError("bundled schema does not declare schema_version=1")
+    if getattr(cli, "SCHEMA_VERSION", None) != 1:
+        raise RuntimeError("CLI schema contract version is unavailable")
 
     cases = getattr(benchmark, "LOCKED_CASES", ())
     if not cases or not getattr(benchmark, "LOCKED_CASES_VERSION", None):
@@ -125,21 +83,25 @@ def smoke_test() -> int:
     if getattr(core, "APP_NAME", None) != "ezDIC":
         raise RuntimeError("core identity is unavailable")
 
+    def _resolved_hash(filename: str) -> str:
+        target = by_name.get(filename.casefold())
+        return core.sha256_file(target) if target is not None and target.is_file() else "unavailable"
+
     marker = os.environ.get("EZDIC_FROZEN_SMOKE_MARKER", "").strip()
     if marker:
         payload = {
             "smoke": "passed",
             "mode": "frozen" if getattr(sys, "frozen", False) else "source",
             "executable": str(Path(sys.executable).resolve()),
-            "runtime_root": str(_runtime_root()),
+            "runtime_root": str(runtime_root),
             "core_version": str(getattr(core, "APP_VERSION", "unknown")),
-            "core_sha256": _module_hash(core),
-            "cli_sha256": _module_hash(cli),
-            "benchmark_sha256": _module_hash(benchmark),
+            "core_sha256": _resolved_hash("ezdic_core.py"),
+            "cli_sha256": _resolved_hash("ezdic_cli.py"),
+            "benchmark_sha256": _resolved_hash("ezdic_benchmark.py"),
             "schema": str(schema_path),
-            "schema_sha256": _sha256_path(schema_path),
+            "schema_sha256": core.sha256_file(schema_path),
             "support_files": {
-                name: _sha256_path(path) for name, path in support_paths.items()
+                name: core.sha256_file(path) for name, path in support_paths.items()
             },
             "locked_cases_version": str(benchmark.LOCKED_CASES_VERSION),
             "locked_cases_sha256": locked_hash,
@@ -167,6 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     try:
         raise SystemExit(main())
     except Exception as exc:

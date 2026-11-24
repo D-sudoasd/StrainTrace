@@ -41,7 +41,7 @@
       "if": {"properties": {"analysis_mode": {"const": "extensometer"}}},
       "then": {
         "required": ["roi_groups"],
-        "not": {"anyOf": [{"required": ["field_roi"]}, {"required": ["solver"]}, {"required": ["pyramid"]}, {"required": ["mask"]}, {"required": ["display"]}]},
+        "not": {"anyOf": [{"required": ["field_roi"]}, {"required": ["field_roi_reference_frame_1based"]}, {"required": ["solver"]}, {"required": ["pyramid"]}, {"required": ["mask"]}, {"required": ["display"]}]},
         "properties": {
           "quality": {"not": {"anyOf": [{"required": ["zncc_min"]}, {"required": ["max_condition_number"]}, {"required": ["max_residual_rms"]}, {"required": ["reject_nonconverged"]}, {"required": ["min_correlation_valid_fraction"]}]}}
         }
@@ -58,8 +58,30 @@
       }
     },
     {
-      "if": {"properties": {"normalization": {"properties": {"policy": {"const": "fixed_bounds"}}}}},
-      "then": {"properties": {"normalization": {"required": ["bounds"]}}}
+      "if": {
+        "required": ["normalization"],
+        "properties": {
+          "normalization": {
+            "required": ["policy"],
+            "properties": {"policy": {"const": "fixed_bounds"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "normalization": {
+            "required": ["bounds"],
+            "properties": {"bounds": {"type": "object"}}
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "normalization": {
+            "properties": {"bounds": {"type": "null"}}
+          }
+        }
+      }
     },
     {
       "if": {"properties": {"analysis_mode": {"const": "fullfield"}}},
@@ -109,7 +131,17 @@
         "template_alpha": {"$ref": "#/$defs/fraction"},
         "max_frame_jump_px": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/positiveNumber"}], "description": "Maximum accepted |Δ engineering strain| between successive accepted frames. The _px suffix is historical; the comparison is strain, not pixels."},
         "pixel_size_mm": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/positiveNumber"}]}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["template_policy"], "properties": {"template_policy": {"const": "follow_deformed_experimental"}}},
+          "then": {"required": ["use_prev_frame_template"], "properties": {"use_prev_frame_template": {"const": true}}}
+        },
+        {
+          "if": {"required": ["use_prev_frame_template"], "properties": {"use_prev_frame_template": {"const": true}}},
+          "then": {"required": ["template_policy"], "properties": {"template_policy": {"const": "follow_deformed_experimental"}}}
+        }
+      ]
     },
     "texture": {
       "type": "object",
@@ -144,9 +176,9 @@
       "additionalProperties": false,
       "properties": {
         "name": {"enum": ["IC-GN", "IC-LM"]},
-        "subset_size_px": {"type": "integer", "minimum": 9},
+        "subset_size_px": {"type": "integer", "minimum": 9, "not": {"multipleOf": 2}},
         "step_px": {"type": "integer", "minimum": 1},
-        "strain_window_px": {"type": "integer", "minimum": 3, "description": "Odd POI-neighborhood size for the local strain fit, not image pixels. Physical span is (window-1)*step_px."},
+        "strain_window_px": {"type": "integer", "minimum": 3, "not": {"multipleOf": 2}, "description": "Odd POI-neighborhood size for the local strain fit, not image pixels. Physical span is (window-1)*step_px."},
         "smooth_sigma_poi": {"$ref": "#/$defs/nonNegativeNumber", "description": "POI-grid index units."},
         "search_radius_px": {"type": "integer", "minimum": 1},
         "max_iterations": {"type": "integer", "minimum": 1},

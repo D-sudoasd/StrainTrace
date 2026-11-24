@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
+import re
 import socket
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,8 +24,19 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+from .models import CampaignError
+from .storage import (
+    artifact_path as _storage_artifact_path,
+    atomic_write_bytes as _storage_atomic_write_bytes,
+    canonical_json_bytes as _storage_json_bytes,
+    json_safe as _storage_json_safe,
+    read_jsonl as _storage_read_jsonl,
+    sha256_file as _storage_sha256_file,
+    strict_json_loads as _storage_strict_json_loads,
+)
 
 
 _PACKAGE_SCHEMA = "straintrace-campaign-package-1"
@@ -33,89 +47,62 @@ _RAW_IMAGE_SUFFIXES = {".tif", ".tiff", ".cbf", ".edf", ".mar3450", ".raw"}
 _CHECKSUMS = "CHECKSUMS.json"
 _VALIDATION = "VALIDATION.json"
 _CURRENT = "CURRENT.json"
-_IMPORT_FILES = ("sample.json", "sources.json", "frames.csv", "frames.jsonl", "frame_stress_strain.txt", "frame_stress.txt")
-
-
-def _json_bytes(value: Any, *, indent: int | None = 2) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=indent) + "\n").encode("utf-8")
-
-
-def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_json_bytes(_json_safe(value)))
+_CONFIRMED_DIMENSION_STATUSES = {"confirmed", "verified_recorded_dimensions", "verified_recorded_area"}
 
 
 def _json_safe(value: Any) -> Any:
     """Convert common numeric scalars to strict JSON values; NaN means missing."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    # Accept NumPy scalar values without importing NumPy in the headless module.
-    item = getattr(value, "item", None)
-    if callable(item):
-        return _json_safe(item())
-    if hasattr(value, "isoformat") and callable(value.isoformat):
-        return value.isoformat()
-    raise TypeError(f"Value is not JSON serializable: {type(value).__name__}")
+    return _storage_json_safe(value, coerce_unknown=False)
 
 
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"Non-finite JSON number is forbidden: {value}")
+def _json_bytes(value: Any, *, indent: int | None = 2) -> bytes:
+    try:
+        return _storage_json_bytes(value, pretty=indent is not None)
+    except CampaignError as exc:
+        raise ValueError(exc.message) from exc
+
+
+def _write_json(path: Path, value: Any) -> None:
+    _write_atomic(path, _json_bytes(_json_safe(value)))
 
 
 def _read_json(path: Path) -> Any:
-    value = json.loads(path.read_text(encoding="utf-8-sig"), parse_constant=_reject_json_constant)
-    _assert_finite(value, str(path))
-    return value
+    raw = Path(path).read_text(encoding="utf-8-sig")
+    try:
+        return _storage_strict_json_loads(raw)
+    except CampaignError as exc:
+        raise ValueError(exc.message) from exc
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            row = json.loads(line, parse_constant=_reject_json_constant)
-            if not isinstance(row, dict):
-                raise ValueError(f"{path}:{line_number}: expected a JSON object")
-            _assert_finite(row, f"{path}:{line_number}")
-            rows.append(row)
-    return rows
-
-
-def _assert_finite(value: Any, where: str) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{where}: non-finite numeric value")
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _assert_finite(item, f"{where}.{key}")
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for index, item in enumerate(value):
-            _assert_finite(item, f"{where}[{index}]")
+    try:
+        return _storage_read_jsonl(path)
+    except CampaignError as exc:
+        if isinstance(exc.__cause__, OSError):
+            raise exc.__cause__ from exc
+        raise ValueError(exc.message) from exc
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    try:
+        return _storage_sha256_file(path)
+    except CampaignError as exc:
+        raise OSError(exc.message) from exc
 
 
 def _relative_file(root: Path, value: str | os.PathLike[str]) -> Path:
     """Resolve an artifact path and reject absolute paths and traversal."""
-    raw = str(value).replace("\\", "/")
-    rel = PurePosixPath(raw)
-    if rel.is_absolute() or not rel.parts or any(part in ("", ".", "..") for part in rel.parts):
+    raw = str(value)
+    normalized = raw.replace("\\", "/")
+    segments = normalized.split("/")
+    if not raw or any(part in ("", ".", "..") for part in segments):
         raise ValueError(f"Unsafe relative artifact path: {value!r}")
-    target = root.joinpath(*rel.parts).resolve()
-    if not target.is_relative_to(root.resolve()):
-        raise ValueError(f"Artifact escapes its root: {value!r}")
+    try:
+        target = _storage_artifact_path(root, normalized)
+    except CampaignError as exc:
+        raise ValueError(f"Unsafe relative artifact path: {value!r}") from exc
+    if target == root.expanduser().resolve():
+        raise ValueError(f"Unsafe relative artifact path: {value!r}")
     return target
 
 
@@ -148,6 +135,22 @@ def _resolve_keystone_version(source: str | os.PathLike[str]) -> Path:
     raise ValueError(f"Expected a Keystone version directory or root with {_CURRENT}: {path}")
 
 
+def _validate_zip_member(item: zipfile.ZipInfo, root: Path) -> None:
+    name = item.filename
+    if not name or "\x00" in name:
+        raise ValueError(f"Unsafe ZIP member path: {name!r}")
+    if stat.S_ISLNK(item.external_attr >> 16):
+        raise ValueError(f"Unsafe ZIP symlink member: {name!r}")
+    win = PureWindowsPath(name)
+    posix = PurePosixPath(name.replace("\\", "/"))
+    parts = re.split(r"[\\/]", name)
+    if win.drive or win.root or win.is_absolute() or posix.is_absolute() or any(part == ".." for part in parts):
+        raise ValueError(f"Unsafe ZIP member path: {name}")
+    target = root.joinpath(*(part for part in parts if part not in ("", "."))).resolve()
+    if not target.is_relative_to(root.resolve()):
+        raise ValueError(f"Unsafe ZIP member path: {name}")
+
+
 def _resolve_package(path: str | os.PathLike[str]) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
     candidate = Path(path).expanduser().resolve()
     if candidate.is_file() and candidate.suffix.lower() == ".zip":
@@ -159,9 +162,7 @@ def _resolve_package(path: str | os.PathLike[str]) -> tuple[Path, tempfile.Tempo
                     raise ValueError(f"ZIP CRC failed for {bad_member}")
                 root = Path(temp.name)
                 for item in archive.infolist():
-                    member = PurePosixPath(item.filename)
-                    if member.is_absolute() or any(part == ".." for part in member.parts):
-                        raise ValueError(f"Unsafe ZIP member path: {item.filename}")
+                    _validate_zip_member(item, root)
                 archive.extractall(root)
             # Archives emitted here contain package files at their root. Be
             # tolerant of one enclosing directory for hand-carried packages.
@@ -210,7 +211,10 @@ def _verify_keystone_source(version: Path) -> dict[str, Any]:
         expected = claim.get("sha256") if isinstance(claim, dict) else claim
         if expected and _sha256(target) != expected:
             errors.append(f"Keystone checksum mismatch: {relative}")
-    actual_files = {path.relative_to(version).as_posix() for path in version.rglob("*") if path.is_file() and path.name != _CHECKSUMS}
+    actual_files = {
+        rel for path in version.rglob("*")
+        if path.is_file() and (rel := path.relative_to(version).as_posix()) != _CHECKSUMS
+    }
     unlisted = actual_files - set(manifest)
     # BUILD_RECEIPT pins the checksum manifest itself and is intentionally
     # outside that manifest to avoid a checksum cycle.
@@ -397,7 +401,16 @@ def import_keystone(project_dir: str | os.PathLike[str], source: str | os.PathLi
             width = dimensions.get("width_mm_recorded")
             thickness = dimensions.get("thickness_mm_recorded")
             area = dimensions.get("accepted_area_mm2")
-            area_status = dimensions.get("accepted_area_status") or dimensions.get("dimension_match_status") or "UNCONFIRMED"
+            area_status = str(dimensions.get("accepted_area_status") or dimensions.get("dimension_match_status") or "UNCONFIRMED")
+            dimension_source = dimensions.get("dimension_source")
+            if not dimension_source and area_status.strip().casefold() in _CONFIRMED_DIMENSION_STATUSES:
+                dimension_source = dimensions.get("accepted_area_basis") or f"keystone_import:{source_version_id}"
+            dimension_source_fields = {
+                "area_basis": dimensions.get("accepted_area_basis"),
+                "area_conflict": bool(dimensions.get("area_conflict", False)),
+                "alternate_area_mm2": dimensions.get("alternate_area_mm2"),
+                "alternate_area_source": dimensions.get("alternate_area_source"),
+            }
             metadata = {
                 "keystone_import": {
                     "schema_version": _IMPORT_SCHEMA,
@@ -409,6 +422,7 @@ def import_keystone(project_dir: str | os.PathLike[str], source: str | os.PathLi
                     "source_frames_csv_sha256": _sha256(source_csv),
                     "preserved_files": {name: f"{imported_rel.as_posix()}/{name}" for name in copied},
                     "dic_present": bool(item.get("DIC_present", dic.get("present_in_indexed_sources", False))),
+                    "dimension_source_fields": dimension_source_fields,
                     "historical_source_claims": _historical_source_claims(original_sources),
                 },
                 "original_sample_json_path": f"{imported_rel.as_posix()}/sample.json",
@@ -427,11 +441,7 @@ def import_keystone(project_dir: str | os.PathLike[str], source: str | os.PathLi
                     "width_mm": width,
                     "thickness_mm": thickness,
                     "status": area_status,
-                    "source": dimensions.get("dimension_source"),
-                    "area_basis": dimensions.get("accepted_area_basis"),
-                    "area_conflict": bool(dimensions.get("area_conflict", False)),
-                    "alternate_area_mm2": dimensions.get("alternate_area_mm2"),
-                    "alternate_area_source": dimensions.get("alternate_area_source"),
+                    "source": dimension_source,
                 },
                 "analysis_mode": "extensometer",
                 # Images remain at their source location and are never copied.
@@ -610,19 +620,27 @@ def _write_frames_jsonl(path: Path, rows: list[dict[str, Any]], original_path: P
             handle.write("\n")
 
 
+def _select_strain_key(rows: list[Mapping[str, Any]]) -> str | None:
+    candidates = ("engineering_strain", "engineering_strain_mean", "dic_engineering_strain")
+    non_null = next((key for key in candidates if any(row.get(key) is not None for row in rows)), None)
+    if non_null is not None:
+        return non_null
+    return next((key for key in candidates if any(key in row for row in rows)), None)
+
+
 def _has_dic(acquisition: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> bool:
-    imported = acquisition.get("metadata", {}).get("keystone_import", {}) if isinstance(acquisition.get("metadata"), Mapping) else {}
-    if isinstance(imported, Mapping) and "dic_present" in imported:
-        return bool(imported["dic_present"])
     if acquisition.get("image_frames"):
         return True
     if any(row.get(key) is not None for row in rows for key in ("engineering_strain", "engineering_strain_mean", "dic_engineering_strain")):
         return True
+    imported = acquisition.get("metadata", {}).get("keystone_import", {}) if isinstance(acquisition.get("metadata"), Mapping) else {}
+    if isinstance(imported, Mapping) and "dic_present" in imported:
+        return bool(imported["dic_present"])
     return False
 
 
 def _origin_fields(rows: list[Mapping[str, Any]], has_dic: bool) -> tuple[list[str], list[list[Any]]]:
-    strain_key = next((key for key in ("engineering_strain", "engineering_strain_mean", "dic_engineering_strain") if any(key in row for row in rows)), None)
+    strain_key = _select_strain_key(rows)
     fields = ["frame", "stress_MPa"] + (["engineering_strain"] if has_dic else [])
     values: list[list[Any]] = []
     for row in rows:
@@ -747,7 +765,8 @@ def _copy_analysis_artifacts(
         if not isinstance(artifacts, list):
             raise ValueError(f"{stage_name}.artifacts must be an array")
         row_path = str(stage.get("rows_path", "")).replace("\\", "/")
-        checksums = stage.get("checksums", {}) if isinstance(stage.get("checksums"), Mapping) else {}
+        raw_checksums = stage.get("checksums", {}) if isinstance(stage.get("checksums"), Mapping) else {}
+        checksums = {str(k).replace("\\", "/"): v for k, v in raw_checksums.items()}
         for artifact in artifacts:
             if not isinstance(artifact, (str, os.PathLike)):
                 raise ValueError(f"{stage_name}.artifacts contains a non-path value")
@@ -766,7 +785,7 @@ def _copy_analysis_artifacts(
     return sorted(copied_by_source.values(), key=lambda record: record["package_path"])
 
 
-def _stage_name(project: Mapping[str, Any]) -> str:
+def _stage_name(project: Mapping[str, Any], *, versions_dir: Path | None = None) -> str:
     metadata = project.get("metadata", {}) if isinstance(project.get("metadata"), Mapping) else {}
     explicit = metadata.get("output_version") or metadata.get("version_id")
     if explicit:
@@ -774,49 +793,54 @@ def _stage_name(project: Mapping[str, Any]) -> str:
         if Path(value).name != value or value in ("", ".", ".."):
             raise ValueError(f"Unsafe campaign output version: {value!r}")
         return value
-    created = project.get("created_at") or metadata.get("created_at")
-    if isinstance(created, str):
-        try:
-            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        except ValueError:
-            dt = datetime.now(timezone.utc)
-    else:
-        dt = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if versions_dir is None or not (versions_dir / base).exists():
+        return base
+    for suffix in range(1, 1000):
+        candidate = f"{base}_{suffix:03d}"
+        if not (versions_dir / candidate).exists():
+            return candidate
+    return f"{base}_{uuid.uuid4().hex[:8]}"
 
 
 def _root_files(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "versions").mkdir(exist_ok=True)
     if not (root / "README.md").exists():
-        (root / "README.md").write_text(
-            "# StrainTrace Campaign Results\n\n"
-            "Read `CURRENT.json` to find the verified current version. Each version is immutable after promotion.\n",
-            encoding="utf-8",
+        _write_atomic(
+            root / "README.md",
+            (
+                "# StrainTrace Campaign Results\n\n"
+                "Read `CURRENT.json` to find the verified current version. Each version is immutable after promotion.\n"
+            ).encode("utf-8"),
         )
     if not (root / "AI_README.md").exists():
-        (root / "AI_README.md").write_text(
-            "# AI reading guide\n\n"
-            "Resolve `CURRENT.json.version_path` first. Preserve frame identities and null/blank semantics. "
-            "Do not infer physical specimen identity, times, area, or missing measurements.\n",
-            encoding="utf-8",
+        _write_atomic(
+            root / "AI_README.md",
+            (
+                "# AI reading guide\n\n"
+                "Resolve `CURRENT.json.version_path` first. Preserve frame identities and null/blank semantics. "
+                "Do not infer physical specimen identity, times, area, or missing measurements.\n"
+            ).encode("utf-8"),
         )
     if not (root / "catalog.json").exists():
-        _write_json(root / "catalog.json", {
-            "schema_version": _CATALOG_LINK_SCHEMA,
-            "kind": "version_catalog_pointer",
-            "current_pointer": _CURRENT,
-            "version_path_field": "version_path",
-            "version_catalog_json": "{version_path}/catalog.json",
-            "version_catalog_csv": "{version_path}/catalog.csv",
-        })
+        _write_atomic(
+            root / "catalog.json",
+            _json_bytes({
+                "schema_version": _CATALOG_LINK_SCHEMA,
+                "kind": "version_catalog_pointer",
+                "current_pointer": _CURRENT,
+                "version_path_field": "version_path",
+                "version_catalog_json": "{version_path}/catalog.json",
+                "version_catalog_csv": "{version_path}/catalog.csv",
+            }),
+        )
     if not (root / "catalog.csv").exists():
-        with (root / "catalog.csv").open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.writer(handle, lineterminator="\n")
-            writer.writerow(["kind", "pointer", "json_template", "csv_template"])
-            writer.writerow(["current_version", _CURRENT, "{version_path}/catalog.json", "{version_path}/catalog.csv"])
+        buf = io.StringIO(newline="")
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(["kind", "pointer", "json_template", "csv_template"])
+        writer.writerow(["current_version", _CURRENT, "{version_path}/catalog.json", "{version_path}/catalog.csv"])
+        _write_atomic(root / "catalog.csv", buf.getvalue().encode("utf-8-sig"))
 
 
 def _root_catalog_errors(root: Path) -> list[str]:
@@ -876,9 +900,15 @@ def _build_version(project_root: Path, project: Mapping[str, Any], version_dir: 
         imported_meta = acquisition.get("metadata", {}).get("keystone_import", {}) if isinstance(acquisition.get("metadata"), Mapping) else {}
         imported_dir: Path | None = None
         if isinstance(imported_meta, Mapping) and imported_meta.get("preserved_files"):
-            jsonl_rel = acquisition.get("result", {}).get("rows_path") if isinstance(acquisition.get("result"), Mapping) else None
-            if jsonl_rel and str(jsonl_rel).replace("\\", "/").endswith("/frames.jsonl"):
-                imported_dir = _relative_file(project_root, jsonl_rel).parent
+            preserved_sample = imported_meta["preserved_files"].get("sample.json") if isinstance(imported_meta.get("preserved_files"), Mapping) else None
+            if preserved_sample:
+                imported_dir = _relative_file(project_root, preserved_sample).parent
+            else:
+                jsonl_rel = acquisition.get("result", {}).get("rows_path") if isinstance(acquisition.get("result"), Mapping) else None
+                if jsonl_rel and str(jsonl_rel).replace("\\", "/").endswith("/frames.jsonl"):
+                    imported_dir = _relative_file(project_root, jsonl_rel).parent
+        elif isinstance(acquisition.get("metadata"), Mapping) and acquisition["metadata"].get("original_sample_json_path"):
+            imported_dir = _relative_file(project_root, acquisition["metadata"]["original_sample_json_path"]).parent
 
         rel_sample_dir = sample_dir.relative_to(version_dir).as_posix()
         first_recorded = next((row for row in rows if row.get("timestamp_unix_s") is not None), None)
@@ -961,7 +991,7 @@ def _build_version(project_root: Path, project: Mapping[str, Any], version_dir: 
         _write_json(sample_dir / "sources.json", source_payload)
 
         valid_stress = sum(row.get("stress_MPa") is not None for row in rows)
-        strain_key = next((key for key in ("engineering_strain", "engineering_strain_mean", "dic_engineering_strain") if any(key in row for row in rows)), None)
+        strain_key = _select_strain_key(rows)
         valid_strain = sum(row.get(strain_key) is not None for row in rows) if strain_key else 0
         catalog_row = {
             "acquisition_id": acquisition_id,
@@ -1012,8 +1042,10 @@ def _build_version(project_root: Path, project: Mapping[str, Any], version_dir: 
 def _write_checksum_manifest(version_dir: Path) -> dict[str, str]:
     checksums: dict[str, str] = {}
     for path in sorted(version_dir.rglob("*")):
-        if path.is_file() and path.name != _CHECKSUMS:
-            checksums[path.relative_to(version_dir).as_posix()] = _sha256(path)
+        if path.is_file():
+            rel = path.relative_to(version_dir).as_posix()
+            if rel != _CHECKSUMS:
+                checksums[rel] = _sha256(path)
     _write_json(version_dir / _CHECKSUMS, {"schema_version": "straintrace-checksums-1", "files": checksums})
     return checksums
 
@@ -1026,27 +1058,37 @@ def verify_package(path: str | os.PathLike[str]) -> dict[str, Any]:
         candidate = Path(path).expanduser().resolve()
         root_current: dict[str, Any] | None = None
         if candidate.is_dir() and (candidate / _CURRENT).is_file():
-            root_current = _read_json(candidate / _CURRENT)
-            expected_path = f"versions/{root_current.get('version_id')}"
-            if root_current.get("version_path") != expected_path:
-                errors.append("CURRENT.json version_path does not match the immutable versions/<version_id> layout")
-            if root_current.get("catalog_json") != f"{expected_path}/catalog.json" or root_current.get("catalog_csv") != f"{expected_path}/catalog.csv":
-                errors.append("CURRENT.json catalog links do not point inside its selected version")
-            errors.extend(_root_catalog_errors(candidate))
+            loaded_current = _read_json(candidate / _CURRENT)
+            if not isinstance(loaded_current, dict):
+                errors.append("CURRENT.json must contain a JSON object")
+            else:
+                root_current = loaded_current
+                expected_path = f"versions/{root_current.get('version_id')}"
+                if root_current.get("version_path") != expected_path:
+                    errors.append("CURRENT.json version_path does not match the immutable versions/<version_id> layout")
+                if root_current.get("catalog_json") != f"{expected_path}/catalog.json" or root_current.get("catalog_csv") != f"{expected_path}/catalog.csv":
+                    errors.append("CURRENT.json catalog links do not point inside its selected version")
+                errors.extend(_root_catalog_errors(candidate))
         version, temp = _resolve_package(path)
         if not version.is_dir():
             raise FileNotFoundError(version)
-        for required in ("PACKAGE.json", "catalog.json", "catalog.csv", "schema.json", "samples", _CHECKSUMS):
+        for required in ("PACKAGE.json", "catalog.json", "catalog.csv", "schema.json", "samples", _VALIDATION, _CHECKSUMS):
             if not (version / required).exists():
                 errors.append(f"missing required package item: {required}")
         if errors:
             return {"valid": False, "path": str(path), "errors": errors}
+        validation_doc = _read_json(version / _VALIDATION)
+        if not isinstance(validation_doc, dict) or validation_doc.get("valid") is not True:
+            errors.append("VALIDATION.json is missing valid=true")
         manifest = _read_json(version / _CHECKSUMS)
         checksums = manifest.get("files") if isinstance(manifest, dict) else None
         if not isinstance(checksums, dict):
             errors.append("CHECKSUMS.json has no files map")
             checksums = {}
-        actual_files = {p.relative_to(version).as_posix() for p in version.rglob("*") if p.is_file() and p.name != _CHECKSUMS}
+        actual_files = {
+            rel for p in version.rglob("*")
+            if p.is_file() and (rel := p.relative_to(version).as_posix()) != _CHECKSUMS
+        }
         if set(checksums) != actual_files:
             missing = sorted(actual_files - set(checksums))[:5]
             extra = sorted(set(checksums) - actual_files)[:5]
@@ -1195,7 +1237,16 @@ def verify_package(path: str | os.PathLike[str]) -> dict[str, Any]:
 def _verify_catalog_csv(path: Path, rows: list[dict[str, Any]], errors: list[str]) -> None:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            actual = list(csv.DictReader(handle))
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            actual = list(reader)
+        if len(fields) != len(set(fields)):
+            errors.append("catalog.csv contains duplicate header columns")
+            return
+        expected_fields = {key for row in rows for key in row}
+        if rows and set(fields) != expected_fields:
+            errors.append("catalog.csv/catalog.json column inventory mismatch")
+            return
         if len(actual) != len(rows):
             errors.append("catalog.csv/catalog.json row count mismatch")
             return
@@ -1213,7 +1264,10 @@ def _verify_frame_csv(path: Path, rows: list[dict[str, Any]], errors: list[str],
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             csv_rows = list(reader)
-            fields = reader.fieldnames or []
+            fields = list(reader.fieldnames or [])
+        if len(fields) != len(set(fields)):
+            errors.append(f"{acquisition_id}: frames.csv contains duplicate header columns")
+            return
         if len(csv_rows) != len(rows):
             errors.append(f"{acquisition_id}: frames.csv/JSONL row count mismatch")
             return
@@ -1243,17 +1297,10 @@ def _verify_frame_csv(path: Path, rows: list[dict[str, Any]], errors: list[str],
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temp.open("xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        if temp.exists():
-            temp.unlink()
+        _storage_atomic_write_bytes(path, data)
+    except CampaignError as exc:
+        raise OSError(exc.message) from exc
 
 
 def _atomic_current(root: Path, version_id: str, version_rel: str, version: Path) -> dict[str, Any]:
@@ -1269,11 +1316,6 @@ def _atomic_current(root: Path, version_id: str, version_rel: str, version: Path
     }
     _write_atomic(root / _CURRENT, _json_bytes(payload))
     return payload
-
-
-def _zip_package(version: Path, target: Path, timeout_s: float) -> str:
-    result = _run_io_worker("zip", [str(version), str(target)], timeout_s)
-    return str(result["sha256"])
 
 
 def _worker_command(arguments: list[str]) -> list[str]:
@@ -1305,7 +1347,7 @@ def _run_io_worker(operation: str, arguments: list[str], timeout_s: float) -> di
     if result.returncode != 0:
         raise RuntimeError(f"{operation} worker failed ({result.returncode}): {result.stderr[-2000:]}")
     try:
-        response = json.loads(result.stdout, parse_constant=_reject_json_constant)
+        response = _storage_strict_json_loads(result.stdout)
     except Exception as exc:
         raise RuntimeError(f"{operation} worker returned invalid receipt: {result.stdout[-1000:]!r}") from exc
     if not isinstance(response, dict) or response.get("ok") is not True:
@@ -1324,6 +1366,53 @@ def _copy_file_within_worker(source: Path, destination: Path, expected_sha256: s
         raise IOError(f"Copied file failed SHA-256 verification: {destination}")
 
 
+def _win32_try_lock_file(fd: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_OVERLAPPED))
+    kernel32.LockFileEx.restype = wintypes.BOOL
+    os_handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+    overlapped = _OVERLAPPED()
+    # LOCKFILE_FAIL_IMMEDIATELY (0x1) | LOCKFILE_EXCLUSIVE_LOCK (0x2)
+    if not kernel32.LockFileEx(os_handle, 0x00000003, 0, 1, 0, ctypes.byref(overlapped)):
+        err = ctypes.get_last_error()
+        raise OSError(err, f"Win32 LockFileEx failed with error {err}")
+
+
+def _win32_unlock_file(fd: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.UnlockFileEx.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_OVERLAPPED))
+    kernel32.UnlockFileEx.restype = wintypes.BOOL
+    os_handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+    overlapped = _OVERLAPPED()
+    kernel32.UnlockFileEx(os_handle, 0, 1, 0, ctypes.byref(overlapped))
+
+
 @contextmanager
 def _publish_lock(publish_root: Path):
     """Serialize writers per destination using OS-released advisory locks.
@@ -1334,20 +1423,17 @@ def _publish_lock(publish_root: Path):
     lock. The file is intentionally retained to avoid delete/recreate races.
     """
     lock_path = publish_root / "PUBLISH_LOCK.json"
-    handle = os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600), "r+b", buffering=0)
-    handle.seek(0, os.SEEK_END)
-    if handle.tell() == 0:
-        handle.write(b"\0")
-        handle.flush()
-        os.fsync(handle.fileno())
-    handle.seek(0)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        handle = os.fdopen(fd, "r+b", buffering=0)
+    except Exception:
+        os.close(fd)
+        raise
     acquired = False
     try:
         if os.name == "nt":
-            import msvcrt
-
             try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                _win32_try_lock_file(handle.fileno())
             except OSError as exc:
                 raise RuntimeError(f"Publish destination is locked by another writer: {lock_path}") from exc
         else:
@@ -1387,8 +1473,7 @@ def _publish_lock(publish_root: Path):
                 write_record(released)
             finally:
                 if os.name == "nt":
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    _win32_unlock_file(handle.fileno())
                 else:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 acquired = False
@@ -1396,8 +1481,7 @@ def _publish_lock(publish_root: Path):
         if acquired:
             try:
                 if os.name == "nt":
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    _win32_unlock_file(handle.fileno())
                 else:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:
@@ -1529,7 +1613,7 @@ def worker_main(argv: Sequence[str] | None = None) -> int:
     if args and args[0] in ("--campaign-io-worker", "--io-worker"):
         args.pop(0)
     if not args:
-        print(json.dumps({"ok": False, "error": "missing worker operation"}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "error": "missing worker operation"}, ensure_ascii=False), file=sys.stderr)
         return 2
     operation, *rest = args
     try:
@@ -1583,95 +1667,105 @@ def export_project(
     given, files are copied sequentially into a resumable staging directory;
     only a fully verified version can atomically replace its ``CURRENT.json``.
     """
-    if timeout_s <= 0:
-        raise ValueError("timeout_s must be positive")
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not math.isfinite(float(timeout_s)) or timeout_s <= 0:
+        raise ValueError("timeout_s must be a positive finite number")
     project_root = Path(project_dir).expanduser().resolve()
     output_root = Path(output).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    _root_files(output_root)
-    version_id = _stage_name(project)
-    versions = output_root / "versions"
-    final_dir = versions / version_id
-    if final_dir.exists():
-        existing = verify_package(final_dir)
-        if existing["valid"]:
-            raise FileExistsError(f"Version is immutable and already exists: {final_dir}")
-        raise FileExistsError(f"Version directory already exists but is invalid: {final_dir}")
-    staging = versions / f".{version_id}.staging-{uuid.uuid4().hex}"
-    archive_path = output_root / "archives" / f"{version_id}.zip"
-    try:
-        staging.mkdir()
-        summary = _build_version(project_root, project, staging, version_id)
-        validation = {
-            "valid": True,
-            "schema_version": "straintrace-package-validation-1",
-            "version_id": version_id,
-            "acquisition_count": summary["acquisition_count"],
-            "frame_count": summary["frame_count"],
-            "checks": ["strict_json_finite", "unique_acquisition_ids", "unique_frame_ids", "CSV_JSONL_value_and_mask_equivalence", "catalog_identity_and_counts"],
-        }
-        _write_json(staging / _VALIDATION, validation)
-        _write_checksum_manifest(staging)
-        validation_result = verify_package(staging)
-        if not validation_result["valid"]:
-            raise ValueError("Local staged package failed verification: " + "; ".join(validation_result["errors"]))
-        # The zip is part of the deliverable receipt, not an input to CURRENT.
-        zip_receipt = _run_io_worker("zip", [str(staging), str(archive_path)], timeout_s)
-        archive_sha = str(zip_receipt["sha256"])
-        zip_report = zip_receipt["verification"]
-        os.replace(staging, final_dir)
-        local_report = verify_package(final_dir)
-        if not local_report["valid"]:
-            raise ValueError("Final local version failed verification; CURRENT was not changed: " + "; ".join(local_report["errors"]))
-        root_errors = _root_catalog_errors(output_root)
-        if root_errors:
-            raise ValueError("Local root index failed verification; CURRENT was not changed: " + "; ".join(root_errors))
-        current = _atomic_current(output_root, version_id, f"versions/{version_id}", final_dir)
-        publish_receipt = None
-        if publish_to is not None:
-            try:
-                publish_receipt = _publish_version(final_dir, Path(publish_to).expanduser().resolve(), version_id, timeout_s)
-            except Exception as exc:
-                destination_state: dict[str, Any] | None = None
+    with _publish_lock(output_root):
+        _root_files(output_root)
+        versions = output_root / "versions"
+        version_id = _stage_name(project, versions_dir=versions)
+        final_dir = versions / version_id
+        if final_dir.exists():
+            existing = verify_package(final_dir)
+            if existing["valid"]:
+                raise FileExistsError(f"Version is immutable and already exists: {final_dir}")
+            raise FileExistsError(f"Version directory already exists but is invalid: {final_dir}")
+        staging = versions / f".{version_id}.staging-{uuid.uuid4().hex}"
+        archive_path = output_root / "archives" / f"{version_id}.zip"
+        archive_created = False
+        promoted_local = False
+        try:
+            staging.mkdir()
+            summary = _build_version(project_root, project, staging, version_id)
+            validation = {
+                "valid": True,
+                "schema_version": "straintrace-package-validation-1",
+                "version_id": version_id,
+                "acquisition_count": summary["acquisition_count"],
+                "frame_count": summary["frame_count"],
+                "checks": ["strict_json_finite", "unique_acquisition_ids", "unique_frame_ids", "CSV_JSONL_value_and_mask_equivalence", "catalog_identity_and_counts"],
+            }
+            _write_json(staging / _VALIDATION, validation)
+            _write_checksum_manifest(staging)
+            validation_result = verify_package(staging)
+            if not validation_result["valid"]:
+                raise ValueError("Local staged package failed verification: " + "; ".join(validation_result["errors"]))
+            # The zip is part of the deliverable receipt, not an input to CURRENT.
+            zip_receipt = _run_io_worker("zip", [str(staging), str(archive_path)], timeout_s)
+            archive_created = True
+            archive_sha = str(zip_receipt["sha256"])
+            zip_report = zip_receipt["verification"]
+            os.replace(staging, final_dir)
+            promoted_local = True
+            local_report = verify_package(final_dir)
+            if not local_report["valid"]:
+                raise ValueError("Final local version failed verification; CURRENT was not changed: " + "; ".join(local_report["errors"]))
+            root_errors = _root_catalog_errors(output_root)
+            if root_errors:
+                raise ValueError("Local root index failed verification; CURRENT was not changed: " + "; ".join(root_errors))
+            current = _atomic_current(output_root, version_id, f"versions/{version_id}", final_dir)
+            publish_receipt = None
+            if publish_to is not None:
                 try:
-                    destination_state = _run_io_worker("inspect", [str(Path(publish_to).expanduser().resolve())], min(max(timeout_s, 0.1), 5.0))
-                except Exception:
+                    publish_receipt = _publish_version(final_dir, Path(publish_to).expanduser().resolve(), version_id, timeout_s)
+                except Exception as exc:
+                    destination_state: dict[str, Any] | None = None
+                    try:
+                        destination_state = _run_io_worker("inspect", [str(Path(publish_to).expanduser().resolve())], min(max(timeout_s, 0.1), 5.0))
+                    except Exception:
+                        pass
+                    if destination_state and destination_state.get("valid") and destination_state.get("current_version_id") == version_id:
+                        publication_status = "PUBLISHED_CURRENT_VERIFIED"
+                    elif destination_state and destination_state.get("valid"):
+                        publication_status = "NOT_PROMOTED_PREVIOUS_CURRENT_VERIFIED"
+                    else:
+                        publication_status = "PUBLICATION_STATE_UNCONFIRMED"
+                    failure = {
+                        "schema_version": "straintrace-publication-failure-1",
+                        "status": publication_status,
+                        "version_id": version_id,
+                        "publish_target": str(Path(publish_to).expanduser().resolve()),
+                        "local_version_path": str(final_dir),
+                        "local_archive_path": str(archive_path),
+                        "local_archive_sha256": archive_sha,
+                        "destination_current_version_id": destination_state.get("current_version_id") if destination_state else None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "local_package_verified": True,
+                        "raw_images_copied": False,
+                    }
+                    _write_atomic(output_root / f"PUBLICATION_{version_id}.json", _json_bytes(_json_safe(failure)))
+                    raise
+            return {
+                "version_id": version_id,
+                "version_path": str(final_dir),
+                "archive_path": str(archive_path),
+                "archive_sha256": archive_sha,
+                "archive_verification": zip_report,
+                "current": current,
+                "verification": local_report,
+                "publish": publish_receipt,
+            }
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if archive_created and not promoted_local and archive_path.exists():
+                try:
+                    archive_path.unlink()
+                except OSError:
                     pass
-                if destination_state and destination_state.get("valid") and destination_state.get("current_version_id") == version_id:
-                    publication_status = "PUBLISHED_CURRENT_VERIFIED"
-                elif destination_state and destination_state.get("valid"):
-                    publication_status = "NOT_PROMOTED_PREVIOUS_CURRENT_VERIFIED"
-                else:
-                    publication_status = "PUBLICATION_STATE_UNCONFIRMED"
-                failure = {
-                    "schema_version": "straintrace-publication-failure-1",
-                    "status": publication_status,
-                    "version_id": version_id,
-                    "publish_target": str(Path(publish_to).expanduser().resolve()),
-                    "local_version_path": str(final_dir),
-                    "local_archive_path": str(archive_path),
-                    "local_archive_sha256": archive_sha,
-                    "destination_current_version_id": destination_state.get("current_version_id") if destination_state else None,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "local_package_verified": True,
-                    "raw_images_copied": False,
-                }
-                _write_json(output_root / f"PUBLICATION_{version_id}.json", failure)
-                raise
-        return {
-            "version_id": version_id,
-            "version_path": str(final_dir),
-            "archive_path": str(archive_path),
-            "archive_sha256": archive_sha,
-            "archive_verification": zip_report,
-            "current": current,
-            "verification": local_report,
-            "publish": publish_receipt,
-        }
-    except Exception:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        raise
+            raise
 
 
 if __name__ == "__main__":

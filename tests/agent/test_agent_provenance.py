@@ -19,10 +19,21 @@ def test_frozen_code_fingerprint_hashes_core_cli_and_all_agent_sources(tmp_path,
     cli_source.write_bytes(b"auditable frozen cli")
     contents = {
         "__init__.py": b"package",
+        "__main__.py": b"entrypoint",
+        "_config.py": b"config code",
+        "_inventory.py": b"inventory code",
+        "_io.py": b"io code",
+        "_locks.py": b"locks code",
+        "_outputs.py": b"outputs code",
+        "_verify.py": b"verify code",
         "api.py": b"api code",
         "cli.py": b"cli code",
+        "discovery.py": b"discovery code",
         "fields.py": b"field code",
+        "gui.py": b"gui code",
         "mechanics.py": b"mechanics code",
+        "regions.py": b"regions code",
+        "reporting.py": b"reporting code",
     }
     for name, payload in contents.items():
         (package / name).write_bytes(payload)

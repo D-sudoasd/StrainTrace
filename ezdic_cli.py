@@ -20,11 +20,33 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
-SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "run_config_v1.json"
-if not SCHEMA_PATH.is_file():
-    from importlib.resources import files
 
-    SCHEMA_PATH = Path(str(files("straintrace_data").joinpath("run_config_v1.json")))
+
+def _default_schema_path() -> Path:
+    local = Path(__file__).resolve().parent / "schemas" / "run_config_v1.json"
+    if local.is_file():
+        return local
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        root = Path(bundle_root).resolve()
+        for candidate in (
+            root / "schemas" / "run_config_v1.json",
+            root / "sources" / "schemas" / "run_config_v1.json",
+        ):
+            if candidate.is_file():
+                return candidate
+    try:
+        from importlib.resources import files
+
+        candidate = Path(str(files("straintrace_data").joinpath("run_config_v1.json")))
+        if candidate.is_file():
+            return candidate
+    except Exception:
+        pass
+    return local
+
+
+SCHEMA_PATH = _default_schema_path()
 EXIT_SUCCESS = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_RUNTIME_ERROR = 3
@@ -155,6 +177,9 @@ def load_schema() -> dict[str, Any]:
     if bundle_root:
         root = Path(bundle_root).resolve()
         schema_candidates.extend((root / "schemas" / "run_config_v1.json", root / "sources" / "schemas" / "run_config_v1.json"))
+    fallback = _default_schema_path()
+    if fallback not in schema_candidates:
+        schema_candidates.append(fallback)
     schema_path = next((path for path in schema_candidates if path.is_file()), schema_candidates[0])
     try:
         value = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -327,6 +352,8 @@ def _normalize_tracking(raw: Any) -> dict[str, Any]:
     result["search_radius_px"] = _integer(result["search_radius_px"], "$.tracking.search_radius_px", minimum=1)
     for key in ("hard_corr", "soft_corr"):
         result[key] = _number(result[key], f"$.tracking.{key}", minimum=0, maximum=1)
+    if float(result["soft_corr"]) > float(result["hard_corr"]):
+        _fail("CONFIG_VALUE_ERROR", "soft_corr must be <= hard_corr", "$.tracking.soft_corr")
     result["enable_adaptive"] = _boolean(result["enable_adaptive"], "$.tracking.enable_adaptive")
     result["use_prev_frame_template"] = _boolean(result["use_prev_frame_template"], "$.tracking.use_prev_frame_template")
     result["template_policy"] = _string(result["template_policy"], "$.tracking.template_policy")
@@ -723,64 +750,43 @@ def _resolve_runtime_paths(normalized: Mapping[str, Any], core: Any) -> list[str
 
 
 def _resolve_code_paths(core_path: Path | None = None) -> list[Path]:
-    """Resolve the complete real source set for source and PyInstaller layouts.
+    """Resolve the complete real source set via :func:`ezdic_core.resolve_code_paths`."""
 
-    The release spec stores executable source copies below ``sources/`` while
-    keeping the schema at the bundle root.  A frozen module's ``__file__`` can
-    point into an archive, so resolution must be based on ``_MEIPASS`` and must
-    include every executable implementation used by a run.
-    """
-
-    module_path = Path(core_path).resolve() if core_path is not None else None
-    roots: list[Path] = []
     bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root:
-        roots.append(Path(bundle_root).resolve())
-    roots.append(Path(__file__).resolve().parent)
-    if module_path is not None and module_path.exists():
-        roots.append(module_path.parent)
-    seen_roots: set[str] = set()
-    for root in roots:
-        root_key = os.path.normcase(os.fspath(root))
-        if root_key in seen_roots:
-            continue
-        seen_roots.add(root_key)
-        candidates_sets = [
-            # Actual ezDIC.spec layout: source copies in ``sources/`` and the
-            # schema in the root ``schemas/`` directory.
-            [
-                root / "sources" / "ezdic_core.py",
-                root / "sources" / "ezdic_cli.py",
-                root / "sources" / "ezdic_benchmark.py",
-                root / "schemas" / "run_config_v1.json",
-            ],
-            # Compatibility layout used by older source/frozen fixtures where
-            # all data were copied below ``sources/``.
-            [
-                root / "sources" / "ezdic_core.py",
-                root / "sources" / "ezdic_cli.py",
-                root / "sources" / "ezdic_benchmark.py",
-                root / "sources" / "schemas" / "run_config_v1.json",
-            ],
-            [
-                root / "ezdic_core.py",
-                root / "ezdic_cli.py",
-                root / "ezdic_benchmark.py",
-                root / "schemas" / "run_config_v1.json",
-            ],
-        ]
-        for candidates in candidates_sets:
-            if all(path.is_file() for path in candidates):
-                return candidates
-        # A frozen runtime must never fall back to hashing only the importer or
-        # schema when one executable source copy is absent.  That would create
-        # a superficially valid but incomplete code fingerprint.
+    requested: list[Path] | None = None
+    if not bundle_root and core_path is not None and Path(core_path).name.casefold() == "ezdic_core.py":
+        requested = [Path(core_path)]
+    try:
+        core = _import_core()
+        resolve_root = Path(bundle_root).resolve() if bundle_root else None
+        if requested is not None and resolve_root is None:
+            try:
+                resolved_core = requested[0].resolve()
+            except OSError:
+                resolved_core = None
+            if resolved_core is not None and resolved_core.is_file():
+                runtime_root = core._runtime_code_root()
+                try:
+                    resolved_core.relative_to(runtime_root)
+                except ValueError:
+                    resolve_root = resolved_core.parent
+        return list(
+            core.resolve_code_paths(
+                paths=requested,
+                include_cli=True,
+                include_benchmark=True,
+                include_schema=True,
+                root=resolve_root,
+            )
+        )
+    except Exception as exc:
         if bundle_root:
             raise ConfigError(
                 "CODE_FILE_SET_INCOMPLETE",
                 "frozen bundle must contain ezdic_core.py, ezdic_cli.py, ezdic_benchmark.py, and run_config_v1.json",
                 "$.code_paths",
-            )
+            ) from exc
+    module_path = Path(core_path).resolve() if core_path is not None else None
     fallback = [
         module_path if module_path is not None and module_path.is_file() else Path(__file__).resolve(),
         Path(__file__).resolve(),
@@ -790,16 +796,19 @@ def _resolve_code_paths(core_path: Path | None = None) -> list[Path]:
 
 
 class _CoreSettings(dict[str, Any]):
-    """Runtime aliases with a canonical snapshot for core manifest sealing."""
+    """Runtime settings dict carrying an immutable canonical config snapshot."""
 
     def __init__(self, runtime: Mapping[str, Any], canonical: Mapping[str, Any]) -> None:
         super().__init__(runtime)
         self._canonical_snapshot = copy.deepcopy(dict(canonical))
+        self.setdefault("_canonical_config", copy.deepcopy(self._canonical_snapshot))
 
-    def items(self):  # type: ignore[override]
-        # ezdic_core._canonical_settings snapshots through items(). Keep
-        # private runtime aliases and _code_paths out of the config hash.
-        return self._canonical_snapshot.items()
+    @property
+    def canonical_config(self) -> dict[str, Any]:
+        return copy.deepcopy(self._canonical_snapshot)
+
+    def copy(self) -> "_CoreSettings":
+        return _CoreSettings(dict.copy(self), self._canonical_snapshot)
 
 
 def build_core_settings(normalized: Mapping[str, Any], core: Any) -> dict[str, Any]:
@@ -915,17 +924,33 @@ def _exit_for_core_error(exc: BaseException) -> int:
     return EXIT_RUNTIME_ERROR
 
 
+def _stream_supports_utf8(stream: Any) -> bool:
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return False
+    return str(encoding).lower().replace("_", "-") in {"utf-8", "utf8", "utf-8-sig"}
+
+
+def _write_json_line(stream: Any, value: Any, *, indent: int | None = None) -> None:
+    ensure_ascii = not _stream_supports_utf8(stream)
+    if indent is None:
+        text = json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    else:
+        text = json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, indent=indent, allow_nan=False)
+    stream.write(text + "\n")
+
+
 def _write_error(code: str, message: str, *, path: str | None = None, exit_code: int | None = None) -> None:
     payload: dict[str, Any] = {"error_code": str(code), "message": str(message)}
     if path is not None:
         payload["path"] = path
     if exit_code is not None:
         payload["exit_code"] = int(exit_code)
-    sys.stderr.write(canonical_json(payload) + "\n")
+    _write_json_line(sys.stderr, payload)
 
 
 def _emit_progress(event: Mapping[str, Any]) -> None:
-    sys.stdout.write(canonical_json(_json_safe(dict(event))) + "\n")
+    _write_json_line(sys.stdout, _json_safe(dict(event)))
     sys.stdout.flush()
 
 
@@ -1045,7 +1070,7 @@ def _run_command(config_path: Path, progress_json: bool) -> int:
                 }
             )
         else:
-            sys.stdout.write(canonical_json(summary) + "\n")
+            _write_json_line(sys.stdout, summary)
         return exit_code
     except ConfigError as exc:
         if progress_json and mode is not None:
@@ -1091,7 +1116,7 @@ def _verify_command(manifest_path: Path) -> int:
             "status": payload.get("status"),
             "errors": verification.get("errors", []) if not verification.get("ok") else ([] if status_ok and scientific_ok and gate_ok else [{"code": "SCIENTIFIC_GATE_FAILED"}]),
         }
-        sys.stdout.write(canonical_json(summary) + "\n")
+        _write_json_line(sys.stdout, summary)
         if not ok:
             _write_error("MANIFEST_INVALID", "manifest integrity or scientific gate verification failed", path="$.manifest", exit_code=EXIT_GATE_ERROR)
             return EXIT_GATE_ERROR
@@ -1114,8 +1139,36 @@ def _config_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, required=True, help="path to run_config_v1 JSON")
 
 
+def _cli_version() -> str:
+    try:
+        from importlib import metadata as importlib_metadata
+
+        return importlib_metadata.version("straintrace")
+    except Exception:
+        pass
+    candidates: list[Path] = []
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        candidates.append(Path(bundle_root).resolve() / "VERSION.txt")
+    candidates.append(Path(__file__).resolve().parent / "VERSION.txt")
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                lines = candidate.read_text(encoding="utf-8-sig").splitlines()
+                first_line = lines[0].strip() if lines else ""
+                if first_line:
+                    parts = first_line.split()
+                    token = parts[-1].lstrip("vV") if parts else first_line
+                    if token:
+                        return token
+            except OSError:
+                continue
+    return "0.1.4"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="ezdic", description="Strict headless ezDIC CLI")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_cli_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     validate = subparsers.add_parser("validate-config", help="validate and print canonical configuration")
     _config_argument(validate)
@@ -1141,14 +1194,15 @@ def _benchmark_command(cases_path: Path | None, output_dir: Path | None) -> int:
         from benchmarks.run_benchmark import BenchmarkError, run_benchmark  # noqa: PLC0415
 
         report = run_benchmark(cases_path=cases_path, output_dir=output_dir)
+        safe_report = _json_safe(report)
+        _write_json_line(sys.stdout, safe_report)
     except BenchmarkError as exc:
         _write_error(exc.code, str(exc), path="$.benchmark", exit_code=exc.exit_code)
         return exc.exit_code
     except Exception as exc:
         _write_error("BENCHMARK_RUNTIME_ERROR", str(exc), path="$.benchmark", exit_code=EXIT_RUNTIME_ERROR)
         return EXIT_RUNTIME_ERROR
-    sys.stdout.write(canonical_json(report) + "\n")
-    return int(report.get("exit_code", EXIT_RUNTIME_ERROR))
+    return int(safe_report.get("exit_code", EXIT_RUNTIME_ERROR))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1172,7 +1226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ConfigError as exc:
             _write_error(exc.code, exc.message, path=exc.path, exit_code=EXIT_CONFIG_ERROR)
             return EXIT_CONFIG_ERROR
-        sys.stdout.write(json.dumps(normalized, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        _write_json_line(sys.stdout, normalized, indent=2)
         return EXIT_SUCCESS
     if args.command == "run":
         return _run_command(args.config, args.progress_json)

@@ -11,7 +11,7 @@ import math
 import os
 import re
 from pathlib import PureWindowsPath
-from typing import Any, Mapping
+from typing import Any
 
 
 class CampaignError(ValueError):
@@ -37,10 +37,36 @@ _ACQUISITION_KEYS = {
     "alignment", "metadata",
 }
 _DIMENSION_KEYS = {"area_mm2", "width_mm", "thickness_mm", "status", "source"}
+_APPROVAL_KEYS = {
+    "proposal_hash", "reference_sha256", "reviewer", "approved_at",
+    "specimen_confirmed", "review_status",
+}
+_CONFIRMED_DIMENSION_STATUSES = {
+    "confirmed", "verified_recorded_dimensions", "verified_recorded_area",
+}
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _bad(code: str, message: str) -> None:
     raise CampaignError(code, message)
+
+
+def _hex64(value: Any, label: str, code: str = "PROJECT_SCHEMA_ERROR") -> str:
+    if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
+        _bad(code, f"{label} must be a 64-character lowercase hex SHA-256")
+    return value
+
+
+def _rect(value: Any, label: str, code: str = "PROJECT_ROI_SCHEMA_ERROR") -> list[int]:
+    if not isinstance(value, list) or len(value) != 4:
+        _bad(code, f"{label} must be [x,y,width,height]")
+    result: list[int] = []
+    for index, coord in enumerate(value):
+        minimum = 1 if index >= 2 else 0
+        if type(coord) is not int or coord < minimum:
+            _bad(code, f"{label}[{index}] must be an integer >= {minimum}")
+        result.append(coord)
+    return result
 
 
 def validate_json_value(value: Any, path: str = "$") -> None:
@@ -99,10 +125,12 @@ def is_absolute_path(value: str) -> bool:
 
 def validate_relative_path(value: Any, label: str) -> str:
     rel = _string(value, label)
+    if "\x00" in rel:
+        _bad("PROJECT_PATH_ESCAPE", f"{label} must not contain NUL bytes")
     # Interpret both separators on every platform; a saved project may travel.
     parts = re.split(r"[\\/]", rel)
     windows_path = PureWindowsPath(rel)
-    if is_absolute_path(rel) or windows_path.drive or any(part == ".." for part in parts):
+    if is_absolute_path(rel) or windows_path.drive or windows_path.root or any(part == ".." for part in parts):
         _bad("PROJECT_PATH_ESCAPE", f"{label} must be a safe relative path")
     return rel
 
@@ -117,16 +145,29 @@ def validate_stage_record(value: Any, label: str) -> None:
         _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label} is missing {missing[0]}")
     _string(record["status"], f"{label}.status")
     _string(record["fingerprint"], f"{label}.fingerprint")
-    validate_relative_path(record["rows_path"], f"{label}.rows_path")
+    rows_rel = validate_relative_path(record["rows_path"], f"{label}.rows_path").replace("\\", "/")
     if not isinstance(record["artifacts"], list):
         _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label}.artifacts must be an array")
+    if not record["artifacts"]:
+        _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label}.artifacts must not be empty")
+    artifact_norms: list[str] = []
     for i, item in enumerate(record["artifacts"]):
-        validate_relative_path(item, f"{label}.artifacts[{i}]")
+        artifact_norms.append(validate_relative_path(item, f"{label}.artifacts[{i}]").replace("\\", "/"))
     checksums = _object(record["checksums"], f"{label}.checksums")
+    if not checksums:
+        _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label}.checksums must not be empty")
+    checksum_norms: dict[str, str] = {}
     for rel, digest in checksums.items():
-        validate_relative_path(rel, f"{label}.checksums key")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label} contains an invalid SHA-256")
+        norm_rel = validate_relative_path(rel, f"{label}.checksums key").replace("\\", "/")
+        _hex64(digest, f"{label}.checksums[{rel!r}]", code="PROJECT_STAGE_SCHEMA_ERROR")
+        if norm_rel in checksum_norms and checksum_norms[norm_rel] != digest:
+            _bad("PROJECT_STAGE_SCHEMA_ERROR", f"{label}.checksums has conflicting duplicate paths for {norm_rel!r}")
+        checksum_norms[norm_rel] = digest
+    if rows_rel not in checksum_norms:
+        _bad("PROJECT_STAGE_CHECKSUM_MISSING", f"{label}.checksums must include rows_path {rows_rel!r}")
+    for art_rel in artifact_norms:
+        if art_rel not in checksum_norms:
+            _bad("PROJECT_STAGE_CHECKSUM_MISSING", f"{label}.checksums is missing artifact {art_rel!r}")
     _object(record["provenance"], f"{label}.provenance")
     _object(record["summary"], f"{label}.summary")
     validate_json_value(record, label)
@@ -162,7 +203,10 @@ def validate_acquisition(value: Any) -> dict[str, Any]:
     _string(dims["status"], "dimensions.status")
     if dims["source"] is not None:
         _string(dims["source"], "dimensions.source")
-    if dims["status"].lower() == "confirmed" and dims["area_mm2"] is not None and not dims["source"]:
+    has_confirmed_area = dims["area_mm2"] is not None or (
+        dims["width_mm"] is not None and dims["thickness_mm"] is not None
+    )
+    if dims["status"].strip().casefold() in _CONFIRMED_DIMENSION_STATUSES and has_confirmed_area and not dims["source"]:
         _bad("DIMENSION_SOURCE_REQUIRED", "a confirmed area requires a non-empty source")
 
     for list_key in ("image_frames", "measurement_frames"):
@@ -188,28 +232,57 @@ def validate_acquisition(value: Any) -> dict[str, Any]:
                     _bad("PROJECT_SCHEMA_ERROR", f"measurement_frames[{i}].scan_id_is_global_fio must be boolean")
                 if "scan_id" not in frame:
                     _bad("PROJECT_SCHEMA_ERROR", f"measurement_frames[{i}] must preserve scan_id explicitly")
+                scan_id = frame["scan_id"]
+                if scan_id is not None and not isinstance(scan_id, str) and type(scan_id) is not int:
+                    _bad("PROJECT_SCHEMA_ERROR", f"measurement_frames[{i}].scan_id must be integer, string, or null")
             for tkey in ("timestamp_unix_s", "estimated_timestamp_unix_s", "time_s", "exposure_start_unix_s", "exposure_end_unix_s"):
                 if tkey in frame:
                     _number_or_null(frame[tkey], f"{list_key}[{i}].{tkey}")
+            for skey in ("timestamp_source", "timestamp_status"):
+                if skey in frame and frame[skey] is not None and not isinstance(frame[skey], str):
+                    _bad("PROJECT_SCHEMA_ERROR", f"{list_key}[{i}].{skey} must be a string or null")
             validate_json_value(frame, f"{list_key}[{i}]")
 
     if acq["roi"] is not None:
         roi = _object(acq["roi"], "acquisition.roi")
-        _string(roi.get("proposal_hash"), "roi.proposal_hash")
-        _string(roi.get("reference_sha256"), "roi.reference_sha256")
-        if not isinstance(roi.get("free_region"), list) or len(roi["free_region"]) != 4:
-            _bad("PROJECT_ROI_SCHEMA_ERROR", "roi.free_region must be [x,y,width,height]")
-        for i, coord in enumerate(roi["free_region"]):
-            _integer(coord, f"roi.free_region[{i}]", minimum=0)
+        _hex64(roi.get("proposal_hash"), "roi.proposal_hash", code="PROJECT_ROI_SCHEMA_ERROR")
+        _hex64(roi.get("reference_sha256"), "roi.reference_sha256", code="PROJECT_ROI_SCHEMA_ERROR")
+        _integer(roi.get("reference_frame"), "roi.reference_frame", minimum=0)
+        _string(roi.get("reference_path"), "roi.reference_path")
+        _rect(roi.get("free_region"), "roi.free_region")
+        if "field_roi" in roi and roi["field_roi"] is not None:
+            _rect(roi["field_roi"], "roi.field_roi")
+        if "exclusions" in roi and roi["exclusions"] is not None:
+            if not isinstance(roi["exclusions"], list):
+                _bad("PROJECT_ROI_SCHEMA_ERROR", "roi.exclusions must be an array")
+            for idx, rect in enumerate(roi["exclusions"]):
+                _rect(rect, f"roi.exclusions[{idx}]")
         if not isinstance(roi.get("groups"), list):
             _bad("PROJECT_ROI_SCHEMA_ERROR", "roi.groups must be an array")
+        for idx, group in enumerate(roi["groups"]):
+            group_obj = _object(group, f"roi.groups[{idx}]")
+            _string(group_obj.get("name"), f"roi.groups[{idx}].name")
+            _rect(group_obj.get("roi1"), f"roi.groups[{idx}].roi1")
+            _rect(group_obj.get("roi2"), f"roi.groups[{idx}].roi2")
+        if "diagnostics" in roi and roi["diagnostics"] is not None:
+            _object(roi["diagnostics"], "roi.diagnostics")
+        if "preview_paths" in roi and roi["preview_paths"] is not None:
+            if not isinstance(roi["preview_paths"], list) or any(not isinstance(item, str) for item in roi["preview_paths"]):
+                _bad("PROJECT_ROI_SCHEMA_ERROR", "roi.preview_paths must be an array of strings")
         validate_json_value(roi, "roi")
     if acq["approval"] is not None:
         approval = _object(acq["approval"], "acquisition.approval")
+        unknown_approval = sorted(set(approval) - _APPROVAL_KEYS)
+        if unknown_approval:
+            _bad("PROJECT_APPROVAL_INVALID", f"approval has unknown field {unknown_approval[0]!r}")
+        _hex64(approval.get("proposal_hash"), "approval.proposal_hash", code="PROJECT_APPROVAL_INVALID")
+        _hex64(approval.get("reference_sha256"), "approval.reference_sha256", code="PROJECT_APPROVAL_INVALID")
         _string(approval.get("reviewer"), "approval.reviewer")
         _string(approval.get("approved_at"), "approval.approved_at")
         if approval.get("specimen_confirmed") is not True:
             _bad("PROJECT_APPROVAL_INVALID", "approval requires explicit specimen_confirmed=true")
+        if "review_status" in approval and approval["review_status"] != "APPROVED":
+            _bad("PROJECT_APPROVAL_INVALID", "approval.review_status must be 'APPROVED'")
         if acq["roi"] is None or approval.get("proposal_hash") != acq["roi"].get("proposal_hash"):
             _bad("PROJECT_APPROVAL_STALE", "approval does not bind the current ROI proposal")
         if approval.get("reference_sha256") != acq["roi"].get("reference_sha256"):

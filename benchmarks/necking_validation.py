@@ -8,8 +8,7 @@ only numerical inversion is monotone Newton iteration in the axial direction.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
+import inspect
 import json
 import platform
 import sys
@@ -22,11 +21,20 @@ from scipy.ndimage import gaussian_filter
 from scipy.special import erf
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-import ezdic_core as core
-from benchmarks.synthetic_cases import analytic_texture
-import benchmarks.synthetic_cases as synthetic_cases
+import ezdic_core as core  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    distribution_stats as _distribution,
+    load_core_module,
+    sha256_bytes,
+    sha256_file,
+    signed_error_stats as _stats,
+    write_json_lf,
+)
+from benchmarks.synthetic_cases import analytic_texture  # noqa: E402
+import benchmarks.synthetic_cases as synthetic_cases  # noqa: E402
 
 SHAPE = (160, 160)
 ROI = (20, 20, 120, 120)
@@ -79,27 +87,6 @@ def image_pair(params):
     return analytic_texture(x, y, seed=SEED), analytic_texture(rx, cy + ry, seed=SEED)
 
 
-def _stats(error):
-    error = np.asarray(error, dtype=float)
-    error = error[np.isfinite(error)]
-    if not error.size:
-        return {"count": 0, "bias": None, "rmse": None, "p95_abs": None, "max_abs": None}
-    return {"count": int(error.size), "bias": float(np.mean(error)),
-            "rmse": float(np.sqrt(np.mean(error**2))),
-            "p95_abs": float(np.percentile(np.abs(error), 95)),
-            "max_abs": float(np.max(np.abs(error)))}
-
-
-def _distribution(values):
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if not values.size:
-        return {"count": 0, "min": None, "median": None, "p95": None, "max": None}
-    return {"count": int(values.size), "min": float(np.min(values)),
-            "median": float(np.median(values)), "p95": float(np.percentile(values, 95)),
-            "max": float(np.max(values))}
-
-
 def _footprint_categories(X, Y, params, solver_params):
     """Classify oracle-deformed subset footprints with a 3-pixel buffer.
 
@@ -132,6 +119,8 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
         raise ValueError("texture_mix must lie between zero and one")
     if not np.isfinite(blur_sigma) or blur_sigma < 0:
         raise ValueError("blur_sigma must be finite and nonnegative")
+    if not np.isfinite(noise_sigma) or noise_sigma < 0:
+        raise ValueError("noise_sigma must be finite and nonnegative")
     if texture_mix:
         y, x = np.indices(SHAPE, dtype=float)
         unrelated = analytic_texture(x, y, seed=SEED + 1)
@@ -161,9 +150,31 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
     valid = np.asarray(field["valid"], dtype=bool).reshape(X.shape)
     strain_valid = np.asarray(field["strain_valid"], dtype=bool).reshape(X.shape)
     measured_eyy = np.asarray(field["Eyy_grid"], dtype=float)
+    fit_support = valid
+    pos_jac = getattr(solver_core, "_positive_deformation_jacobian", None)
+    if callable(pos_jac) and "P" in field:
+        subset_F = np.asarray(field["P"])
+        if subset_F.shape == (*X.shape, 6):
+            fit_support = valid & np.asarray(
+                pos_jac(1 + subset_F[..., 1], subset_F[..., 2], subset_F[..., 4], 1 + subset_F[..., 5]),
+                dtype=bool,
+            )
+    fit_kwargs = {"window": settings["strain_window"], "smooth_sigma": settings["smooth_sigma"]}
+    try:
+        sig = inspect.signature(solver_core.compute_strain_fields)
+        optional_kwargs = {
+            "degree": settings.get("strain_degree", 2),
+            "robust": settings.get("robust_strain", True),
+            "max_condition_number": field.get("max_condition_number", 1e12),
+        }
+        for key, value in optional_kwargs.items():
+            if key in sig.parameters:
+                fit_kwargs[key] = value
+    except (TypeError, ValueError):
+        pass
     oracle_fit = solver_core.compute_strain_fields(
-        X, Y, np.where(valid, u, np.nan), np.where(valid, v, np.nan),
-        window=settings["strain_window"], smooth_sigma=settings["smooth_sigma"])
+        X, Y, np.where(fit_support, u, np.nan), np.where(fit_support, v, np.nan),
+        **fit_kwargs)
     oracle_fit_eyy = np.asarray(oracle_fit["Eyy"], dtype=float)
     disp_error = np.hypot(field["U"] - u, field["V"] - v)
     disp_error[~valid] = np.nan
@@ -177,7 +188,9 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
     for reason in np.asarray(field["invalid_reason"], dtype=object)[~valid.ravel()]:
         counts[str(reason)] = counts.get(str(reason), 0) + 1
     peak_index = np.unravel_index(np.nanargmax(np.where(strain_valid, measured_eyy, np.nan)), X.shape) if strain_valid.any() else None
+    true_peak_val = float(np.max(eyy))
     true_peak_index = np.unravel_index(np.argmax(eyy), X.shape)
+    true_peak_tied_count = int(np.count_nonzero(np.isclose(eyy, true_peak_val, rtol=1e-12, atol=1e-12)))
     line_error = np.asarray([p["estimated_eyy"] - p["true_eyy"]
                              for p in line if p["estimated_eyy"] is not None])
     line_estimates = [p for p in line if p["estimated_eyy"] is not None]
@@ -193,9 +206,11 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
     elif corruption == "unrelated_texture":
         corrupted_acceptance = {"no_physical_correspondence": {"count": int(valid.size),
                                                                 "accepted": int(valid.sum())}}
+    oracle_valid_eyy = oracle_fit_eyy[strain_valid]
+    oracle_valid_eyy = oracle_valid_eyy[np.isfinite(oracle_valid_eyy)]
     # Maximum measured only among valid values and true maximum over the entire
     # eligible grid are reported separately so rejected peaks cannot look good.
-    result = {"input_sha256": hashlib.sha256(reference.tobytes() + target.tobytes()).hexdigest(),
+    result = {"input_sha256": sha256_bytes(reference.tobytes() + target.tobytes()),
             "roi_xywh_px": actual_roi, "local_unrelated_texture_mix": float(texture_mix),
             "target_blur_sigma_px": float(blur_sigma),
             "solver_parameters": settings, "independent_gaussian_image_noise_sigma_gray": noise_sigma,
@@ -204,6 +219,7 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
             "invalid_reason_counts": counts,
             "displacement_vector_error_px": _stats(disp_error),
             "accepted_vector_error_over_0_5_px_count": int(np.count_nonzero(disp_error > 0.5)),
+            "accepted_without_displacement_count": int(np.count_nonzero(valid & ~np.isfinite(disp_error))),
             "eyy_error": _stats(strain_error),
             "centerline_eyy_error": _stats(line_error),
             "centerline_true_peak": {"y_px": line_true_peak["y_px"], "eyy": line_true_peak["true_eyy"]},
@@ -214,22 +230,24 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
                         "thresholds": quality["thresholds"],
                         "zncc_accepted": _distribution(np.asarray(field["zncc"])[valid.ravel()]),
                         "residual_rms_accepted": _distribution(np.asarray(field["residual_rms"])[valid.ravel()])},
-            "true_peak_eyy_on_grid": float(np.max(eyy)),
+            "true_peak_eyy_on_grid": true_peak_val,
             "true_peak_location_xy_px": [float(X[true_peak_index]), float(Y[true_peak_index])],
+            "true_peak_tied_point_count": true_peak_tied_count,
             "estimated_peak_eyy_on_valid_grid": (float(np.max(measured_eyy[strain_valid]))
                                                   if strain_valid.any() else None),
             "estimated_peak_location_xy_px": ([float(X[peak_index]), float(Y[peak_index])]
                                                if peak_index is not None else None),
             "exact_displacement_windowed_eyy_error": _stats(np.where(strain_valid, oracle_fit_eyy - eyy, np.nan)),
-            "exact_displacement_windowed_peak_eyy": (float(np.nanmax(np.where(strain_valid, oracle_fit_eyy, np.nan)))
-                                                      if strain_valid.any() else None),
+            "exact_displacement_windowed_peak_eyy": (float(np.max(oracle_valid_eyy))
+                                                      if oracle_valid_eyy.size else None),
             "corruption": corruption, "corruption_acceptance": corrupted_acceptance,
             "centerline": line, "elapsed_s": elapsed}
     if corruption == "unrelated_texture":
         # No displacement or strain truth exists for unrelated random images.
         for key in ("displacement_vector_error_px", "accepted_vector_error_over_0_5_px_count",
+                    "accepted_without_displacement_count",
                     "eyy_error", "centerline_eyy_error", "centerline_true_peak", "centerline_estimated_peak", "true_peak_eyy_on_grid",
-                    "true_peak_location_xy_px", "estimated_peak_eyy_on_valid_grid",
+                    "true_peak_location_xy_px", "true_peak_tied_point_count", "estimated_peak_eyy_on_valid_grid",
                     "estimated_peak_location_xy_px", "exact_displacement_windowed_eyy_error",
                     "exact_displacement_windowed_peak_eyy", "centerline"):
             result[key] = None
@@ -241,15 +259,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--core-file", type=Path, help="Archived core for a matched comparison")
     args = parser.parse_args()
-    solver_core = core
-    if args.core_file:
-        spec = importlib.util.spec_from_file_location("archived_necking_core", args.core_file)
-        solver_core = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(solver_core)
-    result = {"schema": "necking-validation-v1", "core_sha256": hashlib.sha256(
-                  Path(solver_core.__file__).read_bytes()).hexdigest(),
-              "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "texture_source_sha256": hashlib.sha256(Path(synthetic_cases.__file__).read_bytes()).hexdigest(),
+    solver_core = load_core_module(args.core_file, "archived_necking_core") if args.core_file else core
+    result = {"schema": "necking-validation-v1", "core_sha256": sha256_file(solver_core.__file__),
+              "benchmark_sha256": sha256_file(__file__),
+              "texture_source_sha256": sha256_file(synthetic_cases.__file__),
               "python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__,
               "shape": SHAPE, "roi": ROI, "texture_seed": SEED, "solver_parameters": PARAMETERS,
               "strain_definition": "Green-Lagrange Eyy in reference coordinates, dimensionless",
@@ -271,8 +284,7 @@ def main():
         result["cases"][name] = {"deformation": CASES["narrow_localization"],
                                   **run_case(CASES["narrow_localization"], solver_core,
                                              solver_params=settings, noise_sigma=noise)}
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    write_json_lf(args.output, result, indent=2, allow_nan=False)
     print(json.dumps(result, indent=2, allow_nan=False))
 
 

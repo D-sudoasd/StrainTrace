@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 
-import numpy as np
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+from benchmarks._common import (  # noqa: E402
+    compact_vector_stats as stats,
+    sha256_file as digest,
+    write_json_lf,
+)
 
 
 def load_points(report_path, report):
@@ -46,25 +50,17 @@ def displacement_error(row):
                       number(row["v_px"])-number(row["true_v_px"]))
 
 
-def stats(values):
-    values = np.asarray(values, dtype=float)
-    finite = values[np.isfinite(values)]
-    return {"count": int(finite.size),
-            "rmse": float(np.sqrt(np.mean(finite**2))) if finite.size else None,
-            "max_abs": float(np.max(np.abs(finite))) if finite.size else None}
-
-
 def _parameter_difference(before, after, *, allow_experimental_policy_difference=False):
     """Permit only an explicitly requested change in the experimental flag."""
-    if not allow_experimental_policy_difference:
-        if before != after:
-            raise ValueError("solver_parameters differ; experimental policy changes require explicit opt-in")
-        return {}
     a, b = dict(before), dict(after)
     old = a.pop("experimental_full_search", False)
     new = b.pop("experimental_full_search", False)
     if type(old) is not bool or type(new) is not bool:
         raise ValueError("experimental_full_search must be a Boolean")
+    if not allow_experimental_policy_difference:
+        if before != after:
+            raise ValueError("solver_parameters differ; experimental policy changes require explicit opt-in")
+        return {}
     if a != b:
         raise ValueError("solver_parameters differ beyond experimental_full_search")
     return {"experimental_full_search": {"before": old, "after": new}} if old != new else {}
@@ -133,10 +129,12 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
             "strain_valid_before_after": [old["strain_valid_count"], new["strain_valid_count"]],
             "common_valid_count": len(common), "common_strain_valid_count": len(common_strain),
             "gained_valid_count": len(gained), "lost_valid_count": len(lost),
-            "newly_rejected_old_error_le_0_5_px": sum(error <= cutoff for error in lost_errors),
-            "newly_rejected_old_error_gt_0_5_px": sum(error > cutoff for error in lost_errors),
-            "newly_accepted_error_le_0_5_px": sum(error <= cutoff for error in gained_errors),
-            "newly_accepted_error_gt_0_5_px": sum(error > cutoff for error in gained_errors),
+            "newly_rejected_old_error_le_0_5_px": sum(math.isfinite(error) and error <= cutoff for error in lost_errors),
+            "newly_rejected_old_error_gt_0_5_px": sum(math.isfinite(error) and error > cutoff for error in lost_errors),
+            "newly_rejected_without_displacement": sum(not math.isfinite(error) for error in lost_errors),
+            "newly_accepted_error_le_0_5_px": sum(math.isfinite(error) and error <= cutoff for error in gained_errors),
+            "newly_accepted_error_gt_0_5_px": sum(math.isfinite(error) and error > cutoff for error in gained_errors),
+            "newly_accepted_without_displacement": sum(not math.isfinite(error) for error in gained_errors),
             "gained_valid_xy_px": gained, "lost_valid_xy_px": lost,
             "common_displacement_error_before_px": stats([displacement_error(pa[p]) for p in common]),
             "common_displacement_error_after_px": stats([displacement_error(pb[p]) for p in common]),
@@ -151,10 +149,7 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
             "scientific_reasons_before_after": [old["quality"]["scientific_reasons"], new["quality"]["scientific_reasons"]],
         }
         result["cases"][name] = record
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8") as stream:
-        json.dump(result, stream, indent=2, allow_nan=False)
-        stream.write("\n")
+    write_json_lf(output, result, exclusive=True, indent=2, allow_nan=False)
     return result
 
 

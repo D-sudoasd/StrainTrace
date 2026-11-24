@@ -1,4 +1,5 @@
 from pathlib import Path
+import gc
 import os
 import shutil
 import subprocess
@@ -29,11 +30,20 @@ def gui_app(tmp_path_factory):
     os.environ["EZDIC_RECENT_CONFIG"] = str(recent_config)
     root = tk.Tk()
     root.withdraw()
+    app = None
     try:
         app = ezdic.MultiROIGUI(root)
         root.update_idletasks()
         yield root, app
     finally:
+        for job in root.tk.call("after", "info"):
+            root.after_cancel(job)
+        if app is not None:
+            for variable in vars(app).values():
+                if isinstance(variable, tk.Variable):
+                    for modes, callback in variable.trace_info():
+                        variable.trace_remove(modes, callback)
+        gc.collect()
         root.destroy()
         if old_recent_config is None:
             os.environ.pop("EZDIC_RECENT_CONFIG", None)
@@ -280,8 +290,14 @@ def test_app_metadata_and_usage_notice_are_explicit():
     assert DOI in ezdic.USAGE_NOTICE
     assert "Gong, D. (2026)." in ezdic.CITATION_TEXT
     assert DOI_URL in ezdic.CITATION_TEXT
-    assert "claim that they developed this software" in ezdic.USAGE_NOTICE
-    assert "redistribute, copy, forward, or share" in ezdic.USAGE_NOTICE
+    assert "MIT License" in ezdic.USAGE_NOTICE
+    assert "redistribution are permitted under the MIT License" in ezdic.USAGE_NOTICE
+    assert "WITHOUT WARRANTY OF ANY KIND" in ezdic.USAGE_NOTICE
+    assert "not an additional license restriction" in ezdic.USAGE_NOTICE
+    notice_lower = ezdic.USAGE_NOTICE.lower()
+    assert "users are not permitted to" not in notice_lower
+    assert "redistribute, copy, forward, or share" not in notice_lower
+    assert "outside the authorized research" not in notice_lower
 
 
 def test_window_title_contains_developer(gui_app):

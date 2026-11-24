@@ -6,35 +6,33 @@ Example: python -m benchmarks.necking_candidate_validation --baseline-core
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
-import json
 from pathlib import Path
-import platform
 import sys
 import time
 
-import cv2
 import numpy as np
-import scipy
 from scipy.ndimage import gaussian_filter
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-import ezdic_core as current
-from benchmarks.necking_search_validation import (
+import ezdic_core as current  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    load_core_module,
+    runtime_environment,
+    set_deterministic_rng,
+    sha256_bytes,
+    sha256_file,
+    threshold_vector_stats as stats,
+    write_json_lf,
+)
+from benchmarks.necking_search_validation import (  # noqa: E402
     ROI, SETTINGS, displacement_truth, make_case,
 )
 
 
 def load_core(path):
-    spec = importlib.util.spec_from_file_location("candidate_baseline_core", path)
-    if spec is None or spec.loader is None:
-        raise ValueError("cannot load baseline core")
-    core = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(core)
-    return core
+    return load_core_module(path, "candidate_baseline_core")
 
 
 def copied_patch(noise):
@@ -44,15 +42,6 @@ def copied_patch(noise):
     target[50:71, 55:76] += rng.normal(size=(21, 21)).astype("float32")*noise
     target[67:88, 72:93] = reference[50:71, 50:71]
     return reference, target
-
-
-def stats(values):
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if not values.size:
-        return {"count": 0, "rmse_px": None, "max_px": None, "over_0_5_px_count": 0}
-    return {"count": int(values.size), "rmse_px": float(np.sqrt(np.mean(values**2))),
-            "max_px": float(values.max()), "over_0_5_px_count": int((values>.5).sum())}
 
 
 def field_metrics(field, truth_u, truth_v, center=None):
@@ -84,6 +73,7 @@ def field_metrics(field, truth_u, truth_v, center=None):
 
 
 def compare(baseline, *, experimental_full_search=False):
+    set_deterministic_rng(0)
     rows = []
     cases = []
     for name in ("uniform_affine", "localized_shear_band"):
@@ -112,7 +102,7 @@ def compare(baseline, *, experimental_full_search=False):
         dm, de, dv = field_metrics(default, truth_u, truth_v, center)
         am, ae, av = field_metrics(after, truth_u, truth_v, center)
         common = bv & av
-        rows.append({"case": name, "input_sha256": hashlib.sha256(reference.tobytes()+target.tobytes()).hexdigest(),
+        rows.append({"case": name, "input_sha256": sha256_bytes(reference.tobytes()+target.tobytes()),
             "roi": list(roi), "settings": current.canonicalize_json(settings),
             "after_experimental_full_search": bool(experimental_full_search),
             "before": bm, "after": am,
@@ -141,11 +131,11 @@ def compare(baseline, *, experimental_full_search=False):
                         "median_default_over_before":float(np.median(samples["current_default"])/np.median(samples["before"])),
                         "median_after_over_before":float(np.median(samples["after"])/np.median(samples["before"]))})
     return {"report_version":"necking-candidate-paired-v3",
-        "after_experimental_full_search": bool(experimental_full_search), "environment":{
-        "python":platform.python_version(),"numpy":np.__version__,"scipy":scipy.__version__,"opencv":cv2.__version__},
-        "source_sha256":{label:hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest()
+        "after_experimental_full_search": bool(experimental_full_search),
+        "environment": runtime_environment(include_opencv=True),
+        "source_sha256":{label:sha256_file(core.__file__)
                          for label,core in (("before",baseline),("after",current))},
-        "script_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "script_sha256":sha256_file(__file__),
         "limitations":["The 0.5 px cutoff classifies this benchmark's errors; it is not an experimental uncertainty or universal accuracy requirement.",
                        "Copied patches deliberately violate texture conservation while retaining known nominal displacement.",
                        "A strongest-secondary-peak check can miss alternatives outside its domain, below its preselection threshold, or beyond the one retained peak.",
@@ -163,11 +153,10 @@ def main():
     parser.add_argument("--experimental-full-search", action="store_true",
                         help="Explicitly evaluate the unvalidated full-radius/secondary-peak research mode")
     args=parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(f"Use a new output path; refusing to overwrite existing report: {args.output}")
     result=compare(load_core(args.baseline_core.resolve()), experimental_full_search=args.experimental_full_search)
-    args.output.parent.mkdir(parents=True,exist_ok=True)
-    with args.output.open("x",encoding="utf-8") as handle:
-        json.dump(result,handle,ensure_ascii=False,indent=2,allow_nan=False)
-        handle.write("\n")
+    write_json_lf(args.output, result, exclusive=True, indent=2, ensure_ascii=False, allow_nan=False)
 
 
 if __name__ == "__main__":

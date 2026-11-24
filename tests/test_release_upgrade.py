@@ -74,8 +74,25 @@ def test_pyinstaller_spec_contains_two_entrypoints_and_runtime_data():
         "ezdic_core",
         "ezdic_cli",
         "ezdic_benchmark",
+        "ezdic_gui",
+        "ezdic_gui.tooltips",
+        "ezdic_gui.theme",
+        "ezdic_gui.canvas",
+        "ezdic_gui.viewers",
+        "benchmarks/_common.py",
+        "benchmarks._common",
+        "straintrace_campaign.__main__",
+        "straintrace_campaign._time_io",
+        "straintrace_agent.__main__",
+        "straintrace_agent._io",
+        "straintrace_agent._locks",
+        "straintrace_agent._config",
+        "straintrace_agent._inventory",
+        "straintrace_agent._outputs",
+        "straintrace_agent._verify",
         "straintrace_agent.mechanics",
         "schemas/run_config_v1.json",
+        "schemas/campaign_config_v1.json",
         "README.md",
         "RELEASE_NOTES_v0.2.0-dev.md",
         "NOTICE_Attribution_and_Usage.txt",
@@ -243,17 +260,42 @@ def _make_simulated_bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
     internal = bundle / "_internal"
     (internal / "schemas").mkdir(parents=True)
     (internal / "sources" / "benchmarks").mkdir(parents=True)
+    (internal / "sources" / "ezdic_gui").mkdir(parents=True)
+    (internal / "sources" / "straintrace_campaign").mkdir(parents=True)
+    (internal / "sources" / "straintrace_agent").mkdir(parents=True)
     (internal / "benchmarks").mkdir(parents=True)
     for name in ("ezDIC.exe", "ezDIC-cli.exe"):
         (bundle / name).write_bytes(b"simulated executable")
     for relative in (
         "_internal/schemas/run_config_v1.json",
+        "_internal/schemas/campaign_config_v1.json",
         "_internal/benchmarks/cases_v1.json",
         "_internal/sources/ezdic_core.py",
         "_internal/sources/ezdic_cli.py",
         "_internal/sources/ezdic_benchmark.py",
+        "_internal/sources/ezdic_gui/__init__.py",
+        "_internal/sources/ezdic_gui/tooltips.py",
+        "_internal/sources/ezdic_gui/theme.py",
+        "_internal/sources/ezdic_gui/canvas.py",
+        "_internal/sources/ezdic_gui/viewers.py",
+        "_internal/sources/benchmarks/_common.py",
         "_internal/sources/benchmarks/run_benchmark.py",
         "_internal/sources/benchmarks/synthetic_cases.py",
+        "_internal/sources/straintrace_campaign/__init__.py",
+        "_internal/sources/straintrace_campaign/__main__.py",
+        "_internal/sources/straintrace_campaign/_time_io.py",
+        "_internal/sources/straintrace_campaign/workflow.py",
+        "_internal/sources/straintrace_campaign/cli.py",
+        "_internal/sources/straintrace_agent/__init__.py",
+        "_internal/sources/straintrace_agent/__main__.py",
+        "_internal/sources/straintrace_agent/_io.py",
+        "_internal/sources/straintrace_agent/_locks.py",
+        "_internal/sources/straintrace_agent/_config.py",
+        "_internal/sources/straintrace_agent/_inventory.py",
+        "_internal/sources/straintrace_agent/_outputs.py",
+        "_internal/sources/straintrace_agent/_verify.py",
+        "_internal/sources/straintrace_agent/api.py",
+        "_internal/sources/straintrace_agent/cli.py",
     ):
         target = bundle / Path(relative)
         target.write_bytes(b"simulated source/data")
@@ -277,14 +319,99 @@ def test_bundle_inventory_accepts_actual_onedir_layout_and_requires_gui_source(t
     result = _run_bundle_test(script, bundle, fixture)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "inventory/provenance test accepted" in output
+    assert "inventory/provenance test accepted" in " ".join(output.split())
 
     gui_source = bundle / "_internal" / "sources" / "dic_virtual_extensometer_gui_v7_multi_roi_range.py"
     gui_source.unlink()
     missing = _run_bundle_test(script, bundle, fixture)
     missing_output = missing.stdout + missing.stderr
     assert missing.returncode != 0, missing_output
-    assert "dic_virtual_extensometer_gui_v7_multi_roi_range.py" in missing_output
+    # PowerShell wraps redirected stderr at 80 columns, splitting long paths across lines.
+    assert "dic_virtual_extensometer_gui_v7_multi_roi_range.py" in re.sub(r"\s+", "", missing_output)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="bundle inventory uses PowerShell")
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "_internal/schemas/campaign_config_v1.json",
+        "_internal/sources/ezdic_gui/viewers.py",
+        "_internal/sources/benchmarks/_common.py",
+        "_internal/sources/straintrace_campaign/_time_io.py",
+        "_internal/sources/straintrace_campaign/workflow.py",
+        "_internal/sources/straintrace_agent/_verify.py",
+        "_internal/sources/straintrace_agent/api.py",
+    ],
+)
+def test_bundle_inventory_requires_campaign_and_agent_artifacts(tmp_path, relative):
+    fixture, script, bundle = _make_simulated_bundle(tmp_path)
+    (bundle / Path(relative)).unlink()
+    missing = _run_bundle_test(script, bundle, fixture)
+    missing_output = missing.stdout + missing.stderr
+    assert missing.returncode != 0, missing_output
+    assert Path(relative).name in re.sub(r"\s+", "", missing_output)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="release contract check uses PowerShell")
+@pytest.mark.parametrize("target_file", ["pyproject.toml", "ezdic_core.py"])
+def test_build_release_contracts_reject_pyproject_or_core_version_mismatch(tmp_path, target_file):
+    fixture = tmp_path / "version_mismatch_fixture"
+    fixture.mkdir()
+    script = fixture / "build_release.ps1"
+    shutil.copy2(ROOT / "build_release.ps1", script)
+    for name in (
+        "VERSION.txt",
+        "dic_virtual_extensometer_gui_v7_multi_roi_range.py",
+        ".zenodo.json",
+        "CITATION.cff",
+        "requirements.txt",
+        "requirements-origin.txt",
+        "requirements-build.txt",
+        "ezDIC.spec",
+        "README_使用说明.txt",
+        "NOTICE_Attribution_and_Usage.txt",
+        "LICENSE.txt",
+        "pyproject.toml",
+        "ezdic_core.py",
+    ):
+        shutil.copy2(ROOT / name, fixture / name)
+
+    mutated = fixture / target_file
+    text = mutated.read_text(encoding="utf-8")
+    if target_file == "pyproject.toml":
+        mutated.write_text(text.replace('version = "0.1.4"', 'version = "9.9.9"', 1), encoding="utf-8")
+    else:
+        mutated.write_text(text.replace('APP_VERSION = "0.1.4"', 'APP_VERSION = "9.9.9"', 1), encoding="utf-8")
+
+    # Execute the real Test-ReleaseContracts function from build_release.ps1
+    # via a temporary wrapper script in the fixture so $MyInvocation.MyCommand.Path
+    # resolves $Root to fixture without creating a build venv.
+    script_text = script.read_text(encoding="utf-8")
+    prefix = script_text[: script_text.index("# Check the repository root")]
+    runner = fixture / "run_release_contracts.ps1"
+    runner.write_text(prefix + "\r\nTest-ReleaseContracts\r\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(runner),
+            "-Version",
+            "0.1.4",
+        ],
+        cwd=fixture,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert target_file in re.sub(r"\s+", "", output)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="reparse-point guard requires Windows filesystem attributes")
@@ -427,6 +554,39 @@ def test_requirements_and_ci_pin_python_delivery_contract():
     assert "PyInstaller" in ci
     assert "EZDIC_FROZEN_SMOKE_MARKER" in ci
     assert "ezDIC-cli.exe" in ci
+    assert "permissions:" in ci
+    assert "contents: read" in ci
+    assert "git ls-files '*.py'" in ci
+
+
+def test_manifest_includes_required_metadata_and_excludes_local_desy_files():
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    for token in (
+        ".zenodo.json",
+        "CONTRIBUTING.md",
+        "SUPPORT.md",
+        ".github/workflows/ci.yml",
+        "examples/paired_dic_comparison.json",
+        "*.csv",
+        "exclude tests/test_desy_*.py",
+        "exclude scripts/*desy*.py",
+    ):
+        assert token in manifest, token
+
+
+def test_pyproject_declares_all_modular_packages():
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    packages = set(data["tool"]["setuptools"]["packages"])
+    assert {
+        "benchmarks",
+        "ezdic_gui",
+        "straintrace_data",
+        "straintrace_campaign",
+        "straintrace_campaign.adapters",
+        "straintrace_agent",
+    } <= packages
 
 
 def test_development_docs_state_scope_metrics_limits_and_attribution():

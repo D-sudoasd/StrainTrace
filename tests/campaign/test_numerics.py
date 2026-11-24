@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import csv
 from pathlib import Path
 
@@ -196,5 +195,62 @@ def test_fullfield_mode_keeps_component_results_separate_from_extensometer_avera
     assert len(rows) == 3
     assert all(row["engineering_strain"] is None and row["true_strain"] is None for row in rows)
     assert all(row["strain_status"] == "FIELD_ONLY_NO_ENGINEERING_AGGREGATE" for row in rows)
+    assert all(isinstance(row["reasons"], list) for row in rows)
     assert result["summary"]["valid_mean_frame_count"] == 2
     assert any(path.endswith("Exx_map.txt") for path in result["artifacts"])
+
+
+def test_numerics_policy_flat_columns_mask_fingerprint_and_texture_preflight(tmp_path):
+    acquisition, reference, paths = _campaign(tmp_path)
+    with pytest.raises(CampaignError, match="unsupported normalization policy"):
+        numerics._normalization(reference, {"normalization": {"policy": "typo_policy"}})
+
+    flat = numerics._flat_gauge_columns([
+        {"name": "custom_top", "accepted": True, "engineering_strain": 0.01},
+        {"name": "G01", "accepted": True, "engineering_strain": 0.02},
+    ])
+    assert flat["G01_engineering_strain"] == 0.02
+    assert flat["G02_engineering_strain"] == 0.01
+
+    # Fingerprint tracks frame_namespace, duplicate_source_paths, and external mask bytes.
+    mask_file = tmp_path / "mask.png"
+    mask_file.write_bytes(b"mask-v1")
+    acquisition["analysis_config"]["mask"] = {"path": str(mask_file)}
+    fp1 = numerics.fingerprint(acquisition, project_dir=tmp_path)
+    mask_file.write_bytes(b"mask-v2")
+    fp2 = numerics.fingerprint(acquisition, project_dir=tmp_path)
+    assert fp1 != fp2
+
+    acquisition["image_frames"][0]["frame_namespace"] = "custom_ns"
+    fp3 = numerics.fingerprint(acquisition, project_dir=tmp_path)
+    assert fp3 != fp2
+
+    # Low-texture reference ROI must fail reference texture preflight instead of silently tracking.
+    flat_ref = np.full((256, 256), 120, dtype=np.uint8)
+    _save(paths[0], flat_ref)
+    acquisition["roi"]["reference_sha256"] = sha256_file(paths[0])
+    acquisition["roi"]["proposal_hash"] = roi.proposal_hash(acquisition["roi"])
+    acquisition["approval"] = roi.approve(acquisition, "reviewer", specimen_confirmed=True)
+    with pytest.raises(CampaignError) as exc:
+        numerics.analyze(acquisition, tmp_path)
+    assert exc.value.code in {"LOW_TEXTURE", "SATURATED_TEXTURE", "AMBIGUOUS_TEXTURE"}
+
+
+def test_code_fingerprints_cover_all_campaign_modules_including_time_io(tmp_path):
+    from straintrace_campaign import storage, workflow
+
+    fingerprints = numerics._code_fingerprints()
+    campaign_root = Path(storage.__file__).resolve().parent
+    actual_modules = sorted(
+        f"straintrace_campaign/{path.relative_to(campaign_root).as_posix()}"
+        for path in campaign_root.rglob("*.py")
+    )
+    for rel in actual_modules:
+        assert rel in fingerprints, f"missing module fingerprint: {rel}"
+        assert len(fingerprints[rel]) == 64
+    assert "straintrace_campaign/_time_io.py" in fingerprints
+    assert "straintrace_campaign/__main__.py" in fingerprints
+    assert "ezdic_core.py" in fingerprints
+
+    acquisition, _ref, _paths = _campaign(tmp_path)
+    assert numerics._roi_tracking_geometry(acquisition) == workflow._roi_tracking_geometry(acquisition)

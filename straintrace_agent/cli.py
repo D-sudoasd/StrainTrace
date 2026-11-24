@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
 from . import api
+from ._io import _json_safe
 
 
 EXIT_OK = 0
@@ -15,11 +17,29 @@ EXIT_CONFIG = 2
 EXIT_RUNTIME = 3
 EXIT_QUALITY = 4
 
+_CONFIG_ERROR_PREFIXES = (
+    "CONFIG", "CLI_", "JSON_INPUT_", "LOAD_", "CALIBRATION_",
+    "GAUGE_", "DISPLACEMENT_", "FRAME_MAP_",
+)
+_CONFIG_ERROR_CODES = frozenset({
+    "FORCE_UNIT", "AREA_WITHOUT_FORCE",
+    "FRAME_TIME_REQUIRED", "FRAME_TIME_ORDER",
+    "FRAME_ID_AMBIGUOUS", "FRAME_ID_DUPLICATE", "FRAME_ID_ORDER",
+    "MASK_FILE_MISSING", "MASK_DIMENSION_MISMATCH",
+    "EXCLUSION_OUTSIDE_IMAGE", "ROI_OUTSIDE_IMAGE", "ROI_TOO_SMALL",
+    "REFERENCE_FRAME_UNKNOWN", "COMPONENT_INVALID", "PATH_TOLERANCE_REQUIRED",
+    "PROJECT_INSIDE_IMAGE_DIRECTORY", "PROJECT_ALREADY_EXISTS",
+    "PROJECT_SCHEMA_UNSUPPORTED", "EXPERIMENT_DIRECTORY_MISSING",
+    "EXPERIMENT_SCHEMA", "IMAGE_DIRECTORY_MISSING", "NO_IMAGES",
+    "BATCH_EMPTY", "BATCH_DUPLICATE_PROJECT", "BATCH_WORKERS",
+    "LOCK_PID_INVALID",
+})
+
 
 def _emit(value: Any) -> None:
     # JSON escapes keep JSONL safe on Windows consoles using legacy code pages
     # while json.loads still restores the original Unicode values.
-    sys.stdout.write(json.dumps(api._json_safe(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+    sys.stdout.write(json.dumps(_json_safe(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
     sys.stdout.flush()
 
 
@@ -37,13 +57,13 @@ def _parse_rect(text: str, label: str, *, float_values: bool = False) -> list[in
     try:
         values = [float(part.strip()) for part in text.split(",")]
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{label} must be four comma-separated numbers") from exc
-    if len(values) != 4 or not all(__import__("math").isfinite(value) for value in values):
-        raise argparse.ArgumentTypeError(f"{label} must be four finite comma-separated numbers")
+        raise api.AgentError("CLI_USAGE_ERROR", f"{label} must be four comma-separated numbers", path=f"$.{label}") from exc
+    if len(values) != 4 or not all(math.isfinite(value) for value in values):
+        raise api.AgentError("CLI_USAGE_ERROR", f"{label} must be four finite comma-separated numbers", path=f"$.{label}")
     if float_values:
         return values
     if any(value != int(value) for value in values):
-        raise argparse.ArgumentTypeError(f"{label} values must be integers")
+        raise api.AgentError("CLI_USAGE_ERROR", f"{label} values must be integers", path=f"$.{label}")
     return [int(value) for value in values]
 
 
@@ -176,7 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 area_mm2=args.area_mm2, displacement_column=args.displacement_column,
                 displacement_unit=args.displacement_unit, displacement_source=args.displacement_source,
                 machine_gauge_length_mm=args.machine_gauge_length_mm, mask_file=args.mask_file,
-                roi_override_px=_parse_rect(args.roi, "roi") if args.roi else None,
+                roi_override_px=_parse_rect(args.roi, "roi") if args.roi is not None else None,
                 exclusions_px=[_parse_rect(item, "exclude") for item in args.exclude],
                 gauges=_json_file(args.gauges_json, list, "gauges JSON"),
                 regions=_json_file(args.regions_json, list, "regions JSON"),
@@ -209,7 +229,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "export":
             _emit(api.export(args.project, field_csv=args.field_csv))
         elif args.command == "extract":
-            roi = _parse_rect(args.roi, "roi", float_values=True) if args.roi else None
+            roi = _parse_rect(args.roi, "roi", float_values=True) if args.roi is not None else None
             points = _json_file(args.path_json, list, "path JSON")
             result = api.extract(args.project, component=args.component, roi=roi, path_points=points, max_distance=args.max_distance, coordinate_system=args.coordinate_system)
             _emit(result)
@@ -253,7 +273,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit({"event": "error", **exc.as_dict()})
         if exc.code == "PLAN_REVIEW_REQUIRED":
             return EXIT_QUALITY
-        return EXIT_CONFIG if exc.code.startswith("CONFIG") or exc.code.startswith("CLI_") else EXIT_RUNTIME
+        if exc.code.startswith(_CONFIG_ERROR_PREFIXES) or exc.code in _CONFIG_ERROR_CODES:
+            return EXIT_CONFIG
+        return EXIT_RUNTIME
     except Exception as exc:
         _emit({"event": "error", "error_code": "AGENT_RUNTIME_ERROR", "message": f"{type(exc).__name__}: {exc}", "path": "$"})
         return EXIT_RUNTIME

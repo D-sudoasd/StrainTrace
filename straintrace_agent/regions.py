@@ -227,6 +227,7 @@ def summarize_regions(
 def recommend_regions(
     image: np.ndarray, subset_size: int, step: int, *,
     specimen_mask: np.ndarray | None = None, max_regions: int = 3,
+    analysis_roi: Sequence[int] | None = None,
 ) -> dict:
     """Rank a bounded set of sizes/positions using existing texture checks.
 
@@ -254,14 +255,24 @@ def recommend_regions(
     normalization = core.compute_reference_normalization(raw)
     image8 = core.normalize_with_bounds(raw, normalization["reference_bounds"])
     height, width = raw.shape
+    if analysis_roi is not None:
+        if not isinstance(analysis_roi, (list, tuple)) or len(analysis_roi) != 4:
+            raise ValueError("analysis_roi must be [x, y, width, height]")
+        if any(isinstance(value, (bool, np.bool_)) or type(value) is not int for value in analysis_roi):
+            raise ValueError("analysis_roi must contain integer pixel coordinates")
+        base_x, base_y, base_w, base_h = (int(value) for value in analysis_roi)
+        if base_x < 0 or base_y < 0 or base_w <= 0 or base_h <= 0 or base_x + base_w > width or base_y + base_h > height:
+            raise ValueError("analysis_roi must lie within image bounds with positive dimensions")
+    else:
+        base_x, base_y, base_w, base_h = 0, 0, width, height
     candidates, rejected, seen = [], [], set()
     for fraction in (0.35, 0.55, 0.80):
-        rw = min(width, max(subset_size + 2 * step, int(round(width * fraction))))
-        rh = min(height, max(subset_size + 2 * step, int(round(height * fraction))))
+        rw = min(base_w, max(subset_size + 2 * step, int(round(base_w * fraction))))
+        rh = min(base_h, max(subset_size + 2 * step, int(round(base_h * fraction))))
         for fy in (0.25, 0.50, 0.75):
             for fx in (0.25, 0.50, 0.75):
-                left = max(0, min(width - rw, int(round(width * fx - rw / 2))))
-                top = max(0, min(height - rh, int(round(height * fy - rh / 2))))
+                left = max(base_x, min(base_x + base_w - rw, int(round(base_x + base_w * fx - rw / 2))))
+                top = max(base_y, min(base_y + base_h - rh, int(round(base_y + base_h * fy - rh / 2))))
                 rect = (left, top, rw, rh)
                 if rect in seen:
                     continue

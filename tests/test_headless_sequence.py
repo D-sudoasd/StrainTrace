@@ -528,3 +528,59 @@ def test_gui_adapters_call_core_engines_and_complete_after_engine_return(monkeyp
     gui.MultiROIGUI.process_fullfield(app, field_settings)
     assert [event[0] for event in events].index("fullfield_preflight") < [event[0] for event in events].index("legacy_archive") < [event[0] for event in events].index("field_engine")
     assert [event[0] for event in events].index("field_engine") < [event[0] for event in events].index("completion")
+
+
+def test_extensometer_enforces_min_valid_frame_ratio_and_nested_tracking_params(tmp_path: Path) -> None:
+    from PIL import Image
+
+    paths = _sequence(tmp_path, n=3)
+    # Replace frame 3 with blank image so only 1 of 2 deformation frames is valid (ratio = 0.5).
+    Image.fromarray(np.full((128, 128), 120, dtype=np.uint8)).save(paths[2])
+    settings = {
+        "image_paths": [str(path) for path in paths],
+        "start_frame_1based": 1,
+        "end_frame_1based": 3,
+        "reference_frame_1based": 1,
+        "output_dir": str(tmp_path / "out-ratio"),
+        "roi_groups": [{"name": "G01", "roi1": (20, 45, 21, 21), "roi2": (85, 45, 21, 21), "strain_mode": "x"}],
+        "tracking": {"hard_corr": 0.60, "soft_corr": 0.40, "max_frame_jump_px": 0.25},
+        "quality": {
+            "enable_fb_check": False,
+            "min_valid_frames": 1,
+            "min_valid_frame_ratio": 0.9,
+            "min_strain_valid_fraction": 0.0,
+            "best_to_second_peak_ratio_min": 1.05,
+        },
+        "export": {"write_qc": True},
+    }
+    result = core.run_extensometer_sequence(settings)
+    assert result["status"] == "scientific_gate_failed"
+    assert result["scientific_ok"] is False
+    gate = result["json_summary"]["gate"]
+    assert gate["thresholds"]["min_valid_frame_ratio"] == pytest.approx(0.9)
+    assert gate["groups"]["G01"]["valid_frame_ratio"] == pytest.approx(0.5)
+
+
+def test_fullfield_handles_null_max_residual_rms_and_abort_none_fallback(tmp_path: Path, monkeypatch) -> None:
+    paths = _sequence(tmp_path, n=2)
+    settings = {
+        "image_paths": [str(path) for path in paths],
+        "start_frame_1based": 1,
+        "end_frame_1based": 2,
+        "reference_frame_1based": 1,
+        "output_dir": str(tmp_path / "out-ff"),
+        "field_roi": (20, 20, 88, 88),
+        "solver": {"name": "IC-GN", "subset_size_px": 15, "step_px": 12, "strain_window_px": 5, "search_radius_px": 12},
+        "quality": {
+            "zncc_min": 0.65,
+            "max_residual_rms": None,
+            "min_correlation_valid_fraction": 1.0,
+            "min_strain_valid_fraction": 1.0,
+        },
+        "export": {"write_manifest": True},
+    }
+    monkeypatch.setattr(core.RunTransaction, "abort", lambda self, exc: None)
+    result = core.run_fullfield_sequence(settings)
+    assert result["status"] == "scientific_gate_failed"
+    assert result["scientific_ok"] is False
+    assert Path(result["manifest_path"]).is_file()

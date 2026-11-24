@@ -446,3 +446,98 @@ def test_run_2d_dic_valid_requires_finite_u_v_zncc_and_affine_parameters(monkeyp
         solver=ezdic.DIC_SOLVER_ICGN,
     )
     assert not np.asarray(field["valid"], dtype=bool).any()
+
+
+def test_2d_zero_variance_reports_zero_variance_not_ambiguous_peak():
+    import ezdic_core as core
+
+    reference = np.full((64, 64), 50.0, dtype=np.float32)
+    deformed = np.full((64, 64), 80.0, dtype=np.float32)
+    field = core.run_2d_dic(reference, deformed, (10, 10, 40, 40), subset_size=15, step=8, initialization="local")
+    assert not field["valid"].any()
+    assert not field["peak_is_ambiguous"].any()
+    assert set(field["invalid_reason"]) == {"ZERO_VARIANCE"}
+
+
+def test_image_validation_rejects_complex_and_handles_float64_bgr():
+    import ezdic_core as core
+
+    with pytest.raises(core.CoreError) as exc:
+        core._as_float_image(np.ones((16, 16), dtype=np.complex64))
+    assert exc.value.code == "INVALID_IMAGE"
+
+    bgr_f64 = np.zeros((16, 16, 3), dtype=np.float64)
+    bgr_f64[:, :, 1] = 100.0
+    gray = core._as_float_image(bgr_f64)
+    assert gray.shape == (16, 16)
+    assert gray.dtype == np.float32
+    assert float(gray[0, 0]) > 50.0
+
+    norm = core.normalize_dic_float(bgr_f64, {"lo": 0.0, "hi": 255.0})
+    assert norm.shape == (16, 16)
+    assert norm.dtype == np.float64
+
+
+def test_safe_name_handles_windows_reserved_and_dot_segments():
+    import ezdic_core as core
+
+    assert core.safe_name("..") == "group"
+    assert core.safe_name(".") == "group"
+    assert core.safe_name("   ") == "group"
+    assert core.safe_name("CON") == "_CON"
+    assert core.safe_name("nul.txt") == "_nul.txt"
+    assert core.safe_name("LPT1") == "_LPT1"
+    assert core.safe_name("roi_1.") == "roi_1"
+
+
+def test_sift_initial_transform_handles_unit_range_float_images():
+    import ezdic_core as core
+
+    reference = core.generate_synthetic_speckle(160, 160, seed=41) / 255.0
+    deformed = core.warp_image_translation(reference, 12.0, -7.0)
+    transform = core.estimate_dic_initial_transform(reference, deformed, (20, 20, 120, 120))
+    assert transform is not None
+    assert transform["matrix"][0, 2] == pytest.approx(12.0, abs=0.5)
+    assert transform["matrix"][1, 2] == pytest.approx(-7.0, abs=0.5)
+
+
+def test_refine_subset_accepts_border_poi_from_build_poi_grid():
+    import ezdic_core as core
+
+    reference = core.generate_synthetic_speckle(64, 64, seed=11)
+    X, Y = core.build_poi_grid((0, 0, 64, 64), 15, 16, reference.shape)
+    fit = core.refine_subset_icgn(reference, reference, float(X[0, 0]), float(Y[0, 0]), 15)
+    assert fit is not None
+    assert fit["zncc"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_multiscale_runs_fine_level_once_and_skips_masked_pois(monkeypatch):
+    import ezdic_core as core
+
+    reference = core.generate_synthetic_speckle(96, 96, seed=19)
+    deformed = core.warp_image_translation(reference, 2.0, -1.0)
+    mask = np.ones(reference.shape, dtype=bool)
+    mask[:, 48:] = False
+    fine_calls = []
+    coarse_calls = []
+    real_refine = core.refine_subset_icgn
+
+    def spy_refine(ref, target, x, y, subset_size, *args, **kwargs):
+        if ref.shape == reference.shape:
+            fine_calls.append((x, y))
+        else:
+            coarse_calls.append((x, y))
+        return real_refine(ref, target, x, y, subset_size, *args, **kwargs)
+
+    monkeypatch.setattr(core, "refine_subset_icgn", spy_refine)
+    field = core.run_2d_dic(
+        reference, deformed, (12, 12, 72, 72),
+        subset_size=15, step=12, search_radius=8,
+        pyramid_levels=2, initialization="local", specimen_mask=mask,
+    )
+    eligible_count = int(field["eligible"].sum())
+    assert eligible_count > 0
+    assert eligible_count < field["eligible"].size
+    assert len(fine_calls) == eligible_count
+    assert len(coarse_calls) == eligible_count
+    assert all(len(levels) == 2 for levels in field["pyramid_level_diagnostics"])

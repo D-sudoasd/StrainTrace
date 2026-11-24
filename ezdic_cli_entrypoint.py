@@ -6,7 +6,6 @@ headless command contract as ``python ezdic_cli.py`` in source checkouts.
 
 from __future__ import annotations
 
-import sys
 from typing import Sequence
 
 

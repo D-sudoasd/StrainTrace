@@ -573,3 +573,163 @@ def test_keystone_current_rejects_escaping_version_paths(tmp_path: Path, relativ
     with pytest.raises(CampaignError) as exc:
         workflow._keystone_source_info(root)
     assert exc.value.code == "PROJECT_PATH_ESCAPE"
+
+
+def test_verify_accepts_project_json_and_reports_all_stale_acquisitions(tmp_path: Path, monkeypatch):
+    project, source, image = _new_project(tmp_path)
+    second_dir = source / "batch_02"
+    second_dir.mkdir(parents=True)
+    second_img = second_dir / "dic_000001.tif"
+    second_img.write_bytes(b"batch-two-img")
+    records = [
+        _discovered(image),
+        {**_discovered(second_img), "name": "batch_02", "relative_path": "batch_02"},
+    ]
+    adapter = SimpleNamespace(discover=lambda *args, **kwargs: records)
+    roi_module = _fake_roi_module()
+    calls: list[str] = []
+    numerics = _fake_numerics(project, calls)
+    monkeypatch.setattr(workflow, "_module", lambda name: {"adapters": adapter, "roi": roi_module, "numerics": numerics}[name])
+
+    acqs = workflow.scan(project, "raw")
+    assert len(acqs) == 2
+    for acq in acqs:
+        workflow.propose_rois(project, acq["acquisition_id"])
+        workflow.approve_rois(project, acq["acquisition_id"], "reviewer", True)
+        workflow.run(project, acq["acquisition_id"])
+
+    report_ok = workflow.verify(project / "project.json")
+    assert report_ok["valid"] is True
+
+    # Mutate both images so both acquisitions become stale; verify must report BOTH.
+    image.write_bytes(b"changed-1")
+    second_img.write_bytes(b"changed-2")
+    report_stale = workflow.verify(project / "project.json")
+    assert report_stale["valid"] is False
+    stale_ids = {
+        err.get("acquisition_id")
+        for err in report_stale["failures"]
+        if err.get("stage") == "project_freshness" and err.get("message")
+    }
+    assert stale_ids == {acq["acquisition_id"] for acq in acqs}
+
+
+def test_import_keystone_rollback_export_atomicity_and_confirmed_width_thickness(tmp_path: Path, monkeypatch):
+    project, source, image = _new_project(tmp_path)
+    version = source / "keystone" / "versions" / "v_fail"
+    version.mkdir(parents=True)
+    (version / "catalog.json").write_text("[]", encoding="utf-8")
+    (version / "CHECKSUMS.json").write_text("{}", encoding="utf-8")
+    (source / "keystone" / "CURRENT.json").write_text(json.dumps({"version_path": "versions/v_fail"}), encoding="utf-8")
+
+    def stage_then_return(project_root, _src):
+        staged = Path(project_root) / "imports" / "keystone" / "v_fail" / "acq-k"
+        staged.mkdir(parents=True, exist_ok=True)
+        rows = staged / "frames.jsonl"
+        write_jsonl_atomic(rows, [{"frame": 1, "native_cbf_frame": 1}])
+        rel = rows.relative_to(project_root).as_posix()
+        return [{
+            "acquisition_id": "acq-k", "name": "k", "relative_path": "k",
+            "source_kind": "imported_keystone", "physical_specimen_id": None,
+            "dimensions": {"area_mm2": 2.0, "width_mm": None, "thickness_mm": None, "status": "confirmed", "source": "log"},
+            "analysis_mode": "extensometer", "image_frames": [],
+            "measurement_frames": [{"frame": 1, "native_cbf_frame": 1, "scan_id": 1, "scan_id_is_global_fio": True}],
+            "roi": None, "approval": None, "analysis_config": {},
+            "result": {"status": "IMPORTED_ACCEPTED", "fingerprint": "a" * 64, "rows_path": rel, "artifacts": [rel], "checksums": {rel: sha256_file(rows)}, "provenance": {}, "summary": {}},
+            "alignment": None, "metadata": {"keystone_import": {"source_version_id": "v_fail"}},
+        }]
+
+    monkeypatch.setattr(workflow, "_module", lambda name: SimpleNamespace(import_keystone=stage_then_return) if name == "delivery" else None)
+    monkeypatch.setattr(workflow, "_write_project", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with pytest.raises(RuntimeError, match="disk full"):
+        workflow.import_keystone(project, source / "keystone")
+    assert not (project / "imports" / "keystone" / "v_fail").exists()
+
+    monkeypatch.undo()
+    # Export failure must not record output_dir in project metadata; invalid timeout rejected.
+    monkeypatch.setattr(workflow, "_module", lambda name: SimpleNamespace(
+        export_project=lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("export boom"))
+    ) if name == "delivery" else None)
+    with pytest.raises(CampaignError) as exc:
+        workflow.export(project, tmp_path / "out", timeout_s=True)
+    assert exc.value.code == "EXPORT_TIMEOUT_INVALID"
+    with pytest.raises(CampaignError, match="export boom"):
+        workflow.export(project, tmp_path / "out")
+    assert workflow.load_project(project)["metadata"].get("output_dirs", []) == []
+
+    # Confirmed width*thickness without source must be rejected by update_acquisition.
+    monkeypatch.setattr(workflow, "_module", lambda name: SimpleNamespace(discover=lambda *a, **k: [_discovered(image)]) if name == "adapters" else None)
+    acq = workflow.scan(project, "raw")[0]
+    with pytest.raises(CampaignError) as exc_dim:
+        workflow.update_acquisition(project, acq["acquisition_id"], {
+            "dimensions": {"area_mm2": None, "width_mm": 2.0, "thickness_mm": 1.5, "status": "confirmed", "source": None},
+        })
+    assert exc_dim.value.code == "DIMENSION_SOURCE_REQUIRED"
+
+
+def test_workflow_align_normalizes_options_and_defaults_load_time_column(tmp_path: Path, monkeypatch):
+    project, source, image = _new_project(tmp_path)
+    adapter = SimpleNamespace(discover=lambda *a, **k: [_discovered(image)])
+    seen_kwargs: list[dict] = []
+
+    def fake_align(acq, project_root, load_path, **kwargs):
+        seen_kwargs.append(dict(kwargs))
+        out = Path(project_root) / "stages" / acq["acquisition_id"] / "align-norm"
+        out.mkdir(parents=True, exist_ok=True)
+        rows = out / "rows.jsonl"
+        write_jsonl_atomic(rows, [{"frame": 1, "force_N": 10.0}])
+        rel = rows.relative_to(project_root).as_posix()
+        return {
+            "status": "COMPLETE", "fingerprint": "d" * 64, "rows_path": rel,
+            "artifacts": [rel], "checksums": {rel: sha256_file(rows)}, "provenance": {}, "summary": {},
+        }
+
+    aligner = SimpleNamespace(align=fake_align)
+    monkeypatch.setattr(workflow, "_module", lambda name: {"adapters": adapter, "alignment": aligner}[name])
+    acq = workflow.scan(project, "raw")[0]
+    load = source / "rel.csv"
+    load.write_text("time_s,clock_id,force_N\n0,c1,10\n", encoding="utf-8")
+
+    # First call uses Python API defaults (no explicit load_time_column); second passes explicit matching load_time_column.
+    workflow.align(project, acq["acquisition_id"], load, measurement_time_field="time_s")
+    workflow.align(project, acq["acquisition_id"], load, measurement_time_field="time_s", load_time_column="time_s")
+    assert len(seen_kwargs) == 1
+    assert seen_kwargs[0]["load_time_column"] == "time_s"
+
+
+def test_workflow_preview_alignment_is_read_only_and_supports_image_only_and_window_mode(tmp_path: Path, monkeypatch):
+    project, source, image = _new_project(tmp_path)
+    frame = _frame(image)
+    frame.update({
+        "timestamp_unix_s": 1_700_000_001.0,
+        "exposure_start_unix_s": 1_700_000_000.5,
+        "exposure_end_unix_s": 1_700_000_001.5,
+    })
+    discovered = _discovered(image)
+    discovered["image_frames"] = [frame]
+    discovered["measurement_frames"] = []
+    adapter = SimpleNamespace(discover=lambda *a, **k: [discovered])
+    monkeypatch.setattr(workflow, "_module", lambda name: {"adapters": adapter}[name])
+    acq = workflow.scan(project, "raw")[0]
+    project_bytes_before = (project / "project.json").read_bytes()
+
+    load = source / "load.csv"
+    load.write_text(
+        "timestamp_unix_s;force_N\n1700000000;100\n1700000002;300\n",
+        encoding="utf-8",
+    )
+    assert workflow.read_load_columns(load) == ["timestamp_unix_s", "force_N"]
+
+    instant = workflow.preview_alignment(project, acq["acquisition_id"], load, max_gap_s=2.5)
+    assert instant["axis_kind"] == "image_frames"
+    assert instant["alignable_count"] == 1
+    assert instant["rows"][0]["status"] == "LINEAR_TIME_INTERPOLATION"
+
+    window = workflow.preview_alignment(
+        project, acq["acquisition_id"], load, mode="exposure_mean", max_gap_s=2.5
+    )
+    assert window["mode"] == "window_mean"
+    assert window["alignable_count"] == 1
+    assert window["rows"][0]["status"] == "EXPOSURE_WINDOW_MEAN"
+    assert (project / "project.json").read_bytes() == project_bytes_before
+    assert not (project / ".campaign.lock").exists()

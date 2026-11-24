@@ -1,0 +1,58 @@
+"""Internal modular components for the StrainTrace Tk desktop GUI."""
+
+from .canvas import CanvasMixin
+from .theme import (
+    RECENT_CONFIG_ENV_VAR,
+    RECENT_CONFIG_FILENAME,
+    ThemeMixin,
+    UI_BASE_FONT_SIZE,
+    UI_FONT_FALLBACKS,
+    UI_FONT_FAMILY,
+    UI_LOG_FONT_SIZE,
+    UI_MAX_TK_SCALING,
+    UI_MIN_TK_SCALING,
+    UI_PRIMARY_FONT_SIZE,
+    UI_SCALE_ENV_VAR,
+    UI_STEP_FONT_SIZE,
+    UI_TITLE_FONT_SIZE,
+    UI_TREE_ROWHEIGHT,
+    UI_VIEWER_LABEL_FONT_SIZE,
+    UI_VIEWER_LEGEND_FONT_SIZE,
+    UI_VIEWER_TICK_FONT_SIZE,
+    UI_VIEWER_TITLE_FONT_SIZE,
+    choose_ui_font_family,
+    enable_windows_dpi_awareness,
+)
+from .tooltips import ChoiceToolTip, HelpNavigationToolbar, ToolTip, _get_win32_monitor_api
+from .viewers import DIC_COMPONENT_HELP, DIC_COMPONENT_LABELS, ViewersMixin
+
+__all__ = [
+    "CanvasMixin",
+    "ChoiceToolTip",
+    "DIC_COMPONENT_HELP",
+    "DIC_COMPONENT_LABELS",
+    "HelpNavigationToolbar",
+    "RECENT_CONFIG_ENV_VAR",
+    "RECENT_CONFIG_FILENAME",
+    "ThemeMixin",
+    "ToolTip",
+    "UI_BASE_FONT_SIZE",
+    "UI_FONT_FALLBACKS",
+    "UI_FONT_FAMILY",
+    "UI_LOG_FONT_SIZE",
+    "UI_MAX_TK_SCALING",
+    "UI_MIN_TK_SCALING",
+    "UI_PRIMARY_FONT_SIZE",
+    "UI_SCALE_ENV_VAR",
+    "UI_STEP_FONT_SIZE",
+    "UI_TITLE_FONT_SIZE",
+    "UI_TREE_ROWHEIGHT",
+    "UI_VIEWER_LABEL_FONT_SIZE",
+    "UI_VIEWER_LEGEND_FONT_SIZE",
+    "UI_VIEWER_TICK_FONT_SIZE",
+    "UI_VIEWER_TITLE_FONT_SIZE",
+    "ViewersMixin",
+    "_get_win32_monitor_api",
+    "choose_ui_font_family",
+    "enable_windows_dpi_awareness",
+]

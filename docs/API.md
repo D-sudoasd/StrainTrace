@@ -8,6 +8,15 @@ versioned delivery. The existing single-sequence configuration remains unchanged
 See [campaign workflow](CAMPAIGN_WORKFLOW.md) for input identities, missing values,
 recorded versus derived clocks and imported-result preservation.
 
+`straintrace agent --help` exposes the headless, restartable Agent DIC workflow
+(`discover`, `auto`, `init`, `inspect`, `plan`, `run`, `analyze`, `status`,
+`verify`, `extract`, `reprocess`, `plot`, `export`, `report`, `verify-report`,
+`batch`, `cancel`, `recover-lock`) with finite JSON/JSONL output, per-frame
+checkpoints, multi-region/virtual-gauge extraction, and standalone verifiable
+HTML reports. See [Agent workflow](AGENT_WORKFLOW.md),
+[Agent interface](AGENT_INTERFACE.md), and
+[autonomous folder analysis](AUTONOMOUS_ANALYSIS.md).
+
 - `validate-config --config run.json`: validate and print normalized version-1 JSON.
 - `run --config run.json --progress-json`: execute a permitted image sequence.
 - `verify-manifest --manifest PATH`: verify the recorded output bundle (see `--help` for syntax).
@@ -27,7 +36,9 @@ The legacy `strain_window_px` counts POIs, not image pixels. See
 
 Python interfaces: `ezdic_cli.normalize_config(mapping, base_dir=path)` returns the
 canonical configuration; `ezdic_cli.main(argv)` returns a process exit status;
-`ezdic_benchmark.run_benchmark(output_dir=path)` returns a machine-readable report.
+`ezdic_benchmark.run_benchmark(output_dir=path)` returns a machine-readable report;
+`straintrace_campaign` exposes campaign workflow functions; `straintrace_agent`
+(and `straintrace_agent.api`) exposes the headless Agent project and reporting API.
 `ezdic_core` contains the GUI-independent numerical implementation. Private helpers
 are not a stability promise; prefer the versioned JSON interface for integration.
 

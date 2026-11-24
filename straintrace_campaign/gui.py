@@ -7,18 +7,21 @@ established single-sequence GUI remains importable in headless environments.
 
 from __future__ import annotations
 
-import csv
-import bisect
-import datetime as dt
 import importlib
 import json
 import math
 import queue
 import threading
-import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+
+_CONFIRMED_DIMENSION_STATUSES = frozenset({
+    "confirmed",
+    "verified_recorded_dimensions",
+    "verified_recorded_area",
+})
 
 
 class CampaignPage(ttk.Frame):
@@ -38,6 +41,7 @@ class CampaignPage(ttk.Frame):
         self._preview_photo = None
         self._preview_image_size = None
         self._preview_scale = 1.0
+        self._preview_image_cache: dict[tuple[str, int, int], tuple[object, tuple[int, int]]] = {}
         self._operation_queue: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self._cancel_event: threading.Event | None = None
@@ -65,7 +69,50 @@ class CampaignPage(ttk.Frame):
                     # The owning Toplevel may already have canceled it.
                     pass
                 self._poll_after_id = None
+            worker = self._worker
+            if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+                worker.join(timeout=1.0)
+            self._preview_image_cache.clear()
         super().destroy()
+
+    def apply_theme(self):
+        """Sync raw Tk canvases and text widgets with the host app's active theme."""
+        app = self.app
+        if app is None:
+            return
+        panel_bg = getattr(app, "panel_bg", None) or getattr(app, "card_bg", None)
+        card_bg = getattr(app, "card_bg", None) or panel_bg
+        text_fg = getattr(app, "text_color", None) or getattr(app, "fg_color", None)
+        input_bg = getattr(app, "input_bg", None) or card_bg
+        for widget, bg in (
+            (getattr(self, "_viewport", None), panel_bg),
+            (getattr(self, "roi_editor_canvas", None), panel_bg),
+            (getattr(self, "result_canvas", None), card_bg),
+        ):
+            if widget is not None and bg:
+                try:
+                    widget.configure(background=bg)
+                except tk.TclError:
+                    pass
+        for text_widget in (getattr(self, "alignment_preview", None), getattr(self, "result_text", None)):
+            if text_widget is None:
+                continue
+            cfg = {}
+            if input_bg:
+                cfg["background"] = input_bg
+            if text_fg:
+                cfg["foreground"] = text_fg
+                cfg["insertbackground"] = text_fg
+            if cfg:
+                try:
+                    text_widget.configure(**cfg)
+                except tk.TclError:
+                    pass
+        if hasattr(self, "result_canvas"):
+            try:
+                self._draw_result_curve()
+            except tk.TclError:
+                pass
 
     def _get_workflow(self):
         if self._workflow is None:
@@ -378,7 +425,7 @@ class CampaignPage(ttk.Frame):
     def _build_roi_tab(self):
         tab = self.roi_tab
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
+        tab.rowconfigure(1, weight=0)
         controls = ttk.Frame(tab)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.propose_roi_button = ttk.Button(controls, text="建议 ROI", command=self.propose_rois)
@@ -665,31 +712,39 @@ class CampaignPage(ttk.Frame):
         self._update_action_states()
 
     @staticmethod
+    def _needs_reanalysis(acq):
+        meta = acq.get("metadata") if isinstance(acq.get("metadata"), dict) else {}
+        return bool(meta.get("workflow_reanalysis_required") or meta.get("workflow_result_stale"))
+
+    @staticmethod
     def _matches_state(wanted, acq, state):
         if wanted == "待审核":
             return acq.get("approval") is None
         if wanted == "待分析":
-            return acq.get("approval") is not None and acq.get("result") is None
+            return acq.get("approval") is not None and (acq.get("result") is None or CampaignPage._needs_reanalysis(acq))
         if wanted == "已分析":
-            return acq.get("result") is not None
+            return acq.get("result") is not None and "异常" not in state and "失败" not in state
         if wanted == "已对齐":
-            return acq.get("alignment") is not None
+            return acq.get("alignment") is not None and "异常" not in state and "失败" not in state
         if wanted == "异常":
             return "异常" in state or "失败" in state
         return True
 
     @staticmethod
     def _acquisition_state(acq):
+        bad_statuses = {"failed", "error", "cancelled", "canceled", "blocked", "scientific_gate_failed"}
         if acq.get("alignment"):
-            status = acq["alignment"].get("status", "已对齐")
-            if str(status).casefold() in ("failed", "error", "cancelled", "canceled"):
+            status = str(acq["alignment"].get("status", "已对齐"))
+            status_cf = status.casefold()
+            if status_cf in bad_statuses or "fail" in status_cf or "error" in status_cf:
                 return "异常"
-            return "已对齐" if status in ("COMPLETE", "SUCCESS", "ALIGNED", "ok", "OK") else str(status)
+            return "已对齐" if status in ("COMPLETE", "COMPLETED", "SUCCESS", "ALIGNED", "ok", "OK") else status
         if acq.get("result"):
-            status = acq["result"].get("status", "已分析")
-            if str(status).casefold() in ("failed", "error", "cancelled", "canceled"):
+            status = str(acq["result"].get("status", "已分析"))
+            status_cf = status.casefold()
+            if status_cf in bad_statuses or "fail" in status_cf or "error" in status_cf:
                 return "异常"
-            return "已分析" if status in ("COMPLETE", "SUCCESS", "ANALYZED", "ok", "OK") else str(status)
+            return "已分析" if status in ("COMPLETE", "COMPLETED", "SUCCESS", "ANALYZED", "ok", "OK") else status
         if acq.get("approval"):
             return "待分析"
         return "待审核"
@@ -733,9 +788,10 @@ class CampaignPage(ttk.Frame):
         self.identity_vars["width_mm"].set(self._fmt(dims.get("width_mm")))
         self.identity_vars["thickness_mm"].set(self._fmt(dims.get("thickness_mm")))
         self.identity_vars["area_mm2"].set(self._fmt(dims.get("area_mm2")))
-        self.identity_vars["dimension_source"].set(dims.get("source", ""))
-        self.identity_vars["dimension_status"].set(dims.get("status", "unknown"))
-        self.dimension_confirmed_var.set(dims.get("status") == "confirmed")
+        self.identity_vars["dimension_source"].set(dims.get("source") or "")
+        raw_dim_status = str(dims.get("status") or "unknown")
+        self.identity_vars["dimension_status"].set(raw_dim_status)
+        self.dimension_confirmed_var.set(raw_dim_status.strip().casefold() in _CONFIRMED_DIMENSION_STATUSES)
         self._proposal = acq.get("roi")
         for var, value in zip(self.free_region_seed_vars, (self._proposal or {}).get("free_region", [])):
             var.set(str(value))
@@ -757,12 +813,18 @@ class CampaignPage(ttk.Frame):
             area = self._optional_float(self.identity_vars["area_mm2"].get())
             source = self.identity_vars["dimension_source"].get().strip() or None
             confirmed = bool(self.dimension_confirmed_var.get())
-            if confirmed and (area is None or not source):
-                raise ValueError("确认尺寸必须有正面积和明确来源；请先填写来源记录中的面积。")
+            has_area_basis = area is not None or (width is not None and thickness is not None)
+            if confirmed and (not has_area_basis or not source):
+                raise ValueError("确认尺寸必须有正面积（或宽×厚）和明确来源；请先填写来源记录中的尺寸。")
             if area is not None and area <= 0 or width is not None and width <= 0 or thickness is not None and thickness <= 0:
                 raise ValueError("宽度、厚度和面积必须为正数。")
+            previous_status = str((acq.get("dimensions") or {}).get("status") or "").strip()
+            if confirmed:
+                dim_status = previous_status if previous_status.casefold() in _CONFIRMED_DIMENSION_STATUSES else "confirmed"
+            else:
+                dim_status = "candidate" if has_area_basis else "unknown"
             dimensions = {"width_mm": width, "thickness_mm": thickness, "area_mm2": area,
-                          "status": "confirmed" if confirmed else ("candidate" if area is not None else "unknown"),
+                          "status": dim_status,
                           "source": source}
             patch = {"physical_specimen_id": self.identity_vars["physical_specimen_id"].get().strip() or None,
                      "analysis_mode": self.identity_vars["analysis_mode"].get() or "extensometer",
@@ -784,12 +846,17 @@ class CampaignPage(ttk.Frame):
         except ValueError as exc:
             messagebox.showwarning("自由段候选无效", str(exc))
             return
+        target_aid = acq["acquisition_id"]
         self._start_operation("正在生成 ROI 候选…",
                               lambda wf, _progress, _cancel: wf.propose_rois(
-                                  self.project_dir, acq["acquisition_id"], free_region=free_region),
-                              refresh=True, on_success=self._accept_proposal)
+                                  self.project_dir, target_aid, free_region=free_region),
+                              refresh=True,
+                              on_success=lambda proposal, aid=target_aid: self._accept_proposal(proposal, acquisition_id=aid))
 
-    def _accept_proposal(self, proposal):
+    def _accept_proposal(self, proposal, acquisition_id=None):
+        if acquisition_id is not None and self.current_acquisition_id != acquisition_id:
+            self._set_status(f"批次 {acquisition_id} 的 ROI 候选已生成（当前已切换至其他批次）。")
+            return
         self._proposal = proposal
         for var, value in zip(self.free_region_seed_vars, proposal.get("free_region", [])):
             var.set(str(value))
@@ -875,7 +942,13 @@ class CampaignPage(ttk.Frame):
             if rect[0] < 0 or rect[1] < 0 or rect[2] <= 0 or rect[3] <= 0:
                 raise ValueError("ROI 左上角不能为负值，宽高必须为正整数。")
             if kind == "free_region":
+                previous_free = proposal.get("free_region")
                 proposal["free_region"] = rect
+                acq = self._selected_acquisition() or {}
+                if str(acq.get("analysis_mode", "extensometer")) == "fullfield" or (
+                    proposal.get("field_roi") is not None and proposal.get("field_roi") == previous_free
+                ):
+                    proposal["field_roi"] = rect
             elif kind == "exclusion":
                 proposal["exclusions"][index] = rect
             elif kind == "group":
@@ -916,8 +989,12 @@ class CampaignPage(ttk.Frame):
 
     def _proposal_ready_for_approval(self):
         p = self._proposal or {}
-        return bool(p.get("proposal_hash") and p.get("reference_sha256") and p.get("reference_path")
-                    and p.get("groups"))
+        if not (p.get("proposal_hash") and p.get("reference_sha256") and p.get("reference_path")):
+            return False
+        acq = self._selected_acquisition() or {}
+        if str(acq.get("analysis_mode", "extensometer")) == "fullfield":
+            return bool(p.get("field_roi") or p.get("free_region"))
+        return bool(p.get("groups"))
 
     def approve_rois(self):
         acq = self._selected_acquisition()
@@ -948,6 +1025,45 @@ class CampaignPage(ttk.Frame):
         except Exception:
             return [True]
 
+    def _load_preview_rgb(self, path):
+        from PIL import Image
+
+        file_path = Path(path)
+        stat_info = file_path.stat()
+        cache_key = (str(file_path), stat_info.st_mtime_ns, stat_info.st_size)
+        cached = self._preview_image_cache.get(cache_key)
+        if cached is not None:
+            cached_image, cached_size = cached
+            return cached_image.copy(), cached_size
+
+        def _load_via_core():
+            import ezdic_core as core
+
+            raw = core.read_gray_image(file_path)
+            bounds = core.compute_reference_normalization(raw)["reference_bounds"]
+            norm8 = core.normalize_with_bounds(raw, bounds)
+            rgb = Image.fromarray(norm8, mode="L").convert("RGB")
+            return rgb, (int(raw.shape[1]), int(raw.shape[0]))
+
+        if file_path.suffix.casefold() == ".cbf":
+            image, original_size = _load_via_core()
+        else:
+            try:
+                with Image.open(file_path) as original:
+                    original_size = original.size
+                    if original.mode in ("I", "I;16", "I;16B", "I;16L", "I;16S", "F"):
+                        image, original_size = _load_via_core()
+                    else:
+                        image = original.convert("RGB")
+            except Exception:
+                image, original_size = _load_via_core()
+
+        if len(self._preview_image_cache) >= 8:
+            oldest_key = next(iter(self._preview_image_cache))
+            self._preview_image_cache.pop(oldest_key, None)
+        self._preview_image_cache[cache_key] = (image, original_size)
+        return image.copy(), original_size
+
     def render_roi_preview(self):
         if not hasattr(self, "roi_canvas"):
             return
@@ -959,15 +1075,13 @@ class CampaignPage(ttk.Frame):
             self._clear_visual_window_preview()
             return
         pos = self.preview_position_var.get()
-        index = 0 if pos == "首帧" else (len(frames) - 1 if pos == "末帧" else (len(frames) - 1) // 2)
+        index = 0 if pos == "首帧" else (len(frames) - 1 if pos == "末帧" else len(frames) // 2)
         frame = frames[index]
         path = frame.get("path") if isinstance(frame, dict) else str(frame)
         try:
-            from PIL import Image, ImageTk
+            from PIL import ImageTk
 
-            with Image.open(path) as original:
-                original_size = original.size
-                image = original.convert("RGB")
+            image, original_size = self._load_preview_rgb(path)
             image.thumbnail((max(self.roi_canvas.winfo_width() - 8, 100),
                              max(self.roi_canvas.winfo_height() - 8, 100)))
             self._preview_photo = ImageTk.PhotoImage(image)
@@ -976,9 +1090,11 @@ class CampaignPage(ttk.Frame):
             self.roi_canvas.delete("all")
             self.roi_canvas.create_image(4, 4, image=self._preview_photo, anchor="nw")
             self._draw_proposal_rectangles()
-            number = frame.get("frame", frame.get("native_frame", index + 1)) if isinstance(frame, dict) else index + 1
-            self.roi_preview_var.set(f"{pos} · native frame {number} · {self._preview_image_size[0]}×{self._preview_image_size[1]} px")
-            self._render_visual_window_preview(path, number, pos)
+            frame_num = frame.get("frame", index + 1) if isinstance(frame, dict) else index + 1
+            native_num = frame.get("native_frame", frame_num) if isinstance(frame, dict) else frame_num
+            frame_label = f"frame {frame_num}" if native_num == frame_num else f"frame {frame_num} (native {native_num})"
+            self.roi_preview_var.set(f"{pos} · {frame_label} · {self._preview_image_size[0]}×{self._preview_image_size[1]} px")
+            self._render_visual_window_preview(path, frame_label, pos)
         except Exception as exc:
             self.roi_canvas.delete("all")
             self.roi_canvas.create_text(8, 8, anchor="nw", fill="#fca5a5",
@@ -1015,15 +1131,14 @@ class CampaignPage(ttk.Frame):
             draw(self._read_rect("group", i, "roi1", group.get("roi1")), colors[i % len(colors)], f"{name} A")
             draw(self._read_rect("group", i, "roi2", group.get("roi2")), colors[i % len(colors)], f"{name} B")
 
-    def _render_visual_window_preview(self, path, frame_number, position):
+    def _render_visual_window_preview(self, path, frame_label, position):
         canvas = getattr(self.app, "campaign_preview_canvas", None) if self.app is not None else None
         if canvas is None:
             return
         try:
-            from PIL import Image, ImageTk
-            with Image.open(path) as source:
-                size = source.size
-                image = source.convert("RGB")
+            from PIL import ImageTk
+
+            image, size = self._load_preview_rgb(path)
             canvas_w = max(canvas.winfo_width(), 240)
             canvas_h = max(canvas.winfo_height(), 180)
             image.thumbnail((canvas_w - 8, canvas_h - 8))
@@ -1034,7 +1149,7 @@ class CampaignPage(ttk.Frame):
             self._draw_proposal_rectangles(canvas, scale, (4, 4))
             info_var = getattr(self.app, "campaign_preview_info_var", None)
             if info_var is not None:
-                info_var.set(f"{position} · native frame {frame_number} · {size[0]}×{size[1]} px · {path}")
+                info_var.set(f"{position} · {frame_label} · {size[0]}×{size[1]} px · {path}")
             self._campaign_window_path = str(path)
         except Exception as exc:
             self._clear_visual_window_preview(f"无法预览图像：{exc}")
@@ -1084,13 +1199,16 @@ class CampaignPage(ttk.Frame):
         self.load_path_var.set(path)
         self._load_column_choices(path)
 
+    def _workflow_helper(self, name):
+        wf = self._get_workflow()
+        fn = getattr(wf, name, None)
+        if callable(fn):
+            return fn
+        return getattr(importlib.import_module("straintrace_campaign.workflow"), name)
+
     def _load_column_choices(self, path):
         try:
-            with open(path, "r", encoding="utf-8-sig", newline="") as stream:
-                sample = stream.read(8192)
-                stream.seek(0)
-                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
-                header = next(csv.reader(stream, dialect))
+            header = self._workflow_helper("read_load_columns")(path)
             self.time_column_box.configure(values=header)
             self.force_column_box.configure(values=header)
             descriptions = {name: f"读取载荷文件中的“{name}”列；请核对列含义、单位和时钟来源。"
@@ -1106,137 +1224,82 @@ class CampaignPage(ttk.Frame):
         except Exception as exc:
             messagebox.showwarning("载荷文件读取失败", str(exc))
 
-    def _load_force_rows(self):
-        path = Path(self.load_path_var.get()).expanduser()
-        if not path.is_file():
-            raise ValueError("请先选择可读取的载荷文件。")
-        with path.open("r", encoding="utf-8-sig", newline="") as stream:
-            sample = stream.read(8192)
-            stream.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
-            reader = csv.DictReader(stream, dialect=dialect)
-            rows = list(reader)
-        tc, fc = self.time_column_var.get(), self.force_column_var.get()
-        if not tc or not fc or tc not in (reader.fieldnames or []) or fc not in (reader.fieldnames or []):
-            raise ValueError("请选择存在的时间列和载荷列。")
-        parsed_rows = []
-        for row_index, row in enumerate(rows):
-            time_value, domain, clock_id, time_error = self._parse_preview_time(row, tc)
-            force = self._finite_number(row.get(fc))
-            force_valid = force is not None
-            source_valid = row.get("is_force_valid")
-            if source_valid not in (None, ""):
-                force_valid = force_valid and str(source_valid).strip().casefold() not in {"false", "0", "no", "n"}
-            parsed_rows.append({"time": time_value, "time_domain": domain, "clock_id": clock_id,
-                                "time_error": time_error, "force": force, "force_valid": force_valid,
-                                "source_row": row_index + 2})
-        if not parsed_rows:
-            raise ValueError("载荷文件没有记录行。")
-        for index, row in enumerate(parsed_rows):
-            if row["time"] is None:
-                raise ValueError(f"载荷第 {row['source_row']} 行时间无效：{row['time_error']}")
-            if index and row["time"] <= parsed_rows[index - 1]["time"]:
-                raise ValueError(f"载荷时间必须按源文件顺序严格递增；第 {row['source_row']} 行不满足。")
-        return parsed_rows
-
     @staticmethod
-    def _parse_preview_time(row, field):
-        raw = row.get(field)
-        if raw is None or str(raw).strip() == "":
-            if field == "timestamp_unix_s" and row.get("estimated_timestamp_unix_s") not in (None, ""):
-                return None, "missing", None, "该行只有推算时间，不能填入绝对时间列"
-            return None, "missing", None, "时间值缺失"
-        status = str(row.get("timestamp_status") or row.get("time_status") or "").upper()
-        if field == "timestamp_unix_s" and any(word in status for word in
-                                                ("ESTIMAT", "RECONSTRUCT", "INFER", "PROTOCOL", "ADOPTED")):
-            return None, "missing", None, "该时间列标记为推算值"
-        raw_clock = row.get("clock_id") or row.get("timestamp_clock_id") or row.get("time_clock_id")
-        clock_id = str(raw_clock) if raw_clock not in (None, "") else None
-        number = CampaignPage._finite_number(raw)
-        if number is not None:
-            if field.endswith("unix_s"):
-                if number < 1_000_000_000:
-                    return None, "missing", clock_id, "Unix 时间小于有效 epoch 范围"
-                domain = "unix_epoch_estimated" if field.startswith("estimated_") else "unix_epoch_recorded"
-            elif field == "time_s" or field.endswith("_time_s"):
-                domain = "relative"
-            elif number >= 1_000_000_000:
-                domain = "unix_epoch_recorded"
-            else:
-                domain = "relative"
-            if domain == "relative" and not clock_id:
-                return number, domain, None, "相对时间缺少 clock_id"
-            return number, domain, clock_id, None
-        text = str(raw).strip()
-        candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-        try:
-            parsed = dt.datetime.fromisoformat(candidate)
-        except ValueError:
-            return None, "missing", clock_id, "时间格式无法解析"
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            return None, "missing", clock_id, "日期时间缺少明确时区"
-        return parsed.timestamp(), "unix_epoch_recorded", clock_id, None
-
-    @staticmethod
-    def _clock_compatibility(axis_domain, axis_clock_id, load_row):
-        load_domain = load_row.get("time_domain")
-        load_clock = load_row.get("clock_id")
-        if str(axis_domain).startswith("unix_epoch") and str(load_domain).startswith("unix_epoch"):
-            return None
-        if axis_domain == load_domain == "relative":
-            if axis_clock_id and axis_clock_id == load_clock:
-                return None
+    def _format_preview_status(row_info, *, mode="instantaneous"):
+        if row_info.get("alignable"):
+            return "可对齐"
+        status = str(row_info.get("status") or "")
+        is_window = mode in {"window_mean", "exposure_mean", "exposure_window_mean", "window"}
+        src_row = row_info.get("invalid_source_row")
+        if status in {"OUTSIDE_TIME_RANGE", "NO_TIME_SUPPORT"}:
+            return "曝光窗超出载荷时间范围" if is_window else "超出载荷时间范围"
+        if status == "LONG_TIME_GAP":
+            return "曝光窗内载荷间隔超限" if is_window else "间隔超限"
+        if status in {
+            "INVALID_EXACT_SAMPLE", "INVALID_BRACKET", "INVALID_LOAD_BRACKET",
+            "UNKNOWN_FORCE_UNIT", "INVALID_FORCE_VALUE", "SOURCE_MARKED_FORCE_INVALID",
+        }:
+            prefix = "曝光窗内载荷支撑点无效" if is_window else "载荷支撑点无效"
+            return f"{prefix}（第 {src_row} 行）" if src_row is not None else prefix
+        if status in {"RELATIVE_CLOCK_DOMAIN_MISMATCH", "RELATIVE_CLOCK_ID_REQUIRED"}:
             return "相对时钟 ID 缺失或不一致"
-        return "测量与载荷时钟域不一致"
+        if status in {"RECORDED_ESTIMATED_CLOCK_MISMATCH", "TIME_CLOCK_DOMAIN_MISMATCH", "MIXED_LOAD_CLOCK_DOMAINS"}:
+            return "测量与载荷时钟域不一致"
+        if status == "RECORDED_TIMESTAMP_MISSING_ESTIMATE_SEPARATE":
+            return "该行只有推算时间，不能填入绝对时间列"
+        if status == "TIME_FIELD_MARKED_DERIVED":
+            return "该时间列标记为推算值"
+        if status == "EXPOSURE_WINDOW_MISSING":
+            return "缺少曝光窗"
+        if status == "INVALID_EXPOSURE_WINDOW":
+            return "曝光窗无效"
+        if status == "TIME_VALUE_MISSING":
+            return "时间值缺失"
+        return status or "缺少可信时间"
 
-    @staticmethod
-    def _preview_bracket(query, load_rows):
-        times = [row["time"] for row in load_rows]
-        right = bisect.bisect_left(times, query)
-        if right < len(times) and abs(times[right] - query) <= 2e-6:
-            return right, right
-        if right == 0 or right == len(times):
-            return None
-        return right - 1, right
+    @classmethod
+    def _preview_tuples(cls, preview):
+        mode = preview.get("mode", "instantaneous")
+        tuples = []
+        for item in preview.get("rows", []):
+            query = item.get("query_time")
+            left = item.get("left_time")
+            right = item.get("right_time")
+            tuples.append((
+                item.get("frame"),
+                f"{query:.6g}" if query is not None else "",
+                f"{left:.6g}" if left is not None else "",
+                f"{right:.6g}" if right is not None else "",
+                cls._format_preview_status(item, mode=mode),
+            ))
+        return tuples
 
-    def _instantaneous_preview_status(self, query, axis_domain, axis_clock_id, load_rows, max_gap):
-        bracket = self._preview_bracket(query, load_rows)
-        if bracket is None:
-            return None, "超出载荷时间范围"
-        left, right = bracket
-        if left != right and load_rows[right]["time"] - load_rows[left]["time"] > max_gap:
-            return bracket, "间隔超限"
-        for index in set(bracket):
-            row = load_rows[index]
-            if not row["force_valid"]:
-                return bracket, f"载荷支撑点无效（第 {row['source_row']} 行）"
-            incompatible = self._clock_compatibility(axis_domain, axis_clock_id, row)
-            if incompatible:
-                return bracket, incompatible
-        return bracket, "可对齐"
+    def _run_alignment_preview(self, acq, max_gap):
+        preview_fn = self._workflow_helper("preview_alignment")
+        return preview_fn(
+            acq,
+            load_path=self.load_path_var.get(),
+            project_dir=self.project_dir,
+            mode=self.alignment_mode_var.get(),
+            max_gap_s=max_gap,
+            measurement_time_field=self.measurement_time_field_var.get(),
+            load_time_column=self.time_column_var.get(),
+            force_column=self.force_column_var.get(),
+        )
 
-    def _window_preview_status(self, start, end, axis_domain, axis_clock_id, load_rows, max_gap):
-        times = [row["time"] for row in load_rows]
-        if start < times[0] or end > times[-1]:
-            return None, "曝光窗超出载荷时间范围"
-        knots = [start] + [value for value in times if start < value < end] + [end]
-        used = set()
-        for first, second in zip(knots, knots[1:]):
-            bracket = self._preview_bracket((first + second) / 2, load_rows)
-            if bracket is None:
-                return None, "曝光窗超出载荷时间范围"
-            left, right = bracket
-            if left != right and load_rows[right]["time"] - load_rows[left]["time"] > max_gap:
-                return bracket, "曝光窗内载荷间隔超限"
-            used.update(bracket)
-        for index in used:
-            row = load_rows[index]
-            if not row["force_valid"]:
-                return (min(used), max(used)), f"曝光窗内载荷支撑点无效（第 {row['source_row']} 行）"
-            incompatible = self._clock_compatibility(axis_domain, axis_clock_id, row)
-            if incompatible:
-                return (min(used), max(used)), incompatible
-        return (min(used), max(used)), "可对齐"
+    def _load_force_rows(self):
+        # Thin read-only compatibility adapter backed by workflow.preview_alignment.
+        load_path = Path(self.load_path_var.get()).expanduser()
+        if not load_path.is_file():
+            raise ValueError("请先选择可读取的载荷文件。")
+        preview = self._run_alignment_preview({"acquisition_id": "preview", "measurement_frames": [], "image_frames": []}, 2.5)
+        return [{"source_row": i + 2} for i in range(int(preview["load_row_count"]))]
+
+    def _preview_alignment_rows(self, acq, load_rows, max_gap):
+        if not load_rows:
+            raise ValueError("载荷文件没有可用的有限时间—载荷记录。")
+        preview = self._run_alignment_preview(acq, max_gap)
+        return self._preview_tuples(preview)
 
     def preview_alignment(self):
         acq = self._selected_acquisition()
@@ -1247,72 +1310,22 @@ class CampaignPage(ttk.Frame):
             max_gap = float(self.max_gap_var.get())
             if not math.isfinite(max_gap) or max_gap <= 0:
                 raise ValueError("最大插值间隔必须为正数。")
-            load_rows = self._load_force_rows()
-            rows = self._preview_alignment_rows(acq, load_rows, max_gap)
-        except (OSError, csv.Error, ValueError) as exc:
+            preview = self._run_alignment_preview(acq, max_gap)
+            rows = self._preview_tuples(preview)
+        except Exception as exc:
             messagebox.showwarning("无法预览对齐", str(exc))
             return
         time_field = self.measurement_time_field_var.get()
-        unit = "s" if time_field != "frame" else "frames"
         lines = ["预览只读载荷文件与项目时间轴；此时尚未调用 align，也未写入项目。",
-                 f"DIC 时间来源={time_field}；方式={self.alignment_mode_var.get()}，最大间隔={max_gap:g} {unit}，载荷行={len(load_rows)}",
+                 f"DIC 时间来源={time_field}；方式={self.alignment_mode_var.get()}，最大间隔={max_gap:g} s，载荷行={preview['load_row_count']}",
                  "frame\t源时间(s)\t左支撑(s)\t右支撑(s)\t状态"]
         lines.extend("\t".join(str(value) for value in row) for row in rows[:60])
         if len(rows) > 60:
             lines.append(f"… 另有 {len(rows) - 60} 帧未显示")
         self._set_text(self.alignment_preview, "\n".join(lines))
         self._alignment_preview_key = self._alignment_key(acq)
-        self.align_button.configure(state=tk.NORMAL if rows and any(r[-1] == "可对齐" for r in rows) else tk.DISABLED)
-        self._set_status(f"只读预览完成：{sum(r[-1] == '可对齐' for r in rows)} / {len(rows)} 帧处于有效时间支持内")
-
-    def _preview_alignment_rows(self, acq, load_rows, max_gap):
-        if not load_rows:
-            raise ValueError("载荷文件没有可用的有限时间—载荷记录。")
-        measurement = acq.get("measurement_frames", [])
-        result = []
-        mode = self.alignment_mode_var.get()
-        time_field = self.measurement_time_field_var.get()
-        for item in measurement:
-            frame = item.get("frame")
-            t, domain, clock_id, time_error = self._parse_preview_time(item, time_field)
-            if t is None:
-                result.append((frame, "", "", "", time_error or "缺少可信时间"))
-                continue
-            if mode == "exposure_mean":
-                start, start_domain, start_clock, start_error = self._parse_preview_time(item, "exposure_start_unix_s")
-                end, end_domain, end_clock, end_error = self._parse_preview_time(item, "exposure_end_unix_s")
-                if start is None or end is None:
-                    error = start_error or end_error
-                    result.append((frame, f"{t:.6g}", "", "", error or "缺少曝光窗"))
-                    continue
-                if start_domain.startswith("unix_epoch") != domain.startswith("unix_epoch"):
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗与DIC时间域不一致"))
-                    continue
-                if domain == "relative" and (start_clock != clock_id or end_clock != clock_id):
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗相对时钟 ID 不一致"))
-                    continue
-                if end <= start:
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗无效"))
-                    continue
-                bracket, state = self._window_preview_status(start, end, domain, clock_id, load_rows, max_gap)
-                if state != "可对齐":
-                    result.append((frame, f"{t:.6g}", "", "", state))
-                    continue
-                left, right = bracket
-                result.append((frame, f"{t:.6g}", f"{load_rows[left]['time']:.6g}",
-                               f"{load_rows[right]['time']:.6g}", "可对齐"))
-                continue
-            bracket, state = self._instantaneous_preview_status(t, domain, clock_id, load_rows, max_gap)
-            if bracket is None:
-                result.append((frame, f"{t:.6g}", "", "", state))
-                continue
-            left, right = bracket
-            if state != "可对齐":
-                result.append((frame, f"{t:.6g}", "", "", state))
-                continue
-            result.append((frame, f"{t:.6g}", f"{load_rows[left]['time']:.6g}",
-                           f"{load_rows[right]['time']:.6g}", state))
-        return result
+        self.align_button.configure(state=tk.NORMAL if preview["alignable_count"] > 0 else tk.DISABLED)
+        self._set_status(f"只读预览完成：{preview['alignable_count']} / {len(rows)} 帧处于有效时间支持内")
 
     def align(self):
         acq = self._selected_acquisition()
@@ -1362,9 +1375,9 @@ class CampaignPage(ttk.Frame):
         if not self._require_project():
             return
         pending = [a["acquisition_id"] for a in self.project.get("acquisitions", [])
-                   if a.get("approval") and not a.get("result")]
+                   if a.get("approval") and (not a.get("result") or self._needs_reanalysis(a))]
         if not pending:
-            messagebox.showinfo("没有待处理批次", "没有同时具备审核 ROI 且尚无结果的批次。")
+            messagebox.showinfo("没有待处理批次", "没有同时具备审核 ROI 且尚无结果或需重算的批次。")
             return
 
         project_dir = self.project_dir
@@ -1381,6 +1394,9 @@ class CampaignPage(ttk.Frame):
                     status = result.get("status", "COMPLETE") if isinstance(result, dict) else "COMPLETE"
                     outcomes.append({"acquisition_id": acquisition_id, "status": status, "result": result})
                 except Exception as exc:
+                    if getattr(exc, "code", None) == "CAMPAIGN_CANCELLED":
+                        outcomes.append({"acquisition_id": acquisition_id, "status": "CANCELLED"})
+                        break
                     outcomes.append({"acquisition_id": acquisition_id, "status": "FAILED", "error": str(exc)})
             return outcomes
 
@@ -1447,7 +1463,7 @@ class CampaignPage(ttk.Frame):
         if detail is None and args:
             detail = args[0]
         if isinstance(detail, dict):
-            fraction = detail.get("progress_fraction")
+            fraction = detail.get("progress_fraction", detail.get("fraction"))
             percent = detail.get("progress_percent", detail.get("percent"))
             if fraction is None and percent is None and detail.get("total"):
                 try:
@@ -1537,7 +1553,10 @@ class CampaignPage(ttk.Frame):
         state = tk.NORMAL if has_project and has_selection and not self._busy else tk.DISABLED
         can_run = bool(selected and selected.get("approval"))
         self.run_button.configure(state=tk.NORMAL if has_project and can_run and not self._busy else tk.DISABLED)
-        pending = any(a.get("approval") and not a.get("result") for a in self.project.get("acquisitions", []))
+        pending = any(
+            a.get("approval") and (not a.get("result") or self._needs_reanalysis(a))
+            for a in self.project.get("acquisitions", [])
+        )
         self.run_pending_button.configure(state=tk.NORMAL if has_project and pending and not self._busy else tk.DISABLED)
         project_state = tk.NORMAL if has_project and not self._busy else tk.DISABLED
         for widget in (self.import_button, self.export_button, self.verify_button, self.scan_button):
@@ -1571,41 +1590,55 @@ class CampaignPage(ttk.Frame):
 
     def _show_verification(self, report):
         self._show_result("项目核验", report)
-        status = report.get("status", report.get("ok", "完成")) if isinstance(report, dict) else "完成"
+        if isinstance(report, dict):
+            if "valid" in report:
+                status = "通过" if report["valid"] else "未通过"
+            else:
+                status = report.get("status", report.get("ok", "完成"))
+        else:
+            status = "完成"
         self._set_status(f"项目核验：{status}")
+
+    def _safe_project_artifact(self, raw_path):
+        if not raw_path or not self.project_dir:
+            return None
+        candidate = Path(str(raw_path))
+        if candidate.is_absolute():
+            return candidate
+        project_root = self.project_dir.resolve()
+        resolved = (project_root / candidate).resolve()
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            return None
+        return resolved
 
     def _load_result_visuals(self, acq):
         stage = acq.get("alignment") or acq.get("result") or {}
         rows_path = stage.get("rows_path")
         rows = []
-        if rows_path and self.project_dir:
-            candidate = Path(rows_path)
-            if not candidate.is_absolute():
-                candidate = self.project_dir / candidate
+        candidate = self._safe_project_artifact(rows_path)
+        if candidate is not None:
             try:
-                with candidate.open("r", encoding="utf-8") as stream:
+                with candidate.open("r", encoding="utf-8-sig") as stream:
                     rows = [json.loads(line) for line in stream if line.strip()]
             except (OSError, json.JSONDecodeError):
                 rows = []
+        x_label = "frame"
+        y_candidates = ("engineering_strain", "engineering_strain_mean", "true_strain", "stress_MPa", "force_N")
+        chosen_y = "engineering_strain"
+        for field in y_candidates:
+            if any(
+                self._finite_number(row.get("frame")) is not None and self._finite_number(row.get(field)) is not None
+                for row in rows
+            ):
+                chosen_y = field
+                break
+        y_label = chosen_y
         points = []
-        x_label, y_label = "frame", "engineering_strain"
-        for index, row in enumerate(rows):
+        for row in rows:
             x = self._finite_number(row.get("frame"))
-            y = self._finite_number(row.get("engineering_strain"))
-            if y is None:
-                y = self._finite_number(row.get("engineering_strain_mean"))
-            if y is None:
-                y = self._finite_number(row.get("true_strain"))
-                if y is not None:
-                    y_label = "true_strain"
-            if y is None:
-                y = self._finite_number(row.get("stress_MPa"))
-                if y is not None:
-                    y_label = "stress_MPa"
-            if y is None:
-                y = self._finite_number(row.get("force_N"))
-                if y is not None:
-                    y_label = "force_N"
+            y = self._finite_number(row.get(chosen_y))
             if x is not None and y is not None:
                 points.append((x, y))
         self._result_plot_points = points
@@ -1626,8 +1659,10 @@ class CampaignPage(ttk.Frame):
             strain_status = str(row.get("strain_status", ""))
             reasons = row.get("reasons", row.get("failure_reasons", []))
             has_reason = bool(reasons)
-            adverse_status = any(token in (quality + " " + strain_status).casefold()
-                                 for token in ("fail", "reject", "invalid", "missing", "ambiguous", "out_of_view"))
+            adverse_status = any(
+                token in (quality + " " + strain_status).casefold()
+                for token in ("fail", "reject", "invalid", "missing", "ambiguous", "out_of_view", "insufficient", "no_valid")
+            )
             if has_reason or adverse_status:
                 exceptions.append({"frame": row.get("frame"), "native_cbf_frame": row.get("native_cbf_frame"),
                                    "quality_status": quality or None,
@@ -1639,7 +1674,7 @@ class CampaignPage(ttk.Frame):
 
     @staticmethod
     def _finite_number(value):
-        if value is None or value == "":
+        if value is None or value == "" or isinstance(value, bool):
             return None
         try:
             number = float(value)
@@ -1662,10 +1697,8 @@ class CampaignPage(ttk.Frame):
         visit(stage.get("artifacts", []))
         visit(stage.get("preview_paths", []))
         for value in candidates:
-            path = Path(value)
-            if not path.is_absolute() and self.project_dir:
-                path = self.project_dir / path
-            if path.is_file():
+            path = self._safe_project_artifact(value)
+            if path is not None and path.is_file():
                 return path
         return None
 
@@ -1685,14 +1718,16 @@ class CampaignPage(ttk.Frame):
         height = max(canvas.winfo_height(), 180)
         margin = (52, 18, 18, 38)
         left, top, right, bottom = margin[0], margin[1], width - margin[2], height - margin[3]
-        canvas.create_line(left, bottom, right, bottom, fill="#374151", width=1)
-        canvas.create_line(left, bottom, left, top, fill="#374151", width=1)
+        axis_fg = getattr(self.app, "text_color", "#111827") if self.app is not None else "#111827"
+        muted_fg = getattr(self.app, "muted_color", "#4b5563") if self.app is not None else "#4b5563"
+        canvas.create_line(left, bottom, right, bottom, fill=muted_fg, width=1)
+        canvas.create_line(left, bottom, left, top, fill=muted_fg, width=1)
         x_label, y_label = self._result_plot_labels
-        canvas.create_text((left + right) / 2, height - 10, text=x_label, fill="#111827")
-        canvas.create_text(12, (top + bottom) / 2, text=y_label, angle=90, fill="#111827")
+        canvas.create_text((left + right) / 2, height - 10, text=x_label, fill=axis_fg)
+        canvas.create_text(12, (top + bottom) / 2, text=y_label, angle=90, fill=axis_fg)
         points = self._result_plot_points
         if not points:
-            canvas.create_text(width / 2, height / 2, text="暂无可绘制的有限结果", fill="#6b7280")
+            canvas.create_text(width / 2, height / 2, text="暂无可绘制的有限结果", fill=muted_fg)
             return
         xs, ys = [p[0] for p in points], [p[1] for p in points]
         xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
@@ -1711,10 +1746,10 @@ class CampaignPage(ttk.Frame):
         for i in range(0, len(coords), 2):
             canvas.create_oval(coords[i] - 2, coords[i + 1] - 2,
                                coords[i] + 2, coords[i + 1] + 2, fill="#2563eb", outline="")
-        canvas.create_text(left, bottom + 15, text=f"{xmin:.4g}", anchor="w", fill="#4b5563")
-        canvas.create_text(right, bottom + 15, text=f"{xmax:.4g}", anchor="e", fill="#4b5563")
-        canvas.create_text(left - 5, bottom, text=f"{ymin:.4g}", anchor="e", fill="#4b5563")
-        canvas.create_text(left - 5, top, text=f"{ymax:.4g}", anchor="e", fill="#4b5563")
+        canvas.create_text(left, bottom + 15, text=f"{xmin:.4g}", anchor="w", fill=muted_fg)
+        canvas.create_text(right, bottom + 15, text=f"{xmax:.4g}", anchor="e", fill=muted_fg)
+        canvas.create_text(left - 5, bottom, text=f"{ymin:.4g}", anchor="e", fill=muted_fg)
+        canvas.create_text(left - 5, top, text=f"{ymax:.4g}", anchor="e", fill=muted_fg)
 
     def _set_result_overlay(self, path):
         self._result_overlay_source = Path(path) if path else None
@@ -1739,10 +1774,9 @@ class CampaignPage(ttk.Frame):
                                text="当前结果没有叠图附件", fill="#d1d5db")
             return
         try:
-            from PIL import Image, ImageTk
-            with Image.open(path) as source:
-                size = source.size
-                image = source.convert("RGB")
+            from PIL import ImageTk
+
+            image, size = self._load_preview_rgb(path)
             image.thumbnail((max(canvas.winfo_width() - 8, 120), max(canvas.winfo_height() - 28, 100)))
             photo = ImageTk.PhotoImage(image)
             setattr(self, photo_attribute, photo)

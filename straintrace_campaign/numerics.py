@@ -7,7 +7,7 @@ import json
 import math
 import os
 import re
-import sys
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,24 +28,7 @@ _MAX_FB_TOLERANCE_PX = 12.0
 
 def _as_json(value: Any) -> Any:
     """Convert core diagnostics to strict JSON values; NaN/Inf become null."""
-    if isinstance(value, Mapping):
-        return {str(key): _as_json(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_as_json(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _as_json(value.tolist())
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if isinstance(value, (float, np.floating)):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, os.PathLike):
-        return str(value)
-    return str(value)
+    return storage.json_safe(value, coerce_unknown=True)
 
 
 def _cancelled(cancel: Any) -> bool:
@@ -68,17 +51,12 @@ def _notify(progress, fraction: float, **details) -> None:
 
 
 def _source_file(module_file: str | None, relative_to_bundle: str) -> Path:
-    """Resolve executable source in editable installs and frozen bundles."""
-    if module_file:
-        candidate = Path(module_file).resolve()
-        if candidate.is_file():
-            return candidate
-    bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root:
-        candidate = Path(bundle_root) / "sources" / relative_to_bundle
-        if candidate.is_file():
-            return candidate.resolve()
-    raise CampaignError("ENGINE_SOURCE_UNAVAILABLE", f"cannot fingerprint executable source: {relative_to_bundle}")
+    """Resolve executable Python source in editable installs and frozen bundles."""
+    return storage.resolve_source_file(
+        relative_to_bundle,
+        module_file=module_file,
+        error_code="ENGINE_SOURCE_UNAVAILABLE",
+    )
 
 
 def _ordered_frames(acquisition: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -106,61 +84,51 @@ def _ordered_frames(acquisition: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _code_fingerprints() -> dict[str, str]:
-    campaign_code = _source_file(__file__, "straintrace_campaign/numerics.py")
-    roi_code = _source_file(roi_module.__file__, "straintrace_campaign/roi.py")
+    fingerprints = storage.campaign_code_fingerprints()
     engine_code = _source_file(getattr(core, "__file__", None), "ezdic_core.py")
-    return {
-        "straintrace_campaign/numerics.py": storage.sha256_file(campaign_code),
-        "straintrace_campaign/roi.py": storage.sha256_file(roi_code),
-        "ezdic_core.py": storage.sha256_file(engine_code),
-    }
+    fingerprints["ezdic_core.py"] = storage.sha256_file(engine_code)
+    try:
+        import ezdic_cli
+
+        cli_code = _source_file(getattr(ezdic_cli, "__file__", None), "ezdic_cli.py")
+        fingerprints["ezdic_cli.py"] = storage.sha256_file(cli_code)
+    except Exception:
+        pass
+    return fingerprints
 
 
 def _roi_tracking_geometry(acquisition: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return only the reviewed geometry that changes numerical tracking.
+    """Delegate tracking-geometry extraction to the shared storage contract."""
+    return storage.roi_tracking_geometry(acquisition)
 
-    Reviewer identity, approval time, proposal diagnostics, and preview paths
-    describe the review workflow, not the numerical inputs. Keeping this subset
-    aligned with ``workflow._roi_tracking_geometry`` avoids needless analysis
-    cache invalidation while approval is still validated before every run.
-    """
-    proposal = acquisition.get("roi")
-    if not isinstance(proposal, Mapping):
+
+def _external_mask_fingerprint(
+    analysis_config: Mapping[str, Any],
+    project_dir: str | os.PathLike[str] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(analysis_config, Mapping):
         return None
-    frames = acquisition.get("image_frames")
-    reference_id = proposal.get("reference_frame")
-    reference_matches = [
-        item for item in frames or []
-        if isinstance(item, Mapping) and item.get("frame") == reference_id
-    ]
-    if len(reference_matches) != 1:
-        raise CampaignError("ROI_REFERENCE_FRAME_INVALID", f"reference frame {reference_id!r} is absent or ambiguous")
-    reference = reference_matches[0]
-    raw_groups = proposal.get("groups", [])
-    groups = []
-    if isinstance(raw_groups, list):
-        for group in raw_groups:
-            if isinstance(group, Mapping):
-                groups.append({
-                    key: _as_json(group[key])
-                    for key in ("name", "roi1", "roi2", "actual_mode", "selected_mode", "role")
-                    if key in group
-                })
-            else:
-                groups.append(_as_json(group))
-    return {
-        "reference_frame": proposal.get("reference_frame"),
-        "reference_native_dic_frame": reference.get("native_frame"),
-        "reference_sha256": proposal.get("reference_sha256"),
-        "image_shape": _as_json(proposal.get("image_shape")),
-        "free_region": _as_json(proposal.get("free_region")),
-        "field_roi": _as_json(proposal.get("field_roi")),
-        "exclusions": _as_json(proposal.get("exclusions", [])),
-        "groups": groups,
-    }
+    mask_cfg = analysis_config.get("mask")
+    raw_path = None
+    if isinstance(mask_cfg, Mapping) and mask_cfg.get("path"):
+        raw_path = mask_cfg.get("path")
+    elif isinstance(analysis_config.get("mask_path"), str) and analysis_config.get("mask_path"):
+        raw_path = analysis_config.get("mask_path")
+    if not raw_path:
+        return None
+    candidate = Path(str(raw_path)).expanduser()
+    if not candidate.is_absolute() and project_dir is not None:
+        candidate = Path(project_dir).expanduser().resolve() / candidate
+    resolved = candidate.resolve()
+    if resolved.is_file():
+        return {"path": str(resolved), "sha256": storage.sha256_file(resolved)}
+    return {"path": str(resolved), "sha256": None}
 
 
-def _fingerprint_dependencies(acquisition: Mapping[str, Any]) -> dict[str, Any]:
+def _fingerprint_dependencies(
+    acquisition: Mapping[str, Any],
+    project_dir: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
     frames = _ordered_frames(acquisition)
     image_dependencies = []
     for item in frames:
@@ -170,18 +138,25 @@ def _fingerprint_dependencies(acquisition: Mapping[str, Any]) -> dict[str, Any]:
             "native_frame": item["native_frame"],
             "path": str(path),
             "sha256": storage.sha256_file(path),
-            "counter_namespace": _as_json(item.get("counter_namespace")),
-            "duplicate_identity": _as_json(item.get("duplicate_identity", item.get("duplicate_of"))),
+            "frame_namespace": _as_json(item.get("frame_namespace", item.get("counter_namespace"))),
+            "duplicate_source_paths": _as_json(
+                item.get("duplicate_source_paths", item.get("duplicate_identity", item.get("duplicate_of")))
+            ),
         })
-    return {
+    analysis_config = acquisition.get("analysis_config", {})
+    deps: dict[str, Any] = {
         "version": _NUMERICS_FINGERPRINT_VERSION,
         "acquisition_id": acquisition.get("acquisition_id"),
         "analysis_mode": acquisition.get("analysis_mode"),
-        "analysis_config": _as_json(acquisition.get("analysis_config", {})),
+        "analysis_config": _as_json(analysis_config),
         "roi_tracking_geometry": _roi_tracking_geometry(acquisition),
         "image_frames": image_dependencies,
         "engine_code_sha256": _code_fingerprints(),
     }
+    mask_dep = _external_mask_fingerprint(analysis_config, project_dir=project_dir)
+    if mask_dep is not None:
+        deps["external_mask"] = mask_dep
+    return deps
 
 
 def _source_images_fingerprint(image_dependencies: list[Mapping[str, Any]]) -> str:
@@ -189,11 +164,14 @@ def _source_images_fingerprint(image_dependencies: list[Mapping[str, Any]]) -> s
     return storage.fingerprint_data("campaign_source_images_v1", image_dependencies)
 
 
-def fingerprint(acquisition: Mapping[str, Any]) -> str:
+def fingerprint(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str] | None = None) -> str:
     """Hash image bytes/identity, analysis settings, tracking geometry, and engine source."""
     if not isinstance(acquisition, Mapping):
         raise CampaignError("ACQUISITION_INVALID", "acquisition must be an object")
-    return storage.fingerprint_data(_NUMERICS_FINGERPRINT_VERSION, _fingerprint_dependencies(acquisition))
+    return storage.fingerprint_data(
+        _NUMERICS_FINGERPRINT_VERSION,
+        _fingerprint_dependencies(acquisition, project_dir=project_dir),
+    )
 
 
 def _reference_index(frames: list[dict[str, Any]], proposal: Mapping[str, Any]) -> int:
@@ -207,17 +185,21 @@ def _reference_index(frames: list[dict[str, Any]], proposal: Mapping[str, Any]) 
 def _normalization(raw: np.ndarray, analysis_config: Mapping[str, Any]) -> dict[str, Any]:
     configured = analysis_config.get("normalization")
     settings = {"normalization": dict(configured)} if isinstance(configured, Mapping) else {}
+    norm_cfg = settings.get("normalization", {})
+    policy = norm_cfg.get("policy", "reference_percentile")
     try:
-        if settings.get("normalization", {}).get("policy") == "fixed_bounds":
-            bounds = settings["normalization"].get("bounds")
+        if policy == "fixed_bounds":
+            bounds = norm_cfg.get("bounds")
             if not isinstance(bounds, Mapping) or "lo" not in bounds or "hi" not in bounds:
                 raise CampaignError("NORMALIZATION_CONFIG_INVALID", "fixed_bounds normalization requires bounds.lo and bounds.hi")
             lo, hi = float(bounds["lo"]), float(bounds["hi"])
             if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
                 raise CampaignError("NORMALIZATION_CONFIG_INVALID", "normalization bounds must be finite with hi > lo")
             return {"lo": lo, "hi": hi, "policy": "fixed_bounds"}
-        lower = float(settings.get("normalization", {}).get("lower_percentile", core.DEFAULT_NORMALIZATION_LOWER_PERCENTILE))
-        upper = float(settings.get("normalization", {}).get("upper_percentile", core.DEFAULT_NORMALIZATION_UPPER_PERCENTILE))
+        if policy not in (None, "reference_percentile"):
+            raise CampaignError("NORMALIZATION_CONFIG_INVALID", f"unsupported normalization policy {policy!r}")
+        lower = float(norm_cfg.get("lower_percentile", core.DEFAULT_NORMALIZATION_LOWER_PERCENTILE))
+        upper = float(norm_cfg.get("upper_percentile", core.DEFAULT_NORMALIZATION_UPPER_PERCENTILE))
         record = core.compute_reference_normalization(raw, lower_percentile=lower, upper_percentile=upper)
         return {"lo": record["reference_bounds"]["lo"], "hi": record["reference_bounds"]["hi"], "policy": "reference_percentile", "lower_percentile": lower, "upper_percentile": upper}
     except CampaignError:
@@ -348,9 +330,23 @@ def _gauge_record(group: Mapping[str, Any], tracking_row: Mapping[str, Any] | No
 def _flat_gauge_columns(gauges: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Expose stable G01…G05 scalar columns while retaining nested diagnostics."""
     flattened: dict[str, Any] = {}
-    for index, gauge in enumerate(gauges, start=1):
+    explicit_prefixes = {
+        str(gauge.get("name") or "")
+        for gauge in gauges
+        if re.fullmatch(r"G\d{2}", str(gauge.get("name") or ""))
+    }
+    used_prefixes: set[str] = set()
+    next_index = 1
+    for gauge in gauges:
         name = str(gauge.get("name") or "")
-        prefix = name if re.fullmatch(r"G\d{2}", name) else f"G{index:02d}"
+        if re.fullmatch(r"G\d{2}", name) and name not in used_prefixes:
+            prefix = name
+        else:
+            while f"G{next_index:02d}" in explicit_prefixes or f"G{next_index:02d}" in used_prefixes:
+                next_index += 1
+            prefix = f"G{next_index:02d}"
+            next_index += 1
+        used_prefixes.add(prefix)
         mapping = {
             "accepted": "accepted",
             "engineering_strain": "engineering_strain",
@@ -510,6 +506,13 @@ def _extensometer_rows(acquisition, frames, output_dir, progress, cancel):
             raise CampaignError(exc.code, str(exc)) from exc
         if state.get("template_policy") != "fixed_reference":
             raise CampaignError("FIXED_REFERENCE_REQUIRED", "campaign analysis requires fixed-reference templates")
+        for roi_label, code_key in (("ROI1", "texture_code1"), ("ROI2", "texture_code2")):
+            texture_code = state.get(code_key)
+            if texture_code:
+                raise CampaignError(
+                    str(texture_code),
+                    f"group {group.get('name', '')} {roi_label} failed reference texture preflight: {texture_code}",
+                )
         states.append(state)
     rows = []
     reference_source_id = int(reference_frame["frame"])
@@ -611,7 +614,9 @@ def _fullfield_settings(acquisition, frames, reference_index, output_dir, projec
     # Use the same strict v1 configuration validator and adapter as ezdic-cli;
     # campaign metadata cannot silently bypass the established solver contract.
     raw = dict(config)
-    approved_field_roi = proposal.get("field_roi", proposal.get("free_region"))
+    approved_field_roi = proposal.get("field_roi") if proposal.get("field_roi") is not None else proposal.get("free_region")
+    if not isinstance(approved_field_roi, (list, tuple)):
+        raise CampaignError("FULLFIELD_ROI_CONFIG_CONFLICT", "approved fullfield ROI geometry is missing")
     if "field_roi" in raw and (not isinstance(raw["field_roi"], (list, tuple)) or list(raw["field_roi"]) != list(approved_field_roi)):
         raise CampaignError("FULLFIELD_ROI_CONFIG_CONFLICT", "analysis_config.field_roi must match the human-approved ROI geometry")
     raw.update({
@@ -635,7 +640,6 @@ def _fullfield_settings(acquisition, frames, reference_index, output_dir, projec
 
 def _fullfield_rows(acquisition, frames, reference_index, result, output_dir, progress, cancel):
     _check_cancel(cancel)
-    frame_by_position = {index + 1: frame for index, frame in enumerate(frames)}
     core_records = result.get("frames") or []
     by_position = {int(item["frame_global_1based"]): item for item in core_records if item.get("frame_global_1based") is not None}
     reference = frames[reference_index]
@@ -650,6 +654,13 @@ def _fullfield_rows(acquisition, frames, reference_index, result, output_dir, pr
             core_record = by_position.get(position)
             quality = (core_record or {}).get("status", "CORE_FRAME_RECORD_MISSING")
             strain_status = "FIELD_ONLY_NO_ENGINEERING_AGGREGATE"
+        raw_reasons = (core_record or {}).get("reasons")
+        if isinstance(raw_reasons, list):
+            reasons = list(raw_reasons)
+        elif quality in ("REFERENCE_FRAME", "scientific_valid", "ok", "OK"):
+            reasons = []
+        else:
+            reasons = [quality]
         row = {
             "frame": int(frame["frame"]),
             "native_dic_frame": int(frame["native_frame"]),
@@ -668,6 +679,7 @@ def _fullfield_rows(acquisition, frames, reference_index, result, output_dir, pr
             "requested_gauge_count": 0,
             "strain_status": strain_status,
             "quality_status": quality,
+            "reasons": reasons,
             "field_quality": _as_json(core_record),
             "field_artifact_stem": (core_record or {}).get("artifact_stem"),
             "analysis_mode": "fullfield",
@@ -690,7 +702,7 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
     mode = acquisition.get("analysis_mode")
     if mode not in {"extensometer", "fullfield"}:
         raise CampaignError("ANALYSIS_MODE_INVALID", f"unsupported analysis mode {mode!r}")
-    fingerprint_dependencies = _fingerprint_dependencies(acquisition)
+    fingerprint_dependencies = _fingerprint_dependencies(acquisition, project_dir=project_dir)
     input_fingerprint = storage.fingerprint_data(_NUMERICS_FINGERPRINT_VERSION, fingerprint_dependencies)
     source_images_fingerprint = _source_images_fingerprint(fingerprint_dependencies["image_frames"])
     stage_dir = storage.stage_output_dir(project_dir, str(acquisition["acquisition_id"]), "analysis", input_fingerprint)
@@ -699,6 +711,7 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
     reference_frame = None
     normalization = None
     generated_stage_files: list[Path] = []
+    core_output_dir: Path | None = None
     try:
         if mode == "extensometer":
             rows, reference_frame, normalization = _extensometer_rows(acquisition, frames, stage_dir, progress, cancel)
@@ -710,6 +723,7 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
                 raise CampaignError("INSUFFICIENT_FRAMES", "fullfield mode requires a reference and at least one deformed image")
             core_output = stage_dir / "core_output"
             core_output.mkdir(parents=True, exist_ok=True)
+            core_output_dir = core_output
             reference_index = _reference_index(frames, acquisition["roi"])
             settings = _fullfield_settings(acquisition, frames, reference_index, core_output, project_dir)
 
@@ -745,7 +759,7 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
                 engine_artifacts.append(storage.relative_artifact(project_dir, manifest_path))
         _check_cancel(cancel)
         # Rehash to detect source or executable edits during a long run.
-        final_fingerprint = fingerprint(acquisition)
+        final_fingerprint = fingerprint(acquisition, project_dir=project_dir)
         if final_fingerprint != input_fingerprint:
             raise CampaignError("INPUT_CHANGED_DURING_ANALYSIS", "an image, ROI, configuration, or numerical source changed during analysis")
         rows_path = stage_dir / "rows.jsonl"
@@ -827,8 +841,12 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
     except CampaignError:
         for path in generated_stage_files:
             path.unlink(missing_ok=True)
+        if core_output_dir is not None:
+            shutil.rmtree(core_output_dir, ignore_errors=True)
         raise
     except Exception as exc:
         for path in generated_stage_files:
             path.unlink(missing_ok=True)
+        if core_output_dir is not None:
+            shutil.rmtree(core_output_dir, ignore_errors=True)
         raise CampaignError("CAMPAIGN_ANALYSIS_FAILED", str(exc)) from exc

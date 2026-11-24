@@ -9,14 +9,20 @@ explicit counter mapping or a unique colocated FIO file supports the join.
 from __future__ import annotations
 
 import csv
-import datetime as dt
-import math
+import io
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from .generic import _is_excluded, _parse_cell, discover as generic_discover
+from .._time_io import (
+    classify_time_value as parse_time_value,
+    finite_number as _number,
+    resolve_force_unit,
+    sniff_csv_delimiter,
+    strict_integer as _integer,
+)
+from .generic import _is_excluded, _parse_cell, discover as generic_discover, read_explicit_frame_mapping
 
 
 _FIO_COLUMN = re.compile(r"\s*Col\s+(\d+)\s+(\S+)(?:\s+\S+)?", re.IGNORECASE)
@@ -24,75 +30,6 @@ _FIO_SCAN = re.compile(r"(?:^|[/\\])eh3scan_(\d+)\.fio$", re.IGNORECASE)
 _FIO_FOLDER = re.compile(r"^fio[_-]?(\d+)$", re.IGNORECASE)
 _FIO_TOKEN = re.compile(r"<no-data>|None|[^\s]+", re.IGNORECASE)
 _MISSING = {"", "nan", "none", "na", "n/a", "null", "<no-data>"}
-_ABSOLUTE_EPOCH_MIN = 1_000_000_000.0
-
-
-def _number(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _integer(value: Any) -> int | None:
-    number = _number(value)
-    if number is None:
-        return None
-    rounded = round(number)
-    return int(rounded) if abs(number - rounded) <= 1e-8 else None
-
-
-def parse_time_value(value: Any) -> dict[str, Any]:
-    """Classify a timestamp without turning a relative clock into Unix time."""
-    number = _number(value)
-    if number is not None:
-        if number >= _ABSOLUTE_EPOCH_MIN:
-            return {
-                "timestamp_unix_s": number,
-                "time_s": None,
-                "timestamp_status": "RECORDED_ABSOLUTE_EPOCH",
-                "timestamp_timezone": "UTC_EPOCH",
-            }
-        return {
-            "timestamp_unix_s": None,
-            "time_s": number,
-            "timestamp_status": "RECORDED_RELATIVE_CLOCK",
-            "timestamp_timezone": None,
-        }
-    text = "" if value is None else str(value).strip()
-    if not text or text.casefold() in _MISSING:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "MISSING_TIMESTAMP",
-            "timestamp_timezone": None,
-        }
-    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    try:
-        parsed = dt.datetime.fromisoformat(candidate)
-    except ValueError:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "UNPARSEABLE_TIMESTAMP",
-            "timestamp_timezone": None,
-            "timestamp_raw": text,
-        }
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "NAIVE_DATETIME_TIMEZONE_UNKNOWN",
-            "timestamp_timezone": None,
-            "timestamp_raw": text,
-        }
-    return {
-        "timestamp_unix_s": parsed.timestamp(),
-        "time_s": None,
-        "timestamp_status": "RECORDED_ABSOLUTE_TIMEZONE_AWARE",
-        "timestamp_timezone": str(parsed.tzinfo),
-    }
 
 
 def parse_fio_text(text: str, source_path: str = "<memory>") -> dict[str, Any]:
@@ -137,8 +74,19 @@ def parse_fio_text(text: str, source_path: str = "<memory>") -> dict[str, Any]:
     if ids != list(range(1, len(ids) + 1)):
         issues.append({"code": "FIO_COLUMN_NUMBER_SEQUENCE", "column_ids": ids})
     names = [name for _, name in columns]
+    output_names: list[str] = []
+    seen_names: dict[str, int] = {}
     if len(set(names)) != len(names):
         issues.append({"code": "FIO_DUPLICATE_COLUMN_NAMES", "column_names": names})
+    for col_id, name in columns:
+        seen_names[name] = seen_names.get(name, 0) + 1
+        if seen_names[name] == 1:
+            output_names.append(name)
+        else:
+            candidate = f"{name}__col{col_id}"
+            while candidate in output_names:
+                candidate = f"{candidate}_{seen_names[name]}"
+            output_names.append(candidate)
 
     rows: list[dict[str, Any]] = []
     for line_index, line in enumerate(lines[cursor:], start=cursor + 1):
@@ -150,19 +98,27 @@ def parse_fio_text(text: str, source_path: str = "<memory>") -> dict[str, Any]:
                            "expected": len(columns), "found": len(tokens)})
             continue
         row: dict[str, Any] = {"source_line": line_index}
-        for name, token in zip(names, tokens):
+        for name, token in zip(output_names, tokens):
             if token.casefold() in _MISSING:
                 row[name] = None
                 continue
             value = _number(token)
-            if value is None:
+            if value is not None:
+                row[name] = value
+                continue
+            time_info = parse_time_value(token)
+            if time_info["timestamp_status"] == "RECORDED_ABSOLUTE_TIMEZONE_AWARE":
+                row[name] = token
+            elif time_info["timestamp_status"] == "NAIVE_DATETIME_TIMEZONE_UNKNOWN":
+                row[name] = token
+                issues.append({"code": "FIO_NAIVE_TIMESTAMP_VALUE", "line": line_index,
+                               "column": name, "value": token})
+            else:
                 row[name] = None
                 issues.append({"code": "FIO_NONNUMERIC_VALUE", "line": line_index,
                                "column": name, "value": token})
-            else:
-                row[name] = value
         rows.append(row)
-    return {**source_identity, "columns": names, "rows": rows, "issues": issues}
+    return {**source_identity, "columns": output_names, "rows": rows, "issues": issues}
 
 
 def parse_load_table_text(
@@ -181,12 +137,8 @@ def parse_load_table_text(
     """
     content = str(text)
     if delimiter is None:
-        try:
-            dialect = csv.Sniffer().sniff(content[:8192], delimiters=",;\t")
-            delimiter = dialect.delimiter
-        except csv.Error:
-            delimiter = ","
-    reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
+        delimiter = sniff_csv_delimiter(content[:8192])
+    reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=delimiter)
     headers = reader.fieldnames or []
     issues: list[dict[str, Any]] = []
     if time_column not in headers:
@@ -197,16 +149,7 @@ def parse_load_table_text(
     for source_row, raw in enumerate(reader, start=2):
         time_info = parse_time_value(raw.get(time_column)) if time_column in headers else parse_time_value(None)
         raw_force = _number(raw.get(force_column)) if force_column in headers else None
-        unit_text = force_unit
-        if not unit_text:
-            for key in ("force_unit", "load_unit", "unit"):
-                if raw.get(key):
-                    unit_text = str(raw[key]).strip()
-                    break
-        if not unit_text and force_column == "force_N":
-            unit_text = "N"
-        normalized_unit = (unit_text or "").casefold().replace(" ", "")
-        scale = {"n": 1.0, "newton": 1.0, "newtons": 1.0, "kn": 1000.0, "kilonewton": 1000.0, "kilonewtons": 1000.0}.get(normalized_unit)
+        unit_text, scale = resolve_force_unit(raw, force_column, force_unit)
         if raw_force is None:
             force_n = None
             force_status = "MISSING_OR_INVALID_FORCE"
@@ -224,7 +167,7 @@ def parse_load_table_text(
             "force_unit_source": unit_text,
             "force_N": force_n,
             "force_status": force_status,
-            "source_values": {key: _parse_cell(value) for key, value in raw.items()},
+            "source_values": {str(key): _parse_cell(value) for key, value in raw.items() if key is not None},
         })
     return {"headers": headers, "rows": rows, "issues": issues,
             "source_definition": {"time_column": time_column, "force_column": force_column,
@@ -237,29 +180,55 @@ def parse_cbf_header_text(text: str) -> dict[str, Any]:
     Only labeled values are accepted.  In particular, no acquisition time is
     built from a counter or an assumed exposure interval.
     """
-    found: dict[str, str] = {}
-    patterns = {
-        "timestamp": re.compile(r"^\s*#?\s*(?:timestamp|start_time|datetime|date_time)\s*[:=]\s*(.*?)\s*$", re.I),
-        "exposure_s": re.compile(r"^\s*#?\s*(?:exposure_time|exposure_s)\s*[:=]\s*([+\-0-9.eE]+)\s*$", re.I),
-    }
+    found_timestamp: str | None = None
+    found_exposure: tuple[str, str | None] | None = None
+    timestamp_re = re.compile(
+        r"^\s*#?\s*(?:timestamp|start_time|datetime|date_time)\s*(?:[:=]\s*|\s+)(.*?)\s*$",
+        re.I,
+    )
+    exposure_re = re.compile(
+        r"^\s*#?\s*(?:exposure_time|exposure_s)\s*(?:[:=]\s*|\s+)([+\-0-9.eE]+)(?:\s*([a-zA-Z]+))?\s*$",
+        re.I,
+    )
     for line in str(text).splitlines():
-        for field, expression in patterns.items():
-            match = expression.match(line)
-            if match and field not in found:
-                found[field] = match.group(1).strip()
-    result: dict[str, Any] = {"timestamp_source": "CBF_HEADER" if "timestamp" in found else None}
-    if "timestamp" in found:
-        result.update(parse_time_value(found["timestamp"]))
+        if found_timestamp is None:
+            match = timestamp_re.match(line)
+            if match:
+                found_timestamp = match.group(1).strip()
+        if found_exposure is None:
+            match = exposure_re.match(line)
+            if match:
+                found_exposure = (match.group(1).strip(), match.group(2).strip() if match.group(2) else None)
+    result: dict[str, Any] = {"timestamp_source": "CBF_HEADER" if found_timestamp is not None else None}
+    if found_timestamp is not None:
+        result.update(parse_time_value(found_timestamp))
     else:
         result.update({"timestamp_unix_s": None, "time_s": None,
                        "timestamp_status": "NO_EXPLICIT_TIMESTAMP_IN_CBF_HEADER",
                        "timestamp_timezone": None})
-    if "exposure_s" in found:
-        exposure = _number(found["exposure_s"])
-        result["exposure_s"] = exposure
-        if exposure is None or exposure < 0:
+    if found_exposure is not None:
+        raw_exposure, raw_unit = found_exposure
+        exposure = _number(raw_exposure)
+        unit_scale = {
+            None: 1.0,
+            "s": 1.0,
+            "sec": 1.0,
+            "secs": 1.0,
+            "second": 1.0,
+            "seconds": 1.0,
+            "ms": 1e-3,
+            "msec": 1e-3,
+            "millisecond": 1e-3,
+            "milliseconds": 1e-3,
+        }.get(raw_unit.casefold() if raw_unit else None)
+        if unit_scale is None:
+            result["exposure_s"] = None
+            result["exposure_status"] = "INVALID_EXPOSURE_UNIT"
+        elif exposure is None or exposure < 0:
+            result["exposure_s"] = exposure
             result["exposure_status"] = "INVALID_EXPOSURE_VALUE"
         else:
+            result["exposure_s"] = exposure * unit_scale
             result["exposure_status"] = "RECORDED_CBF_EXPOSURE"
     else:
         result["exposure_s"] = None
@@ -267,11 +236,22 @@ def parse_cbf_header_text(text: str) -> dict[str, Any]:
     return result
 
 
-def classify_desy_path(path: str | os.PathLike[str]) -> dict[str, Any]:
+def classify_desy_path(
+    path: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
     """Classify the local file layout without claiming a physical sample ID."""
     source = Path(path)
-    parts = [part.casefold() for part in source.parts]
-    suffix = source.suffix.casefold()
+    inspect = source
+    if root is not None:
+        try:
+            inspect = source.expanduser().resolve().relative_to(Path(root).expanduser().resolve())
+        except ValueError:
+            inspect = source
+    dir_parts = inspect.parent.parts
+    parts = [part.casefold() for part in dir_parts]
+    suffix = inspect.suffix.casefold()
     if "dic" in parts and suffix in {".tif", ".tiff"}:
         kind = "desy_delun_dic"
         counter_namespace = "delun_dic_filename_counter"
@@ -289,7 +269,7 @@ def classify_desy_path(path: str | os.PathLike[str]) -> dict[str, Any]:
         counter_namespace = "filename_counter"
 
     candidate = None
-    for part in source.parts:
+    for part in dir_parts:
         match = _FIO_FOLDER.match(part)
         if match:
             candidate = int(match.group(1))
@@ -311,18 +291,25 @@ def _group_directory(path: Path, root: Path, source_kind: str, explicit_levels: 
                 return root
             current = current.parent
         return current
-    parts = list(path.parts)
-    lowered = [part.casefold() for part in parts]
-    if source_kind == "desy_delun_dic" and "dic" in lowered:
-        current = path.parent.parent if path.parent.name.casefold() == "dic" else path.parent
-    elif source_kind == "desy_camera_dic" and "dic_images" in lowered:
-        index = lowered.index("dic_images")
+    try:
+        rel_parts = list(path.relative_to(root).parts)
+    except ValueError:
+        return root
+    dir_parts = rel_parts[:-1]
+    dir_lowered = [part.casefold() for part in dir_parts]
+    if source_kind == "desy_delun_dic" and "dic" in dir_lowered:
+        current = path.parent.parent if dir_lowered and dir_lowered[-1] == "dic" else path.parent
+    elif source_kind == "desy_camera_dic" and "dic_images" in dir_lowered:
+        index = dir_lowered.index("dic_images")
         # Preserve the FIO folder label as the acquisition directory; camera
         # counter folders below it are namespace labels, not acquisition IDs.
-        current = Path(*parts[: index + 2]) if index + 1 < len(parts) else path.parent
+        if index + 1 < len(dir_parts):
+            current = root.joinpath(*dir_parts[: index + 2])
+        else:
+            current = path.parent
     elif source_kind == "desy_camera_dic":
-        markers = [index for index, part in enumerate(lowered) if part in {"1236b_1", "varex_1"}]
-        current = Path(*parts[:markers[0]]) if markers and markers[0] > 0 else path.parent
+        markers = [index for index, part in enumerate(dir_lowered) if part in {"1236b_1", "varex_1"}]
+        current = root.joinpath(*dir_parts[: markers[0]]) if markers else path.parent
     else:
         current = path.parent
     try:
@@ -457,19 +444,21 @@ def discover(
         files.update(path.resolve() for path in root_path.glob(image_pattern) if path.is_file())
     files = {path for path in files if not _is_excluded(path, root_path, excluded)}
     grouped: dict[tuple[Path, str], list[Path]] = {}
+    kinds_per_dir: dict[Path, set[str]] = {}
     for path in files:
-        classification = classify_desy_path(path)
+        classification = classify_desy_path(path, root=root_path)
         source_kind = classification["source_kind"]
         directory = _group_directory(path, root_path, source_kind, explicit_levels)
         grouped.setdefault((directory, source_kind), []).append(path)
+        kinds_per_dir.setdefault(directory, set()).add(source_kind)
 
     result: list[dict[str, Any]] = []
     for (directory, source_kind), batch_files in sorted(
         grouped.items(), key=lambda item: (item[0][0].as_posix().casefold(), item[0][1])
     ):
-        relative_patterns = [path.relative_to(directory).as_posix() for path in batch_files]
         generic_config = {
-            "image_patterns": relative_patterns,
+            "explicit_files": batch_files,
+            "image_patterns": image_patterns,
             "acquisition_parent_levels": 1_000_000,
             "frame_regex": config.get("frame_regex", r"(?P<frame>\d+)$"),
             "frame_namespace": {
@@ -478,28 +467,33 @@ def discover(
                 "desy_camera_dic": "camera_tiff_filename_counter",
             }.get(source_kind, "filename_counter"),
             "source_kind": source_kind,
-            "analysis_mode": "extensometer" if source_kind != "desy_camera_cbf" else "extensometer",
+            "analysis_mode": str(config.get("analysis_mode", "extensometer")),
             "exclude": (),
             "frame_metadata": config.get("frame_metadata", "frame_metadata.csv"),
             "frame_metadata_columns": config.get("frame_metadata_columns"),
+            "measurement_map": None,
         }
         discovered = generic_discover(directory, pattern=generic_config)
         if not discovered:
             continue
         acquisition = discovered[0]
-        relative = directory.relative_to(root_path).as_posix() if directory != root_path else "."
-        acquisition["name"] = directory.name if relative != "." else root_path.name
+        base_relative = directory.relative_to(root_path).as_posix() if directory != root_path else "_root_sequence"
+        disambiguate = len(kinds_per_dir.get(directory, ())) > 1
+        relative = f"{base_relative}__{source_kind}" if disambiguate else base_relative
+        base_name = directory.name if directory != root_path else root_path.name
+        acquisition["name"] = f"{base_name} ({source_kind})" if disambiguate else base_name
         acquisition["relative_path"] = relative
         acquisition["source_kind"] = source_kind
         acquisition["metadata"].update({
             "adapter": "desy",
             "source_layout": source_kind,
-            "image_root_relative_path": relative,
+            "image_root_relative_path": base_relative,
         })
 
         fio_path, fio_scan_id, fio_link_status = _linked_fio(directory)
         folder_scan_candidate = None
-        for part in directory.parts:
+        rel_dir_parts = directory.relative_to(root_path).parts if directory != root_path else ()
+        for part in rel_dir_parts:
             match = _FIO_FOLDER.match(part)
             if match:
                 folder_scan_candidate = int(match.group(1))
@@ -522,45 +516,21 @@ def discover(
                 "fio_association_status": fio_link_status,
                 "fio_source_path": str(fio_path.resolve()),
             })
-            if source_kind == "desy_camera_cbf":
-                for frame in acquisition["image_frames"]:
-                    acquisition["measurement_frames"].append({
-                        "frame": frame["frame"],
-                        "native_cbf_frame": frame["native_frame"],
-                        "scan_id": fio_scan_id,
-                        "scan_id_is_global_fio": fio_scan_id is not None,
-                        "scan_id_namespace": "global_fio_scan_id" if fio_scan_id is not None else None,
-                        "counter_namespace": "camera_cbf_filename_counter",
-                    })
-                counter_column = config.get("fio_counter_column")
-                if counter_column:
-                    _attach_explicit_fio_clock(
-                        acquisition,
-                        fio_path,
-                        fio_scan_id,
-                        counter_column=str(counter_column),
-                        timestamp_column=str(config.get("fio_timestamp_column", "timestamp")),
-                    )
-        if source_kind == "desy_camera_cbf" and not acquisition["measurement_frames"]:
-            acquisition["measurement_frames"] = [{
-                "frame": frame["frame"],
-                "native_cbf_frame": frame["native_frame"],
-                "scan_id": None,
-                "scan_id_is_global_fio": False,
-                "scan_id_namespace": None,
-                "counter_namespace": "camera_cbf_filename_counter",
-            } for frame in acquisition["image_frames"]]
 
-        # An explicit measurement map replaces filename-derived CBF rows; it
-        # never uses file order to fill absent frame identities.
-        map_setting = config.get("measurement_map", config.get("measurement_frames"))
+        # An explicit measurement map takes precedence over filename-derived CBF rows
+        # without ever appending duplicate analysis frames.
+        if "measurement_map" in config:
+            map_setting = config.get("measurement_map")
+        elif "measurement_frames" in config:
+            map_setting = config.get("measurement_frames")
+        else:
+            map_setting = "measurement_frames.csv"
+        loaded_explicit_map = False
         if map_setting:
             map_path = Path(map_setting)
             if not map_path.is_absolute():
                 map_path = directory / map_path
             if map_path.is_file():
-                from .generic import read_explicit_frame_mapping
-
                 mapped, map_issues = read_explicit_frame_mapping(
                     map_path,
                     columns=config.get("measurement_columns"),
@@ -570,6 +540,45 @@ def discover(
                 acquisition["measurement_frames"] = mapped
                 acquisition["discovery_issues"].extend(map_issues)
                 acquisition["metadata"]["measurement_map_source"] = str(map_path.resolve())
+                loaded_explicit_map = True
+
+        if source_kind == "desy_camera_cbf" and not loaded_explicit_map:
+            has_fio_scan = fio_path is not None and fio_scan_id is not None
+            derived_frames: list[dict[str, Any]] = []
+            for frame in acquisition["image_frames"]:
+                entry: dict[str, Any] = {
+                    "frame": frame["frame"],
+                    "native_cbf_frame": frame["native_frame"],
+                    "scan_id": fio_scan_id if has_fio_scan else None,
+                    "scan_id_is_global_fio": has_fio_scan,
+                    "scan_id_namespace": "global_fio_scan_id" if has_fio_scan else None,
+                    "counter_namespace": "camera_cbf_filename_counter",
+                }
+                for field in (
+                    "timestamp_unix_s",
+                    "estimated_timestamp_unix_s",
+                    "time_s",
+                    "clock_id",
+                    "timestamp_source",
+                    "timestamp_status",
+                    "exposure_start_unix_s",
+                    "exposure_end_unix_s",
+                ):
+                    if frame.get(field) is not None:
+                        entry[field] = frame[field]
+                derived_frames.append(entry)
+            acquisition["measurement_frames"] = derived_frames
+
+        if source_kind == "desy_camera_cbf" and fio_path is not None:
+            counter_column = config.get("fio_counter_column")
+            if counter_column:
+                _attach_explicit_fio_clock(
+                    acquisition,
+                    fio_path,
+                    fio_scan_id,
+                    counter_column=str(counter_column),
+                    timestamp_column=str(config.get("fio_timestamp_column", "timestamp")),
+                )
         result.append(acquisition)
     return result
 

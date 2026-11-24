@@ -8,20 +8,31 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import math
 import os
-import platform
 import shutil
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import scipy
 from scipy.spatial import cKDTree
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks._common import (  # noqa: E402
+    runtime_environment,
+    sha256_bytes as _sha256,
+    sha256_file,
+    signed_error_stats,
+    write_csv_lf,
+    write_json_lf,
+)
 
 SCHEMA = "straintrace-paired-dic-comparison-v1"
 FLOAT_FIELDS = ("x", "y", "u", "v", "strain_xx", "strain_yy", "strain_xy")
@@ -38,15 +49,13 @@ PARAMETER_FIELDS = (
 )
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _digest(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 def _number(value, context, *, missing=False):
+    if isinstance(value, bool):
+        raise ValueError(f"{context}: expected a number, got boolean {value!r}")
     if missing and (value is None or str(value).strip().lower() in {"", "nan", "na", "null"}):
         return float("nan")
     try:
@@ -219,12 +228,14 @@ def _side_summary(rows, source, *, denominator=None):
 
 
 def _difference(values):
-    data = np.asarray(values, dtype=float)
-    if not data.size:
-        return {"n": 0, "bias": None, "rmse": None, "p95_abs": None, "max_abs": None}
-    return {"n": int(data.size), "bias": float(data.mean()),
-            "rmse": float(np.sqrt(np.mean(data ** 2))),
-            "p95_abs": float(np.percentile(np.abs(data), 95)), "max_abs": float(np.max(np.abs(data)))}
+    stats = signed_error_stats(values)
+    return {
+        "n": stats["count"],
+        "bias": stats["bias"],
+        "rmse": stats["rmse"],
+        "p95_abs": stats["p95_abs"],
+        "max_abs": stats["max_abs"],
+    }
 
 
 def _status(row):
@@ -240,14 +251,18 @@ def _status(row):
 
 
 def _validate(config):
+    if not isinstance(config, dict):
+        raise ValueError("Comparison manifest root must be a JSON object")
     if config.get("schema") != SCHEMA:
         raise ValueError(f"Expected schema {SCHEMA}")
-    sources = config.get("sources", {})
-    if set(sources) != {"straintrace", "comparison"}:
+    sources = config.get("sources")
+    if not isinstance(sources, dict) or set(sources) != {"straintrace", "comparison"}:
         raise ValueError("sources must contain straintrace and comparison")
     for label, source in sources.items():
-        metadata = source.get("metadata", {})
-        if any(key not in metadata for key in IDENTITY_FIELDS):
+        if not isinstance(source, dict):
+            raise ValueError(f"{label}: source definition must be an object")
+        metadata = source.get("metadata")
+        if not isinstance(metadata, dict) or any(key not in metadata for key in IDENTITY_FIELDS):
             raise ValueError(f"{label}: all identity/coordinate/strain/ROI metadata must be explicit")
         if not _digest(metadata["reference_image_sha256"]) or not isinstance(metadata["reference_frame"], str) or not metadata["reference_frame"]:
             raise ValueError(f"{label}: reference frame and lowercase SHA-256 are required")
@@ -259,17 +274,23 @@ def _validate(config):
             raise ValueError("Use matching dimensionless Green-Lagrange or infinitesimal strain and tensor shear")
         if source.get("rows_representation") not in {"complete_grid", "partial_rows"}:
             raise ValueError(f"{label}: declare complete_grid or partial_rows; omitted failures affect coverage")
-        parameters = source.get("parameters", {})
-        if any(key not in parameters or parameters[key] is None for key in PARAMETER_FIELDS):
+        parameters = source.get("parameters")
+        if not isinstance(parameters, dict) or any(key not in parameters or parameters[key] is None for key in PARAMETER_FIELDS):
             raise ValueError(f"{label}: record subset, step, strain window, shape function, reference/filter and quality parameters")
         if any(isinstance(value, str) and (not value.strip() or value.startswith("REPLACE_WITH")) for value in parameters.values()):
             raise ValueError(f"{label}: replace template placeholders with the actual processing parameters")
         for key in ("subset_size_px", "step_px", "strain_window_points"):
             if _number(parameters[key], f"{label}:{key}") <= 0:
                 raise ValueError(f"{label}:{key} must be positive")
-        if "quality" in source.get("columns", {}) and not all(source.get("quality", {}).get(key) for key in ("name", "unit", "meaning")):
+        columns = source.get("columns")
+        if not isinstance(columns, dict):
+            raise ValueError(f"{label}: columns must be a JSON object")
+        quality = source.get("quality")
+        if quality is not None and not isinstance(quality, dict):
+            raise ValueError(f"{label}: quality definition must be an object or null")
+        if "quality" in columns and (not isinstance(quality, dict) or not all(isinstance(quality.get(key), str) and quality.get(key).strip() for key in ("name", "unit", "meaning"))):
             raise ValueError(f"{label}: quality column requires its own name, unit and meaning")
-        if source.get("quality") and "quality" not in source.get("columns", {}):
+        if quality is not None and "quality" not in columns:
             raise ValueError(f"{label}: quality definition requires a mapped quality column")
     left, right = (sources[name]["metadata"] for name in ("straintrace", "comparison"))
     for key in IDENTITY_FIELDS:
@@ -286,6 +307,8 @@ def _validate(config):
         raise ValueError("frames must explicitly enumerate all intended stages, including missing exports")
     identifiers = set()
     for frame in frames:
+        if not isinstance(frame, dict):
+            raise ValueError("Each frame entry must be a JSON object")
         identity = frame.get("frame_id")
         if not isinstance(identity, str) or not identity or identity in identifiers:
             raise ValueError("Each frame_id must be a nonempty unique string")
@@ -308,8 +331,8 @@ def compare(manifest: Path, output: Path):
     config = json.loads(manifest_bytes)
     sources, roi, tolerance = _validate(config)
     base = manifest.parent
-    grid_config = config.get("comparison_grid", {})
-    if not isinstance(grid_config.get("csv"), str):
+    grid_config = config.get("comparison_grid")
+    if not isinstance(grid_config, dict) or not isinstance(grid_config.get("csv"), str):
         raise ValueError("comparison_grid.csv must identify the fixed reference domain")
     grid, grid_identity = _read_csv((base / grid_config["csv"]).resolve(strict=True), grid_config.get("columns"), grid=True)
     domain = [row for row in grid if row["eligible"] and _inside(row, roi)]
@@ -325,8 +348,8 @@ def compare(manifest: Path, output: Path):
         "schema": SCHEMA, "kind": "agreement_not_ground_truth", "equivalence_claim": False,
         "identity_verification": "Image identities and processing settings are supplied by the manifest; export and grid bytes are SHA-256 recorded.",
         "manifest": {"path": str(manifest), "sha256": _sha256(manifest_bytes)},
-        "script_sha256": _sha256(Path(__file__).read_bytes()), "comparison_grid": grid_identity,
-        "environment": {"python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__},
+        "script_sha256": sha256_file(__file__), "comparison_grid": grid_identity,
+        "environment": runtime_environment(include_opencv=False),
         "fixed_domain_n": len(domain), "coordinate_tolerance_px": tolerance,
         "roi_membership": {
             "native_roi": "Reported coordinates inside the closed ROI; no boundary expansion.",
@@ -366,26 +389,25 @@ def compare(manifest: Path, output: Path):
             common_peaks = _compare_extrema(common_left, common_right, kind="maximum")
             common_minima = _compare_extrema(common_left, common_right, kind="minimum")
             point_file = f"frame_{ordinal:04d}_points.csv"
-            with (staging / point_file).open("w", newline="", encoding="utf-8") as stream:
-                fieldnames = ["x", "y", "straintrace_status", "comparison_status"]
-                for label in sources:
-                    fieldnames += [f"{label}_{key}" for key in FLOAT_FIELDS[2:] + ("quality", "invalid_reason", "strain_invalid_reason")]
-                fieldnames += [f"difference_{key}" for key in FLOAT_FIELDS[2:]]
-                writer = csv.DictWriter(stream, fieldnames=fieldnames)
-                writer.writeheader()
-                for point, (a, b) in zip(domain, pairs):
-                    record = {"x": point["x"], "y": point["y"], "straintrace_status": _status(a), "comparison_status": _status(b)}
-                    for label, row in (("straintrace", a), ("comparison", b)):
-                        for key in FLOAT_FIELDS[2:]:
-                            gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
-                            record[f"{label}_{key}"] = row[key] if row is not None and row[gate] else None
-                        for key in ("quality", "invalid_reason", "strain_invalid_reason"):
-                            value = row.get(key) if row else None
-                            record[f"{label}_{key}"] = value if not isinstance(value, float) or math.isfinite(value) else None
+            fieldnames = ["x", "y", "straintrace_status", "comparison_status"]
+            for label in ("straintrace", "comparison"):
+                fieldnames += [f"{label}_{key}" for key in FLOAT_FIELDS[2:] + ("quality", "invalid_reason", "strain_invalid_reason")]
+            fieldnames += [f"difference_{key}" for key in FLOAT_FIELDS[2:]]
+            point_rows = []
+            for point, (a, b) in zip(domain, pairs):
+                record = {"x": point["x"], "y": point["y"], "straintrace_status": _status(a), "comparison_status": _status(b)}
+                for label, row in (("straintrace", a), ("comparison", b)):
                     for key in FLOAT_FIELDS[2:]:
                         gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
-                        record[f"difference_{key}"] = a[key] - b[key] if a is not None and b is not None and a[gate] and b[gate] else None
-                    writer.writerow(record)
+                        record[f"{label}_{key}"] = row[key] if row is not None and row[gate] else None
+                    for key in ("quality", "invalid_reason", "strain_invalid_reason"):
+                        value = row.get(key) if row else None
+                        record[f"{label}_{key}"] = value if not isinstance(value, float) or math.isfinite(value) else None
+                for key in FLOAT_FIELDS[2:]:
+                    gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
+                    record[f"difference_{key}"] = a[key] - b[key] if a is not None and b is not None and a[gate] and b[gate] else None
+                point_rows.append(record)
+            write_csv_lf(staging / point_file, fieldnames, point_rows)
             report["frames"].append({
                 "frame_id": frame["frame_id"], "stage": frame["stage"], "image_sha256": frame["image_sha256"],
                 "exports": identities, "status": "no_common_displacement" if not common_displacement else "no_common_strain" if not common_strain else "compared",
@@ -405,13 +427,13 @@ def compare(manifest: Path, output: Path):
                 "displacement_vector_rmse_px": math.sqrt(sum(v*v for v in vectors)/len(vectors)) if vectors else None,
                 "common_domain_peaks": common_peaks,
                 "common_domain_minima": common_minima,
-                "point_table": {"path": point_file, "sha256": _sha256((staging / point_file).read_bytes())},
+                "point_table": {"path": point_file, "sha256": sha256_file(staging / point_file)},
             })
         count_strain = sum(frame["common_strain_n"] > 0 for frame in report["frames"])
         count_displacement = sum(frame["common_displacement_n"] > 0 for frame in report["frames"])
         report["comparison_status"] = "compared_all_frames" if count_strain == len(report["frames"]) else "partial_comparison" if count_displacement else "no_common_measurements"
         report["frames_with_common_strain"] = count_strain
-        (staging / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+        write_json_lf(staging / "report.json", report, indent=2, ensure_ascii=False, allow_nan=False)
         if output.exists():
             raise FileExistsError(f"Output already exists: {output}")
         os.rename(staging, output)

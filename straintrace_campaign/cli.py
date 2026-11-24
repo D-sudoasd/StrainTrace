@@ -46,16 +46,6 @@ def _positive_finite(value: str) -> float:
     return number
 
 
-def _nonnegative_finite(value: str) -> float:
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a non-negative finite number") from exc
-    if not math.isfinite(number) or number < 0:
-        raise argparse.ArgumentTypeError("must be a non-negative finite number")
-    return number
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="straintrace campaign", description="Manage reusable DIC acquisition campaigns")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -136,7 +126,7 @@ def _exit_for(error: CampaignError) -> int:
     code = error.code
     if code.startswith(("ROI_", "GATE_", "DIMENSION_", "ACQUISITION_IDENTITY")) or code in {"PROJECT_LOCKED", "CAMPAIGN_CANCELLED"}:
         return EXIT_GATE
-    if code.startswith(("PROJECT_", "ROOT_", "ADAPTER_", "DISCOVERY_", "ACQUISITION_PATCH", "ALIGNMENT_OPTION", "EXPORT_TIMEOUT", "LOAD_SOURCE")):
+    if code.startswith(("PROJECT_", "ROOT_", "ADAPTER_", "DISCOVERY_", "ACQUISITION_PATCH", "ALIGNMENT_OPTION", "LOAD_SOURCE")) or code == "EXPORT_TIMEOUT_INVALID":
         return EXIT_ARGUMENT
     return EXIT_RUNTIME
 
@@ -157,7 +147,11 @@ def _install_cancel_handler(cancel: threading.Event) -> tuple[Any, Any]:
 def _dispatch(args: argparse.Namespace) -> int:
     command = args.command
     if command == "init":
-        roots = dict(args.root)
+        roots: dict[str, str] = {}
+        for alias, root_path in args.root:
+            if alias in roots:
+                raise CampaignError("PROJECT_ROOT_DUPLICATE_ALIAS", f"duplicate root alias: {alias!r}")
+            roots[alias] = root_path
         result = workflow.init_project(args.project, args.name, roots)
         _emit({"event": "project_created", "project_id": result["project_id"], "path": str(args.project.resolve())})
         return EXIT_OK
@@ -192,6 +186,8 @@ def _dispatch(args: argparse.Namespace) -> int:
                 signal.signal(signal.SIGINT, previous)
         _emit({"event": "run_complete", "result": result})
         if isinstance(result, list) and any(item.get("status") == "BLOCKED" for item in result):
+            return EXIT_GATE
+        if isinstance(result, dict) and result.get("status") == "BLOCKED":
             return EXIT_GATE
         return EXIT_OK
     if command == "align":

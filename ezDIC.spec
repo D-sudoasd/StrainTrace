@@ -31,20 +31,28 @@ root_datas = [
     (source_file("NOTICE_Attribution_and_Usage.txt"), "."),
     (source_file("LICENSE.txt"), "."),
     (source_file("CITATION.cff"), "."),
+    (source_file("CONTRIBUTING.md"), "."),
+    (source_file("SUPPORT.md"), "."),
     (source_file("schemas/run_config_v1.json"), "schemas"),
     (source_file("schemas/campaign_config_v1.json"), "schemas"),
+    (source_file("docs/API.md"), "docs"),
     (source_file("docs/CAMPAIGN_WORKFLOW.md"), "docs"),
     (source_file("docs/CAMPAIGN_AI_README.md"), "docs"),
     (source_file("docs/2D_DIC_VALIDATION.md"), "docs"),
+    (source_file("docs/NECKING_RELIABILITY_20261103.md"), "docs"),
+    (source_file("docs/VIC2D_COMPARISON.md"), "docs"),
     (source_file("docs/AGENT_IMPLEMENTATION.md"), "docs"),
     (source_file("docs/AGENT_FIELD_ANALYSIS.md"), "docs"),
     (source_file("docs/AGENT_WORKFLOW.md"), "docs"),
     (source_file("docs/AGENT_INTERFACE.md"), "docs"),
+    (source_file("docs/AGENT_UPGRADE_VALIDATION.md"), "docs"),
     (source_file("docs/AUTONOMOUS_ANALYSIS.md"), "docs"),
     (source_file("docs/REVIEW_PRO_20261026.md"), "docs"),
+    (source_file("docs/REVIEW_20261030.md"), "docs"),
     (source_file("docs/UI_WORKBENCH.md"), "docs"),
     (source_file("docs/validation/dic_research_20261007.json"), "docs/validation"),
     (source_file("assets/validation/plate-hole-Eyy.png"), "assets/validation"),
+    (source_file("assets/validation/necking_study_20261103.png"), "assets/validation"),
     (source_file("assets/ui/two-window-control.png"), "assets/ui"),
     (source_file("assets/ui/two-window-results.png"), "assets/ui"),
 ]
@@ -60,6 +68,10 @@ source_datas = [
 ]
 source_datas += [
     (str(path), "sources/" + str(path.parent.relative_to(PROJECT_ROOT)).replace("\\", "/"))
+    for path in sorted((PROJECT_ROOT / "ezdic_gui").rglob("*.py"))
+]
+source_datas += [
+    (str(path), "sources/" + str(path.parent.relative_to(PROJECT_ROOT)).replace("\\", "/"))
     for path in sorted((PROJECT_ROOT / "straintrace_campaign").rglob("*.py"))
 ]
 source_datas += [
@@ -70,6 +82,7 @@ benchmark_datas = [
     # The JSON is runtime data; source copies are retained for audit hashes
     # when the package modules execute from the PyInstaller archive.
     (source_file("benchmarks/cases_v1.json"), "benchmarks"),
+    (source_file("benchmarks/_common.py"), "sources/benchmarks"),
     (source_file("benchmarks/run_benchmark.py"), "sources/benchmarks"),
     (source_file("benchmarks/synthetic_cases.py"), "sources/benchmarks"),
 ]
@@ -78,10 +91,18 @@ common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
     "ezdic_benchmark",
+    "ezdic_gui",
+    "ezdic_gui.tooltips",
+    "ezdic_gui.theme",
+    "ezdic_gui.canvas",
+    "ezdic_gui.viewers",
     "benchmarks",
+    "benchmarks._common",
     "benchmarks.run_benchmark",
     "benchmarks.synthetic_cases",
     "straintrace_campaign",
+    "straintrace_campaign.__main__",
+    "straintrace_campaign._time_io",
     "straintrace_campaign.models",
     "straintrace_campaign.storage",
     "straintrace_campaign.workflow",
@@ -95,6 +116,13 @@ common_hiddenimports = [
     "straintrace_campaign.adapters.generic",
     "straintrace_campaign.adapters.desy",
     "straintrace_agent",
+    "straintrace_agent.__main__",
+    "straintrace_agent._io",
+    "straintrace_agent._locks",
+    "straintrace_agent._config",
+    "straintrace_agent._inventory",
+    "straintrace_agent._outputs",
+    "straintrace_agent._verify",
     "straintrace_agent.api",
     "straintrace_agent.cli",
     "straintrace_agent.fields",
@@ -131,6 +159,8 @@ common_excludes = [
     "pythoncom",
     "pywintypes",
     "pytest",
+    "yaml",
+    "jsonschema",
 ]
 
 

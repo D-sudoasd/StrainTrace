@@ -235,11 +235,13 @@ def benchmark_figure(destination):
     a.set_title("a   Locked synthetic reference", loc="left", fontweight="bold", pad=13)
     a.set(xlabel="x (pixels)", ylabel="y (pixels)")
     indices = np.array([int(r["point_index"]) for r in rows])
+    plotted_vals = []
     for key, marker, color, title in [
         ("error_u_px", "o", ACCENT, "u error"),
         ("error_v_px", "s", WARM, "v error"),
     ]:
         vals = np.array([float(r[key]) for r in rows])
+        plotted_vals.append(vals)
         b.plot(indices, vals, marker=marker, ms=3, lw=0, color=color, label=title)
     b.axhline(0, color=MUTED, lw=0.7, ls="--")
     b.set_title("b   Displacement residuals", loc="left", fontweight="bold", pad=13)
@@ -251,7 +253,13 @@ def benchmark_figure(destination):
         loc="upper center",
         bbox_to_anchor=(0.5, 1.02),
     )
-    b.set_ylim(-0.007, 0.041)
+    combined = np.concatenate(plotted_vals) if plotted_vals else np.array([0.0])
+    finite = combined[np.isfinite(combined)]
+    if finite.size:
+        y_min = min(float(finite.min()), 0.0)
+        y_max = max(float(finite.max()), 0.0)
+        span = max(y_max - y_min, 1e-6)
+        b.set_ylim(y_min - 0.15 * span, y_max + 0.25 * span)
     clean_axes(b)
     fig.text(
         0.08,

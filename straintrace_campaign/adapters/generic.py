@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import csv
 import fnmatch
-import hashlib
+import math
 import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
+
+from ..storage import sha256_file as _sha256
 
 
 DEFAULT_IMAGE_PATTERNS = ("**/*.tif", "**/*.tiff", "**/*.png", "**/*.jpg", "**/*.jpeg")
@@ -37,9 +39,13 @@ def _config(pattern: Any) -> dict[str, Any]:
 
 
 def _is_excluded(path: Path, root: Path, patterns: Iterable[str]) -> bool:
-    rel = path.relative_to(root).as_posix()
+    try:
+        relative_path = path.relative_to(root)
+    except ValueError:
+        return True
+    rel = relative_path.as_posix()
     rel_casefold = rel.casefold()
-    parts = {part.casefold() for part in path.relative_to(root).parts}
+    parts = {part.casefold() for part in relative_path.parts}
     for item in patterns:
         candidate = str(item).replace("\\", "/")
         if candidate.casefold() in parts:
@@ -68,14 +74,6 @@ def _counter(path: Path, expression: re.Pattern[str]) -> int | None:
     return number if number >= 0 else None
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _range_list(frames: list[int]) -> list[list[int]]:
     if len(frames) < 2:
         return []
@@ -87,21 +85,93 @@ def _range_list(frames: list[int]) -> list[list[int]]:
     return result
 
 
+_NUMERIC_TIME_FIELDS = (
+    "timestamp_unix_s",
+    "estimated_timestamp_unix_s",
+    "time_s",
+    "exposure_start_unix_s",
+    "exposure_end_unix_s",
+)
+_STRING_META_FIELDS = (
+    "filename",
+    "clock_id",
+    "timestamp_source",
+    "timestamp_status",
+    "scan_id_namespace",
+)
+
+
 def _parse_cell(value: str | None) -> Any:
     text = "" if value is None else str(value).strip()
-    if text.casefold() in _MISSING:
+    lowered = text.casefold()
+    if lowered in _MISSING:
         return None
-    if text.casefold() in {"true", "yes", "y"}:
+    if lowered in {"true", "yes"}:
         return True
-    if text.casefold() in {"false", "no", "n"}:
+    if lowered in {"false", "no"}:
         return False
     try:
         number = float(text)
     except ValueError:
         return text
+    if not math.isfinite(number):
+        return None
     if number.is_integer():
         return int(number)
     return number
+
+
+def _parse_string_cell(value: str | None) -> str | None:
+    text = "" if value is None else str(value).strip()
+    if not text or text.casefold() in _MISSING:
+        return None
+    return text
+
+
+def _parse_scan_id_cell(value: str | None) -> int | str | None:
+    text = _parse_string_cell(value)
+    if text is None:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if math.isfinite(number) and number.is_integer():
+        return int(number)
+    return text
+
+
+def _parse_nonneg_int(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError("expected non-negative integer")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError("integer is negative")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError("value is not an integer")
+        result = int(value)
+        if result < 0:
+            raise ValueError("integer is negative")
+        return result
+    raise ValueError("value is not an integer")
+
+
+def _sanitize_time_fields(
+    row: dict[str, Any],
+    *,
+    source_row: int,
+    issues: list[dict[str, Any]],
+    issue_code: str,
+) -> None:
+    for field in _NUMERIC_TIME_FIELDS:
+        if field not in row or row[field] is None:
+            continue
+        value = row[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            issues.append({"code": issue_code, "source_row": source_row, "field": field, "value": value})
+            row[field] = None
 
 
 def read_explicit_frame_mapping(
@@ -136,7 +206,6 @@ def read_explicit_frame_mapping(
         "timestamp_source": "timestamp_source",
         "scan_id_is_global_fio": "scan_id_is_global_fio",
         "scan_id_namespace": "scan_id_namespace",
-        "native_dic_frame": "native_dic_frame",
     }
     if columns:
         mapping.update({str(key): str(value) for key, value in columns.items()})
@@ -144,16 +213,29 @@ def read_explicit_frame_mapping(
     issues: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
+        fieldnames = reader.fieldnames or []
         for source_row, raw in enumerate(reader, start=2):
-            converted = {key: _parse_cell(raw.get(header)) for key, header in mapping.items() if header in (reader.fieldnames or [])}
+            converted: dict[str, Any] = {}
+            for key, header in mapping.items():
+                if header not in fieldnames:
+                    continue
+                if key in _STRING_META_FIELDS:
+                    converted[key] = _parse_string_cell(raw.get(header))
+                elif key == "scan_id":
+                    converted[key] = _parse_scan_id_cell(raw.get(header))
+                else:
+                    converted[key] = _parse_cell(raw.get(header))
             # Keep noncanonical source columns losslessly for later provenance.
-            for header in reader.fieldnames or []:
+            for header in fieldnames:
                 if header not in mapping.values():
                     converted.setdefault(header, _parse_cell(raw.get(header)))
+            raw_frame = converted.get("frame")
+            if raw_frame is None or isinstance(raw_frame, bool):
+                issues.append({"code": "MAPPING_FRAME_ID_MISSING", "source_row": source_row})
+                continue
             try:
-                raw_frame = converted.get("frame")
                 frame = int(raw_frame)
-                if isinstance(raw_frame, float) and raw_frame != frame:
+                if isinstance(raw_frame, float) and (not math.isfinite(raw_frame) or raw_frame != frame):
                     raise ValueError("frame is not an integer")
             except (TypeError, ValueError):
                 issues.append({"code": "MAPPING_FRAME_ID_MISSING", "source_row": source_row})
@@ -165,29 +247,24 @@ def read_explicit_frame_mapping(
             converted["source_mapping_row"] = source_row
             if "native_cbf_frame" in converted and converted["native_cbf_frame"] is not None:
                 try:
-                    raw_counter = converted["native_cbf_frame"]
-                    converted["native_cbf_frame"] = int(raw_counter)
-                    if isinstance(raw_counter, float) and raw_counter != converted["native_cbf_frame"]:
-                        raise ValueError("native counter is not an integer")
-                    if converted["native_cbf_frame"] < 0:
-                        raise ValueError("native counter is negative")
+                    converted["native_cbf_frame"] = _parse_nonneg_int(converted["native_cbf_frame"])
                 except (TypeError, ValueError):
                     issues.append({"code": "MAPPING_NATIVE_CBF_COUNTER_INVALID", "source_row": source_row})
                     continue
             if "native_dic_frame" in converted and converted["native_dic_frame"] is not None:
                 try:
-                    raw_counter = converted["native_dic_frame"]
-                    converted["native_dic_frame"] = int(raw_counter)
-                    if isinstance(raw_counter, float) and raw_counter != converted["native_dic_frame"]:
-                        raise ValueError("native counter is not an integer")
-                    if converted["native_dic_frame"] < 0:
-                        raise ValueError("native counter is negative")
+                    converted["native_dic_frame"] = _parse_nonneg_int(converted["native_dic_frame"])
                 except (TypeError, ValueError):
                     issues.append({"code": "MAPPING_NATIVE_DIC_COUNTER_INVALID", "source_row": source_row})
                     continue
             if converted.get("native_cbf_frame") is None:
                 issues.append({"code": "MAPPING_NATIVE_CBF_COUNTER_MISSING", "source_row": source_row})
                 continue
+            _sanitize_time_fields(converted, source_row=source_row, issues=issues, issue_code="MAPPING_TIMESTAMP_INVALID")
+            raw_flag = converted.get("scan_id_is_global_fio")
+            if raw_flag is not None and not isinstance(raw_flag, bool):
+                issues.append({"code": "MAPPING_SCAN_ID_FLAG_INVALID", "source_row": source_row, "value": raw_flag})
+                converted["scan_id_is_global_fio"] = False
             if "scan_id" in converted and converted["scan_id"] is not None:
                 if converted.get("scan_id_is_global_fio") is None:
                     converted["scan_id_is_global_fio"] = bool(scan_id_is_global_fio)
@@ -275,7 +352,16 @@ def _read_frame_metadata(path: Path, columns: dict[str, str] | None = None) -> t
         reader = csv.DictReader(stream)
         fields = reader.fieldnames or []
         for source_row, raw in enumerate(reader, start=2):
-            row = {key: _parse_cell(raw.get(header)) for key, header in mapping.items() if header in fields}
+            row: dict[str, Any] = {}
+            for key, header in mapping.items():
+                if header not in fields:
+                    continue
+                if key in _STRING_META_FIELDS:
+                    row[key] = _parse_string_cell(raw.get(header))
+                elif key == "scan_id":
+                    row[key] = _parse_scan_id_cell(raw.get(header))
+                else:
+                    row[key] = _parse_cell(raw.get(header))
             for header in fields:
                 if header not in mapping.values():
                     row.setdefault(header, _parse_cell(raw.get(header)))
@@ -287,23 +373,21 @@ def _read_frame_metadata(path: Path, columns: dict[str, str] | None = None) -> t
                 continue
             if native_frame is not None:
                 try:
-                    row["native_frame"] = int(native_frame)
-                    if row["native_frame"] < 0:
-                        raise ValueError("native counter is negative")
+                    row["native_frame"] = _parse_nonneg_int(native_frame)
                 except (TypeError, ValueError):
                     issues.append({"code": "FRAME_METADATA_NATIVE_COUNTER_INVALID", "source_row": source_row})
                     continue
             if row.get("frame") is not None:
                 try:
-                    raw_frame = row["frame"]
-                    row["frame"] = int(raw_frame)
-                    if isinstance(raw_frame, float) and raw_frame != row["frame"]:
-                        raise ValueError("frame is not an integer")
-                    if row["frame"] < 0:
-                        raise ValueError("frame is negative")
+                    row["frame"] = _parse_nonneg_int(row["frame"])
                 except (TypeError, ValueError):
                     issues.append({"code": "FRAME_METADATA_ANALYSIS_COUNTER_INVALID", "source_row": source_row})
                     continue
+            _sanitize_time_fields(row, source_row=source_row, issues=issues, issue_code="FRAME_METADATA_TIMESTAMP_INVALID")
+            raw_flag = row.get("scan_id_is_global_fio")
+            if raw_flag is not None and not isinstance(raw_flag, bool):
+                issues.append({"code": "FRAME_METADATA_SCAN_ID_FLAG_INVALID", "source_row": source_row, "value": raw_flag})
+                row["scan_id_is_global_fio"] = False
             rows.append(row)
     return rows, issues
 
@@ -311,6 +395,7 @@ def _read_frame_metadata(path: Path, columns: dict[str, str] | None = None) -> t
 def _apply_frame_metadata(
     image_frames: list[dict[str, Any]],
     metadata_rows: list[dict[str, Any]],
+    acquisition_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Enrich images by explicit filename/native-counter keys only."""
     issues: list[dict[str, Any]] = []
@@ -333,8 +418,24 @@ def _apply_frame_metadata(
                            "source_rows": [row["source_metadata_row"] for row in rows]})
 
     for image in image_frames:
-        key = str(image["filename"]).replace("\\", "/").casefold()
-        candidates = by_filename.get(key, []) if key in by_filename else by_native.get(int(image["native_frame"]), [])
+        lookup_keys: list[str] = []
+        if acquisition_dir is not None:
+            try:
+                lookup_keys.append(Path(image["path"]).relative_to(acquisition_dir).as_posix().casefold())
+            except ValueError:
+                pass
+        if image.get("source_relative_path"):
+            lookup_keys.append(str(image["source_relative_path"]).replace("\\", "/").casefold())
+        lookup_keys.append(str(image["filename"]).replace("\\", "/").casefold())
+        candidates: list[dict[str, Any]] = []
+        matched_by_filename = False
+        for key in lookup_keys:
+            if key in by_filename:
+                candidates = by_filename[key]
+                matched_by_filename = True
+                break
+        if not matched_by_filename:
+            candidates = by_native.get(int(image["native_frame"]), [])
         if len(candidates) != 1:
             if len(candidates) > 1:
                 image["timestamp_status"] = "FRAME_METADATA_IDENTITY_CONFLICT"
@@ -380,8 +481,9 @@ def discover(
         raise NotADirectoryError(root_path)
     config = _config(pattern)
     excluded = tuple(str(item) for item in (*exclude, *config.get("exclude", ())))
+    explicit_files = config.get("explicit_files")
     patterns = [str(item) for item in config["image_patterns"]]
-    if not patterns:
+    if explicit_files is None and not patterns:
         raise ValueError("At least one image pattern is required")
     levels = int(config.get("acquisition_parent_levels", 0))
     if levels < 0:
@@ -392,8 +494,14 @@ def discover(
         raise ValueError(f"Invalid frame_regex: {exc}") from exc
 
     files: set[Path] = set()
-    for glob_pattern in patterns:
-        files.update(path.resolve() for path in root_path.glob(glob_pattern) if path.is_file())
+    if explicit_files is not None:
+        for item in explicit_files:
+            resolved = Path(item).expanduser().resolve()
+            if resolved.is_file():
+                files.add(resolved)
+    else:
+        for glob_pattern in patterns:
+            files.update(path.resolve() for path in root_path.glob(glob_pattern) if path.is_file())
     files = {path for path in files if not _is_excluded(path, root_path, excluded)}
 
     groups: dict[Path, list[Path]] = {}
@@ -408,7 +516,6 @@ def discover(
 
     result: list[dict[str, Any]] = []
     for acquisition_dir, batch_files in sorted(groups.items(), key=lambda item: item[0].as_posix().casefold()):
-        records: list[dict[str, Any]] = []
         unmapped: list[dict[str, Any]] = []
         by_counter: dict[int, list[dict[str, Any]]] = {}
         for path in sorted(batch_files, key=lambda item: item.as_posix().casefold()):
@@ -464,8 +571,9 @@ def discover(
         missing_ranges = _range_list(counters)
         if missing_ranges:
             issues.append({"code": "NATIVE_COUNTER_GAPS", "missing_ranges": missing_ranges})
-        if unmapped:
-            issues.append({"code": "UNPARSED_NATIVE_COUNTER_FILES", "count": len(unmapped)})
+        unparsed_count = sum(1 for item in unmapped if item.get("identity_status") == "UNPARSED_NATIVE_COUNTER")
+        if unparsed_count:
+            issues.append({"code": "UNPARSED_NATIVE_COUNTER_FILES", "count": unparsed_count})
 
         try:
             relative = acquisition_dir.relative_to(root_path).as_posix()
@@ -482,7 +590,7 @@ def discover(
                 metadata_rows, metadata_issues = _read_frame_metadata(
                     metadata_path, columns=config.get("frame_metadata_columns")
                 )
-                metadata_issues.extend(_apply_frame_metadata(image_frames, metadata_rows))
+                metadata_issues.extend(_apply_frame_metadata(image_frames, metadata_rows, acquisition_dir=acquisition_dir))
 
         conflicted = [frame for frame in image_frames if "CONFLICT" in str(frame.get("identity_status", ""))]
         if conflicted:

@@ -6,10 +6,6 @@ only when a mapping is explicit; force and strain are never extrapolated.
 
 from __future__ import annotations
 
-import csv
-import datetime as dt
-import hashlib
-import json
 import math
 import os
 import re
@@ -17,162 +13,47 @@ import statistics
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ._time_io import (
+    bracket_time as _bracket,
+    clock_pair_compatible as _clock_pair_compatible,
+    finite_number as _number,
+    parse_bool as _bool,
+    parse_row_time as _parse_time,
+    read_load_table,
+    strict_integer as _integer,
+    window_mean_support as _window_mean,
+)
 from .models import CampaignError
 from .storage import (
     artifact_path,
+    canonical_json_sha256,
     fingerprint_data,
+    read_jsonl,
     relative_artifact,
+    resolve_source_file,
     sha256_file,
     stage_output_dir,
     write_jsonl_atomic,
 )
 
 
-_ABSOLUTE_EPOCH_MIN = 1_000_000_000.0
-_EXACT_TIME_TOL_S = 2e-6
-_TRUE = {"true", "1", "yes", "y"}
-_FALSE = {"false", "0", "no", "n"}
 _INVALID_STATUS_WORDS = ("FAIL", "REJECT", "INVALID", "QC_FAILED", "INSUFFICIENT")
 _GAUGE_RE = re.compile(r"^(G\d{2})_engineering_strain$")
-
-
-def _number(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if math.isfinite(result) else None
-
-
-def _integer(value: Any) -> int | None:
-    result = _number(value)
-    if result is None:
-        return None
-    rounded = round(result)
-    if abs(result - rounded) > 1e-8:
-        return None
-    return int(rounded)
-
-
-def _bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    text = str(value).strip().casefold()
-    if text in _TRUE:
-        return True
-    if text in _FALSE:
-        return False
-    return default
-
-
-def _parse_time(value: Any, field: str, row: Mapping[str, Any]) -> tuple[float | None, str, str | None, str | None]:
-    """Return (value, domain, clock_id, reason) for the selected time field."""
-    if field not in row or row.get(field) is None or str(row.get(field)).strip() == "":
-        if field == "timestamp_unix_s" and row.get("estimated_timestamp_unix_s") is not None:
-            return None, "missing", None, "RECORDED_TIMESTAMP_MISSING_ESTIMATE_SEPARATE"
-        return None, "missing", None, "TIME_VALUE_MISSING"
-    status = str(row.get("timestamp_status") or row.get("time_status") or "").upper()
-    if field == "timestamp_unix_s" and any(word in status for word in ("ESTIMAT", "RECONSTRUCT", "INFER", "PROTOCOL", "ADOPTED")):
-        return None, "missing", None, "TIME_FIELD_MARKED_DERIVED"
-
-    raw = row.get(field)
-    number = _number(raw)
-    clock_id = row.get("clock_id") or row.get("timestamp_clock_id") or row.get("time_clock_id")
-    clock_id = str(clock_id) if clock_id not in (None, "") else None
-    if number is not None:
-        if field.endswith("unix_s"):
-            if number < _ABSOLUTE_EPOCH_MIN:
-                return None, "missing", clock_id, "UNIX_FIELD_VALUE_OUTSIDE_EPOCH_RANGE"
-            return number, "unix_epoch_estimated" if field.startswith("estimated_") else "unix_epoch_recorded", clock_id, None
-        if field == "time_s" or field.endswith("_time_s"):
-            return number, "relative", clock_id, None if clock_id else "RELATIVE_CLOCK_ID_REQUIRED"
-        if number >= _ABSOLUTE_EPOCH_MIN:
-            return number, "unix_epoch_recorded", clock_id, None
-        return number, "relative", clock_id, None if clock_id else "RELATIVE_CLOCK_ID_REQUIRED"
-
-    text = str(raw).strip()
-    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    try:
-        parsed = dt.datetime.fromisoformat(candidate)
-    except ValueError:
-        return None, "missing", clock_id, "TIME_VALUE_UNPARSEABLE"
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None, "missing", clock_id, "NAIVE_DATETIME_TIMEZONE_UNKNOWN"
-    return parsed.timestamp(), "unix_epoch_recorded", clock_id, None
-
-
-def _clock_pair_compatible(
-    left: tuple[float | None, str, str | None, str | None],
-    right: tuple[float | None, str, str | None, str | None],
-) -> tuple[bool, str]:
-    if left[0] is None or right[0] is None:
-        return False, left[3] or right[3] or "TIME_VALUE_MISSING"
-    left_domain, right_domain = left[1], right[1]
-    if left_domain.startswith("unix_epoch") and right_domain.startswith("unix_epoch"):
-        return True, ""
-    if left_domain == right_domain == "relative":
-        if left[2] and left[2] == right[2]:
-            return True, ""
-        return False, "RELATIVE_CLOCK_DOMAIN_MISMATCH"
-    return False, "TIME_CLOCK_DOMAIN_MISMATCH"
 
 
 def _read_load(
     path: Path, time_column: str, force_column: str, force_unit: str | None
 ) -> tuple[list[dict[str, Any]], list[float], list[float | None], list[bool], list[str], list[str | None], list[str]]:
-    if not path.is_file():
-        raise CampaignError("LOAD_SOURCE_NOT_FOUND", f"load source does not exist: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as stream:
-        reader = csv.DictReader(stream)
-        headers = reader.fieldnames or []
-        if time_column not in headers:
-            raise CampaignError("LOAD_TIME_COLUMN_MISSING", f"load source has no {time_column!r} column")
-        if force_column not in headers:
-            raise CampaignError("LOAD_FORCE_COLUMN_MISSING", f"load source has no {force_column!r} column")
-        rows = [dict(raw) for raw in reader]
-    parsed_times: list[float] = []
-    time_domains: list[str] = []
-    clock_ids: list[str | None] = []
-    forces: list[float | None] = []
-    valid: list[bool] = []
-    force_reasons: list[str] = []
-    for i, raw in enumerate(rows):
-        time_value, domain, clock_id, time_error = _parse_time(raw, time_column, raw)
-        if time_value is None:
-            raise CampaignError("LOAD_TIME_AXIS_INVALID", f"load row {i + 2} has invalid time: {time_error}")
-        parsed_times.append(time_value)
-        time_domains.append(domain)
-        clock_ids.append(clock_id)
-
-        raw_force = _number(raw.get(force_column))
-        unit = force_unit
-        if unit is None:
-            unit = raw.get("force_unit") or raw.get("load_unit") or raw.get("unit")
-        if unit is None and force_column == "force_N":
-            unit = "N"
-        unit_norm = str(unit or "").strip().casefold().replace(" ", "")
-        scale = {
-            "n": 1.0, "newton": 1.0, "newtons": 1.0,
-            "kn": 1000.0, "kilonewton": 1000.0, "kilonewtons": 1000.0,
-        }.get(unit_norm)
-        if raw_force is None or scale is None:
-            forces.append(None)
-            valid.append(False)
-            force_reasons.append("UNKNOWN_FORCE_UNIT" if raw_force is not None and scale is None else "INVALID_FORCE_VALUE")
-        else:
-            forces.append(raw_force * scale)
-            row_valid = raw.get("is_force_valid")
-            valid.append(True if row_valid in (None, "") else _bool(row_valid))
-            force_reasons.append("VALID_FORCE_N" if valid[-1] else "SOURCE_MARKED_FORCE_INVALID")
-    if not rows:
-        raise CampaignError("LOAD_SOURCE_EMPTY", f"load source has no data rows: {path}")
-    if any(b <= a for a, b in zip(parsed_times, parsed_times[1:])):
-        raise CampaignError("LOAD_TIME_AXIS_NOT_STRICTLY_INCREASING", "load timestamps must be unique and increasing in source-row order")
-    return rows, parsed_times, forces, valid, time_domains, clock_ids, force_reasons
+    table = read_load_table(path, time_column, force_column, force_unit)
+    return (
+        table["rows"],
+        table["times"],
+        table["forces"],
+        table["valid"],
+        table["time_domains"],
+        table["clock_ids"],
+        table["force_reasons"],
+    )
 
 
 def _axis_times(
@@ -183,7 +64,7 @@ def _axis_times(
     clock_ids: list[str | None] = []
     errors: list[str | None] = []
     for row in rows:
-        value, domain, clock_id, error = _parse_time(row, field, row)
+        value, domain, clock_id, error = _parse_time(field, row)
         values.append(value)
         domains.append(domain)
         clock_ids.append(clock_id)
@@ -199,8 +80,6 @@ def _source_rows(acquisition: Mapping[str, Any], project_root: Path) -> list[dic
     if not rows_path:
         return []
     try:
-        from .storage import read_jsonl
-
         return read_jsonl(artifact_path(project_root, str(rows_path)))
     except CampaignError:
         raise
@@ -271,95 +150,6 @@ def _quality_eligible(row: Mapping[str, Any]) -> bool:
     return engineering is not None or sum(value is not None for value in gauges.values()) >= 3
 
 
-def _bracket(times: Sequence[float], q: float, max_gap_s: float, valid: Sequence[bool]) -> dict[str, Any]:
-    if not times:
-        return {"status": "NO_TIME_SUPPORT", "indices": [], "weights": []}
-    low, high = 0, len(times)
-    while low < high:
-        middle = (low + high) // 2
-        if times[middle] < q:
-            low = middle + 1
-        else:
-            high = middle
-    candidates = [index for index in (low - 1, low) if 0 <= index < len(times)]
-    exact = next((index for index in candidates if abs(times[index] - q) <= _EXACT_TIME_TOL_S), None)
-    if exact is not None:
-        if not valid[exact]:
-            return {"status": "INVALID_EXACT_SAMPLE", "indices": [exact], "weights": [1.0]}
-        return {"status": "EXACT_TIME_SAMPLE", "indices": [exact], "weights": [1.0]}
-    if low == 0 or low == len(times):
-        return {"status": "OUTSIDE_TIME_RANGE", "indices": [], "weights": []}
-    left, right = low - 1, low
-    delta = times[right] - times[left]
-    if delta <= 0:
-        return {"status": "NONMONOTONIC_TIME_AXIS", "indices": [left, right], "weights": []}
-    if not valid[left] or not valid[right]:
-        return {"status": "INVALID_BRACKET", "indices": [left, right], "weights": []}
-    if delta > max_gap_s + _EXACT_TIME_TOL_S:
-        return {"status": "LONG_TIME_GAP", "indices": [left, right], "weights": []}
-    alpha = (q - times[left]) / delta
-    return {
-        "status": "LINEAR_TIME_INTERPOLATION",
-        "indices": [left, right],
-        "weights": [1 - alpha, alpha],
-        "alpha": alpha,
-    }
-
-
-def _window_mean(
-    times: Sequence[float],
-    values: Sequence[float | None],
-    valid: Sequence[bool],
-    start: float | None,
-    end: float | None,
-    max_gap_s: float,
-) -> dict[str, Any]:
-    if start is None or end is None:
-        return {"status": "EXPOSURE_WINDOW_MISSING", "value": None, "indices": [], "weights": []}
-    if end <= start:
-        return {"status": "INVALID_EXPOSURE_WINDOW", "value": None, "indices": [], "weights": []}
-    if not times or start < times[0] - _EXACT_TIME_TOL_S or end > times[-1] + _EXACT_TIME_TOL_S:
-        return {"status": "OUTSIDE_TIME_RANGE", "value": None, "indices": [], "weights": []}
-
-    coefficients: dict[int, float] = {}
-    cursor = start
-    while cursor < end - _EXACT_TIME_TOL_S:
-        insertion = 0
-        while insertion < len(times) and times[insertion] < cursor - _EXACT_TIME_TOL_S:
-            insertion += 1
-        exact = insertion < len(times) and abs(times[insertion] - cursor) <= _EXACT_TIME_TOL_S
-        if exact:
-            left = insertion
-            right = left + 1
-        else:
-            right = insertion
-            left = right - 1
-        if left < 0 or right >= len(times):
-            return {"status": "OUTSIDE_TIME_RANGE", "value": None, "indices": [], "weights": []}
-        delta = times[right] - times[left]
-        if delta <= 0:
-            return {"status": "NONMONOTONIC_TIME_AXIS", "value": None, "indices": [left, right], "weights": []}
-        if delta > max_gap_s + _EXACT_TIME_TOL_S:
-            return {"status": "LONG_TIME_GAP", "value": None, "indices": [left, right], "weights": []}
-        if not valid[left] or not valid[right] or values[left] is None or values[right] is None:
-            return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [left, right], "weights": []}
-        next_knot = min(end, times[right])
-        if next_knot <= cursor + _EXACT_TIME_TOL_S:
-            next_knot = end
-        r0 = max(0.0, min(1.0, (cursor - times[left]) / delta))
-        r1 = max(0.0, min(1.0, (next_knot - times[left]) / delta))
-        segment_length = next_knot - cursor
-        coefficients[left] = coefficients.get(left, 0.0) + 0.5 * segment_length * ((1 - r0) + (1 - r1))
-        coefficients[right] = coefficients.get(right, 0.0) + 0.5 * segment_length * (r0 + r1)
-        cursor = next_knot
-
-    duration = end - start
-    indices = sorted(coefficients)
-    weights = [coefficients[index] / duration for index in indices]
-    value = sum(values[index] * weight for index, weight in zip(indices, weights) if values[index] is not None)
-    return {"status": "EXPOSURE_WINDOW_MEAN", "value": value, "indices": indices, "weights": weights}
-
-
 def _confirmed_area(acquisition: Mapping[str, Any]) -> tuple[float | None, float | None, str | None, str]:
     dimensions = acquisition.get("dimensions") if isinstance(acquisition.get("dimensions"), Mapping) else {}
     status = str(dimensions.get("status", "")).strip().casefold()
@@ -384,7 +174,7 @@ def _confirmed_area(acquisition: Mapping[str, Any]) -> tuple[float | None, float
 
 
 def _read_axis(
-    acquisition: Mapping[str, Any], project_root: Path, source_rows: list[dict[str, Any]]
+    acquisition: Mapping[str, Any], source_rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str]:
     measurement = acquisition.get("measurement_frames") or []
     if measurement:
@@ -424,7 +214,7 @@ def _dic_rows_for_axis(
     exact_by_cbf: dict[int, list[int]] = {}
     exact_by_frame: dict[int, list[int]] = {}
     for index, row in enumerate(dic_rows):
-        native = _integer(row.get("native_dic_frame", row.get("native_frame", row.get("frame"))))
+        native = _integer(row.get("native_dic_frame", row.get("native_frame")))
         if native is not None:
             exact_by_native.setdefault(native, []).append(index)
         native_cbf = _integer(row.get("native_cbf_frame"))
@@ -438,20 +228,27 @@ def _dic_rows_for_axis(
     direct_status: list[str | None] = []
     for axis in axis_rows:
         native = _integer(axis.get("native_dic_frame", axis.get("dic_native_frame")))
+        native_cbf = _integer(axis.get("native_cbf_frame"))
         candidates: list[int] = []
+        explicit_native_missing = False
         if native is not None:
-            matches = exact_by_native.get(native, [])
-            candidates = matches
-        if not candidates:
-            native_cbf = _integer(axis.get("native_cbf_frame"))
-            if native_cbf is not None:
-                candidates = exact_by_cbf.get(native_cbf, [])
-        if not candidates:
+            candidates = exact_by_native.get(native, [])
+            if not candidates:
+                explicit_native_missing = True
+        elif native_cbf is not None and exact_by_cbf:
+            candidates = exact_by_cbf.get(native_cbf, [])
+        elif preserve_imported and native_cbf is None:
             frame = _integer(axis.get("frame"))
             if frame is not None:
-                candidates = exact_by_frame.get(frame, [])
+                candidates = [
+                    idx for idx in exact_by_frame.get(frame, [])
+                    if _integer(dic_rows[idx].get("native_cbf_frame")) is None
+                ]
 
-        if len(candidates) == 1:
+        if explicit_native_missing:
+            direct_mapping.append(None)
+            direct_status.append("DIC_EXPLICIT_NATIVE_FRAME_MISSING")
+        elif len(candidates) == 1:
             source = dic_rows[candidates[0]]
             axis_cbf = _integer(axis.get("native_cbf_frame"))
             source_cbf = _integer(source.get("native_cbf_frame"))
@@ -475,14 +272,30 @@ def _dic_rows_for_axis(
             direct_mapping.append(None)
             direct_status.append(None)
 
-    axis_times, axis_domains, axis_clocks, axis_errors = _axis_times(axis_rows, time_column)
-    dic_times, dic_domains, dic_clocks, dic_errors = _axis_times(dic_rows, time_column)
-    timed_indices = [index for index, time in enumerate(dic_times) if time is not None]
-    timed_values = [float(dic_times[index]) for index in timed_indices]
-    if any(right <= left for left, right in zip(timed_values, timed_values[1:])):
-        raise CampaignError("DIC_TIME_AXIS_NOT_STRICTLY_INCREASING", "DIC result times must increase in source-frame order")
-    timed_rows = [dic_rows[index] for index in timed_indices]
-    timed_valid = [_quality_eligible(row) for row in timed_rows]
+    needs_time_resampling = (not preserve_imported) and any(
+        mapped is None and status is None for mapped, status in zip(direct_mapping, direct_status)
+    )
+    axis_times: list[float | None] = []
+    axis_domains: list[str] = []
+    axis_clocks: list[str | None] = []
+    axis_errors: list[str | None] = []
+    timed_indices: list[int] = []
+    timed_values: list[float] = []
+    timed_valid: list[bool] = []
+    unique_dic_clocks: list[tuple[str, str | None]] = []
+    if needs_time_resampling:
+        axis_times, axis_domains, axis_clocks, axis_errors = _axis_times(axis_rows, time_column)
+        dic_times, dic_domains, dic_clocks, _dic_errors = _axis_times(dic_rows, time_column)
+        timed_indices = [index for index, time in enumerate(dic_times) if time is not None]
+        timed_values = [float(dic_times[index]) for index in timed_indices]
+        if any(right <= left for left, right in zip(timed_values, timed_values[1:])):
+            raise CampaignError("DIC_TIME_AXIS_NOT_STRICTLY_INCREASING", "DIC result times must increase in source-frame order")
+        timed_rows = [dic_rows[index] for index in timed_indices]
+        timed_valid = [_quality_eligible(row) for row in timed_rows]
+        unique_dic_clocks = sorted(
+            {(dic_domains[idx], dic_clocks[idx]) for idx in timed_indices},
+            key=lambda item: (item[0], "" if item[1] is None else item[1]),
+        )
     output: list[dict[str, Any]] = []
 
     for axis_index, axis in enumerate(axis_rows):
@@ -537,17 +350,20 @@ def _dic_rows_for_axis(
             output.append({"status": reason, "reason": reason})
             continue
         q = float(axis_times[axis_index])
-        compatibility: list[bool] = []
+        clock_ok = bool(unique_dic_clocks)
         clock_reason = "NO_DIC_TIME_SUPPORT"
-        for dic_index in timed_indices:
+        sample_clock = (q, axis_domains[axis_index], axis_clocks[axis_index], axis_errors[axis_index])
+        for dic_domain, dic_clock_id in unique_dic_clocks:
             ok, reason = _clock_pair_compatible(
-                (q, axis_domains[axis_index], axis_clocks[axis_index], axis_errors[axis_index]),
-                (dic_times[dic_index], dic_domains[dic_index], dic_clocks[dic_index], dic_errors[dic_index]),
+                sample_clock,
+                (0.0, dic_domain, dic_clock_id, None),
+                allow_explicit_estimated_pair=False,
             )
-            compatibility.append(ok)
             if not ok:
+                clock_ok = False
                 clock_reason = reason
-        if not compatibility or not all(compatibility):
+                break
+        if not clock_ok:
             output.append({"status": clock_reason, "reason": clock_reason})
             continue
         if not timed_values:
@@ -595,27 +411,118 @@ def _dic_rows_for_axis(
             lval, rval = left_gauges[name], right_gauges[name]
             gauges[name] = None if lval is None or rval is None else lval * weights[0] + rval * weights[1]
         accepted_gauges = [value for value in gauges.values() if value is not None]
+        eng_sd: float | None = None
+        true_sd: float | None = None
         if len(accepted_gauges) >= 3:
             mean = sum(accepted_gauges) / len(accepted_gauges)
+            eng_sd = statistics.stdev(accepted_gauges)
+            true_values = [math.log1p(val) for val in accepted_gauges if val > -1.0]
+            if len(true_values) == len(accepted_gauges):
+                true = sum(true_values) / len(true_values)
+                true_sd = statistics.stdev(true_values)
+            else:
+                true = None
+            interp_status = "DIC_BOUNDED_INTERPOLATION"
+        elif not gauge_names:
+            e0, t0 = _aggregate_strain(left)
+            e1, t1 = _aggregate_strain(right)
+            mean = e0 * weights[0] + e1 * weights[1] if e0 is not None and e1 is not None else None
+            if t0 is not None and t1 is not None:
+                true = t0 * weights[0] + t1 * weights[1]
+            else:
+                true = math.log1p(mean) if mean is not None and mean > -1.0 else None
+            interp_status = "DIC_BOUNDED_INTERPOLATION" if mean is not None else "DIC_STRAIN_MISSING"
         else:
-            e0, _ = _aggregate_strain(left)
-            e1, _ = _aggregate_strain(right)
-            mean = e0 * weights[0] + e1 * weights[1] if not gauge_names and e0 is not None and e1 is not None else None
-        true = math.log1p(mean) if mean is not None and mean > -1 else None
+            mean = None
+            true = None
+            interp_status = "DIC_INSUFFICIENT_COMMON_GAUGES"
         interpolated = {f"{name}_engineering_strain": value for name, value in gauges.items()}
         interpolated.update({
             "engineering_strain": mean,
+            "engineering_strain_sd": eng_sd,
             "true_strain": true,
+            "true_strain_sd": true_sd,
             "valid_gauge_count": len(accepted_gauges) if gauge_names else min(
                 _integer(left.get("valid_gauge_count")) or 0, _integer(right.get("valid_gauge_count")) or 0
             ),
-            "status": "DIC_BOUNDED_INTERPOLATION",
+            "status": interp_status,
             "source_indices": source_indices,
             "source_frames": [left.get("frame"), right.get("frame")],
             "weights": weights,
         })
         output.append(interpolated)
     return output
+
+
+def _alignment_code_sha256() -> dict[str, str]:
+    return {
+        "straintrace_campaign/alignment.py": sha256_file(
+            resolve_source_file("straintrace_campaign/alignment.py", module_file=__file__)
+        ),
+        "straintrace_campaign/_time_io.py": sha256_file(
+            resolve_source_file("straintrace_campaign/_time_io.py")
+        ),
+    }
+
+
+def _axis_digest(
+    axis_rows: Sequence[Mapping[str, Any]],
+    time_column: str,
+    load_time_column: str,
+    exposure_start_column: str,
+    exposure_end_column: str,
+) -> str:
+    keys = (
+        "frame", "native_cbf_frame", "native_dic_frame", "native_frame", "scan_id",
+        "scan_id_is_global_fio", "timestamp_unix_s", "estimated_timestamp_unix_s", "time_s",
+        "clock_id", "timestamp_clock_id", "time_clock_id", "timestamp_status", "time_status",
+        "timestamp_source", time_column, load_time_column,
+        exposure_start_column, exposure_end_column,
+    )
+    unique_keys = tuple(dict.fromkeys(keys))
+    return canonical_json_sha256([{key: row.get(key) for key in unique_keys} for row in axis_rows])
+
+
+def fingerprint(
+    acquisition: Mapping[str, Any],
+    load_path: str | os.PathLike[str],
+    options: Mapping[str, Any] | None = None,
+) -> str:
+    opts = dict(options or {})
+    mode_norm = str(opts.get("mode", "instantaneous")).strip().casefold()
+    if mode_norm in {"exposure_window_mean", "window", "exposure_mean"}:
+        mode_norm = "window_mean"
+    time_column = str(opts.get("measurement_time_field") or opts.get("time_column") or "timestamp_unix_s")
+    load_time_column = str(opts.get("load_time_column") or time_column)
+    exposure_start_column = str(opts.get("exposure_start_column") or "exposure_start_unix_s")
+    exposure_end_column = str(opts.get("exposure_end_column") or "exposure_end_unix_s")
+    gap = _number(opts.get("max_gap_s", 2.5))
+    dic_gap_raw = opts.get("dic_max_gap_s")
+    dic_gap = _number(dic_gap_raw if dic_gap_raw is not None else opts.get("max_gap_s", 2.5))
+    load = Path(load_path).expanduser().resolve()
+    load_digest = sha256_file(load)
+    result_record = acquisition.get("result") if isinstance(acquisition.get("result"), Mapping) else {}
+    return fingerprint_data(
+        "campaign_alignment_v2",
+        {
+            "acquisition_id": str(acquisition.get("acquisition_id") or ""),
+            "alignment_code_sha256": _alignment_code_sha256(),
+            "dic_result_fingerprint": result_record.get("fingerprint"),
+            "dimensions": acquisition.get("dimensions"),
+            "measurement_frames": acquisition.get("measurement_frames") or [],
+            "image_frames": acquisition.get("image_frames") or [],
+            "load_sha256": load_digest,
+            "mode": mode_norm,
+            "max_gap_s": gap,
+            "dic_max_gap_s": dic_gap,
+            "time_column": time_column,
+            "load_time_column": load_time_column,
+            "force_column": str(opts.get("force_column", "force_N")),
+            "force_unit": opts.get("force_unit"),
+            "exposure_start_column": exposure_start_column,
+            "exposure_end_column": exposure_end_column,
+        },
+    )
 
 
 def align(
@@ -668,10 +575,15 @@ def align(
     load = Path(load_path).expanduser().resolve()
     source_rows = _source_rows(acquisition, root)
     source_rows = _hydrate_source_times(source_rows, acquisition.get("image_frames") or [])
-    axis_rows, axis_kind = _read_axis(acquisition, root, source_rows)
+    axis_rows, axis_kind = _read_axis(acquisition, source_rows)
     load_rows, load_times, load_forces, load_valid, load_domains, load_clock_ids, load_force_reasons = _read_load(
         load, load_time_column, force_column, force_unit
     )
+    unique_load_clocks = sorted(
+        set(zip(load_domains, load_clock_ids)),
+        key=lambda item: (item[0], "" if item[1] is None else item[1]),
+    )
+    explicit_estimated_load_pair = time_column.startswith("estimated_") != load_time_column.startswith("estimated_")
     axis_times, axis_domains, axis_clock_ids, axis_errors = _axis_times(axis_rows, time_column)
     if axis_kind == "dic_result_rows":
         dic_alignment = [
@@ -705,6 +617,13 @@ def align(
         frame_no = _integer(axis.get("frame"))
         if frame_no is None:
             raise CampaignError("ALIGNMENT_FRAME_ID_MISSING", f"axis row {index} has no integer frame identity")
+        accepted_source = dic.get("source_row") if result_imported and isinstance(dic.get("source_row"), Mapping) else axis
+        source_force = _number(accepted_source.get("force_N"))
+        source_stress = _number(accepted_source.get("stress_MPa"))
+        source_area = _number(accepted_source.get("area_mm2"))
+        source_status = str(accepted_source.get("strain_status", "")).upper()
+        imported = result_imported or "IMPORTED_ACCEPTED" in source_status
+
         output["frame"] = frame_no
         output["timestamp_unix_s"] = axis.get("timestamp_unix_s")
         output["estimated_timestamp_unix_s"] = axis.get("estimated_timestamp_unix_s")
@@ -722,7 +641,9 @@ def align(
         output["area_mm2_candidate"] = candidate_area
         output["area_mm2_source"] = area_source
         output["area_status"] = area_status
-        if area is not None:
+        if imported:
+            output["area_mm2"] = source_area if source_area is not None else None
+        elif area is not None:
             output["area_mm2"] = area
         elif _number(axis.get("area_mm2")) is None:
             output["area_mm2"] = None
@@ -732,44 +653,39 @@ def align(
         clock_status = axis_errors[index] or "NO_QUERY_TIME"
         if query is not None:
             sample = (query, axis_domains[index], axis_clock_ids[index], axis_errors[index])
-            compatible_rows = []
-            for load_index, load_time in enumerate(load_times):
-                compatible, _ = _clock_pair_compatible(
+            compatible_clocks: list[tuple[bool, str]] = [
+                _clock_pair_compatible(
                     sample,
-                    (load_time, load_domains[load_index], load_clock_ids[load_index], None),
+                    (0.0, ld_domain, ld_clock_id, None),
+                    allow_explicit_estimated_pair=explicit_estimated_load_pair,
                 )
-                compatible_rows.append(compatible)
-            if compatible_rows and all(compatible_rows):
+                for ld_domain, ld_clock_id in unique_load_clocks
+            ]
+            if compatible_clocks and all(ok for ok, _ in compatible_clocks):
                 clock_compat, clock_status = True, "CLOCKS_COMPATIBLE"
-            elif any(compatible_rows):
+            elif any(ok for ok, _ in compatible_clocks):
                 clock_status = "MIXED_LOAD_CLOCK_DOMAINS"
-            elif compatible_rows:
-                _, clock_status = _clock_pair_compatible(
-                    sample, (load_times[0], load_domains[0], load_clock_ids[0], None)
-                )
+            elif compatible_clocks:
+                clock_status = compatible_clocks[0][1]
         output["load_time_domain_status"] = clock_status
         force_support: dict[str, Any]
         if not clock_compat:
             force_support = {"status": clock_status, "indices": [], "weights": []}
             force_value = None
         elif mode_norm == "window_mean":
-            start_info = _parse_time(
-                {exposure_start_column: axis.get(exposure_start_column), "clock_id": axis_clock_ids[index]},
-                exposure_start_column,
-                axis,
-            )
-            end_info = _parse_time(
-                {exposure_end_column: axis.get(exposure_end_column), "clock_id": axis_clock_ids[index]},
-                exposure_end_column,
-                axis,
-            )
+            start_info = _parse_time(exposure_start_column, axis)
+            end_info = _parse_time(exposure_end_column, axis)
+            allow_exp_start_pair = exposure_start_column.startswith("estimated_") != time_column.startswith("estimated_")
+            allow_exp_end_pair = exposure_end_column.startswith("estimated_") != time_column.startswith("estimated_")
             start_ok, start_reason = _clock_pair_compatible(
                 start_info,
                 (query, axis_domains[index], axis_clock_ids[index], axis_errors[index]),
+                allow_explicit_estimated_pair=allow_exp_start_pair,
             )
             end_ok, end_reason = _clock_pair_compatible(
                 end_info,
                 (query, axis_domains[index], axis_clock_ids[index], axis_errors[index]),
+                allow_explicit_estimated_pair=allow_exp_end_pair,
             )
             if not start_ok or not end_ok:
                 force_support = {
@@ -826,11 +742,6 @@ def align(
         output["force_interpolation_alpha"] = force_support.get("alpha")
         output["force_alignment_mode"] = mode_norm
 
-        accepted_source = dic.get("source_row") if result_imported and isinstance(dic.get("source_row"), Mapping) else axis
-        source_force = _number(accepted_source.get("force_N"))
-        source_stress = _number(accepted_source.get("stress_MPa"))
-        source_status = str(accepted_source.get("strain_status", "")).upper()
-        imported = result_imported or "IMPORTED_ACCEPTED" in source_status
         if imported and source_force is not None:
             output["source_accepted_force_N"] = source_force
         if imported and source_stress is not None:
@@ -839,17 +750,18 @@ def align(
             output["force_N"] = source_force
             output["force_N_candidate"] = force_value
             output["force_status"] = (
-                "IMPORTED_ACCEPTED_PRESERVED" if source_force is not None else force_support["status"]
+                "IMPORTED_ACCEPTED_PRESERVED" if source_force is not None else "NO_IMPORTED_ACCEPTED_FORCE"
             )
             output["force_candidate_status"] = force_support["status"]
-            if force_value is not None:
+            if source_force is not None:
                 summary["finite_force_count"] += 1
+            else:
+                summary["missing_force_count"] += 1
+            if force_value is not None:
                 if force_support["status"] == "LINEAR_TIME_INTERPOLATION":
                     summary["interpolated_force_count"] += 1
                 if force_support["status"] == "EXPOSURE_WINDOW_MEAN":
                     summary["window_mean_force_count"] += 1
-            else:
-                summary["missing_force_count"] += 1
         elif force_value is not None:
             output["force_N"] = force_value
             output["force_status"] = force_support["status"]
@@ -898,11 +810,16 @@ def align(
         output["dic_source_frames"] = dic.get("source_frames")
         if isinstance(dic.get("source_row"), Mapping):
             source = dict(dic["source_row"])
-            output["dic_source_frame"] = dic.get(
+            native_dic = dic.get(
                 "native_dic_frame", source.get("native_dic_frame", source.get("native_frame", source.get("frame")))
             )
+            output["dic_source_frame"] = native_dic
+            output.setdefault("native_dic_frame", native_dic)
             output["dic_source_status"] = source.get("strain_status", source.get("quality_status"))
             output["dic_source_values"] = source
+            for extra_key, extra_val in source.items():
+                if extra_key not in output:
+                    output[extra_key] = extra_val
             for gauge_name, value in _gauge_values(source).items():
                 output[f"{gauge_name}_engineering_strain"] = value
             engineering, true = _aggregate_strain(source)
@@ -912,6 +829,12 @@ def align(
             output["engineering_strain_sd"] = _number(
                 source.get("engineering_strain_sd", source.get("engineering_strain_mean_sd"))
             )
+            output["true_strain_sd"] = _number(
+                source.get("true_strain_sd", source.get("true_strain_mean_sd"))
+            )
+            output["reference_frame"] = source.get("reference_frame", output.get("reference_frame"))
+            output["quality_status"] = source.get("quality_status", output.get("quality_status"))
+            output["reasons"] = source.get("reasons", output.get("reasons", []))
             output["strain_status"] = source.get(
                 "strain_status", source.get("quality_status", "SOURCE_VALUE_PRESERVED")
             )
@@ -922,22 +845,22 @@ def align(
             output["engineering_strain"] = dic.get("engineering_strain")
             output["true_strain"] = dic.get("true_strain")
             output["valid_gauge_count"] = dic.get("valid_gauge_count")
-            accepted_gauges = [
-                _number(value)
-                for key, value in dic.items()
-                if _GAUGE_RE.fullmatch(str(key)) and _number(value) is not None
-            ]
-            output["engineering_strain_sd"] = (
-                statistics.stdev(accepted_gauges) if len(accepted_gauges) >= 3 else None
-            )
+            output["engineering_strain_sd"] = dic.get("engineering_strain_sd")
+            output["true_strain_sd"] = dic.get("true_strain_sd")
+            output.setdefault("quality_status", "INTERPOLATED")
+            output.setdefault("reasons", [])
             output["strain_status"] = "DIC_BOUNDED_INTERPOLATION"
             summary["interpolated_strain_count"] += int(dic.get("engineering_strain") is not None)
         else:
             output["engineering_strain"] = None
             output["true_strain"] = None
-            output["valid_gauge_count"] = None
+            output["valid_gauge_count"] = dic.get("valid_gauge_count")
             output["engineering_strain_sd"] = None
-            output["strain_status"] = dic.get("status", "NO_DIC_RESULT")
+            output["true_strain_sd"] = None
+            dic_status = dic.get("status", "NO_DIC_RESULT")
+            output.setdefault("quality_status", dic_status)
+            output.setdefault("reasons", [dic_status] if dic_status else [])
+            output["strain_status"] = dic_status
 
         if output.get("engineering_strain") is not None:
             summary["finite_strain_count"] += 1
@@ -945,40 +868,16 @@ def align(
             summary["missing_strain_count"] += 1
         aligned_rows.append(output)
 
-    axis_digest = hashlib.sha256(
-        json.dumps(
-            [
-                {
-                    key: row.get(key)
-                    for key in (
-                        "frame", "native_cbf_frame", "native_dic_frame", "native_frame", "scan_id",
-                        "scan_id_is_global_fio", time_column, load_time_column,
-                        exposure_start_column, exposure_end_column,
-                    )
-                }
-                for row in axis_rows
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    axis_digest = _axis_digest(axis_rows, time_column, load_time_column, exposure_start_column, exposure_end_column)
     load_digest = sha256_file(load)
-    result_record = acquisition.get("result") if isinstance(acquisition.get("result"), Mapping) else {}
-    fingerprint = fingerprint_data(
-        "campaign_alignment_v1",
+    stage_fingerprint = fingerprint(
+        acquisition,
+        load,
         {
-            "acquisition_id": acquisition_id,
-            "axis_kind": axis_kind,
-            "axis_sha256": axis_digest,
-            "dic_result_fingerprint": result_record.get("fingerprint"),
-            "load_path": str(load),
-            "load_sha256": load_digest,
             "mode": mode_norm,
             "max_gap_s": gap,
             "dic_max_gap_s": dic_gap,
-            "time_column": time_column,
+            "measurement_time_field": time_column,
             "load_time_column": load_time_column,
             "force_column": force_column,
             "force_unit": force_unit,
@@ -986,14 +885,14 @@ def align(
             "exposure_end_column": exposure_end_column,
         },
     )
-    output_dir = stage_output_dir(root, acquisition_id, "alignment", fingerprint)
+    output_dir = stage_output_dir(root, acquisition_id, "alignment", stage_fingerprint)
     rows_path = output_dir / "alignment.jsonl"
     write_jsonl_atomic(rows_path, aligned_rows)
     relative_rows_path = relative_artifact(root, rows_path)
     checksum = sha256_file(rows_path)
     return {
         "status": "COMPLETE",
-        "fingerprint": fingerprint,
+        "fingerprint": stage_fingerprint,
         "rows_path": relative_rows_path,
         "artifacts": [relative_rows_path],
         "checksums": {relative_rows_path: checksum},
@@ -1005,6 +904,9 @@ def align(
             "load_force_column": force_column,
             "load_force_unit_override": force_unit,
             "time_column_selection_is_explicit": time_column != "timestamp_unix_s",
+            "explicit_estimated_to_recorded_clock_pairing": explicit_estimated_load_pair,
+            "exposure_start_column": exposure_start_column,
+            "exposure_end_column": exposure_end_column,
             "axis_kind": axis_kind,
             "axis_sha256": axis_digest,
             "mode": mode_norm,
@@ -1022,4 +924,4 @@ def align(
     }
 
 
-__all__ = ["align"]
+__all__ = ["align", "fingerprint"]
