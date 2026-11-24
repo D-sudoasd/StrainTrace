@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import api
+from ._io import _json_safe
 
 
 EXIT_OK = 0
@@ -38,7 +39,7 @@ _CONFIG_ERROR_CODES = frozenset({
 def _emit(value: Any) -> None:
     # JSON escapes keep JSONL safe on Windows consoles using legacy code pages
     # while json.loads still restores the original Unicode values.
-    sys.stdout.write(json.dumps(api._json_safe(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+    sys.stdout.write(json.dumps(_json_safe(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
     sys.stdout.flush()
 
 

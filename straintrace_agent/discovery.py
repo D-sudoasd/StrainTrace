@@ -62,32 +62,35 @@ def source_files(folder: Path):
 
 def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "full_field", options: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from . import api
+    from ._config import _ensure_known_fields, _positive_number
+    from ._inventory import IMAGE_SUFFIXES, parse_frame_map, parse_native_frame
+    from ._io import AgentError, _read_json
 
     if not isinstance(folder, (str, os.PathLike)) or not str(folder).strip():
-        raise api.AgentError("CONFIG_TYPE_ERROR", "folder must be a non-empty path string", path="$.folder")
+        raise AgentError("CONFIG_TYPE_ERROR", "folder must be a non-empty path string", path="$.folder")
     root = Path(folder).expanduser().resolve()
     if not root.is_dir():
-        raise api.AgentError("EXPERIMENT_DIRECTORY_MISSING", f"experiment directory does not exist: {root}", path=str(root))
+        raise AgentError("EXPERIMENT_DIRECTORY_MISSING", f"experiment directory does not exist: {root}", path=str(root))
     if options is not None and not isinstance(options, Mapping):
-        raise api.AgentError("CONFIG_TYPE_ERROR", "options must be an object", path="$.options")
+        raise AgentError("CONFIG_TYPE_ERROR", "options must be an object", path="$.options")
     normalized = next((key for key, aliases in OBJECTIVES.items() if isinstance(objective, str) and objective.strip().casefold() in aliases), None)
     required: list[dict[str, Any]] = []
     warnings: list[dict[str, str]] = []
     if normalized is None:
         required.append({"field": "objective", "reason": "This objective has no supported deterministic interpretation.", "choices": list(OBJECTIVES)})
     metadata_path = root / "experiment.json"
-    metadata = api._read_json(metadata_path) if metadata_path.is_file() else None
+    metadata = _read_json(metadata_path) if metadata_path.is_file() else None
     if metadata is not None:
-        api._ensure_known_fields(metadata, {"schema", "options"}, path="$.experiment")
+        _ensure_known_fields(metadata, {"schema", "options"}, path="$.experiment")
         if metadata.get("schema") != "straintrace.experiment/v1" or not isinstance(metadata.get("options"), dict):
-            raise api.AgentError("EXPERIMENT_SCHEMA", "experiment.json requires schema straintrace.experiment/v1 and an options object", path=str(metadata_path))
+            raise AgentError("EXPERIMENT_SCHEMA", "experiment.json requires schema straintrace.experiment/v1 and an options object", path=str(metadata_path))
     selected = {**(metadata["options"] if metadata else {}), **dict(options or {})}
     allowed = set(inspect.signature(api.init_project).parameters) - {"project"}
-    api._ensure_known_fields(selected, allowed, path="$.options")
+    _ensure_known_fields(selected, allowed, path="$.options")
     for key in ("image_dir", "frame_map_csv", "loads_csv", "mask_file"):
         if selected.get(key) is not None:
             if not isinstance(selected[key], (str, os.PathLike)) or not str(selected[key]).strip():
-                raise api.AgentError("CONFIG_TYPE_ERROR", f"{key} must be a path", path=f"$.options.{key}")
+                raise AgentError("CONFIG_TYPE_ERROR", f"{key} must be a path", path=f"$.options.{key}")
             path = Path(selected[key]).expanduser()
             selected[key] = str((path if path.is_absolute() else root / path).resolve())
     mask_path = selected.get("mask_file")
@@ -95,7 +98,7 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
     maps: list[Path] = []
     loads: list[dict[str, Any]] = []
     for path in source_files(root):
-        if path.suffix.lower() in api.IMAGE_SUFFIXES and str(path.resolve()) != mask_path:
+        if path.suffix.lower() in IMAGE_SUFFIXES and str(path.resolve()) != mask_path:
             groups.setdefault(path.parent, []).append(path)
         elif path.suffix.lower() == ".csv":
             try:
@@ -115,8 +118,8 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
         ambiguous = 0
         for path in files:
             try:
-                frames.append(api._native_frame_from_name(path))
-            except api.AgentError:
+                frames.append(parse_native_frame(path))
+            except AgentError:
                 ambiguous += 1
         values = sorted(set(frames))
         candidates.append({"image_dir": str(directory), "frame_count": len(files),
@@ -141,17 +144,17 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
     explicit_times = False
     if chosen and selected.get("frame_map_csv"):
         try:
-            mapping = api._explicit_frame_map(Path(selected["frame_map_csv"]), Path(chosen["image_dir"]), groups[Path(chosen["image_dir"])])
+            mapping = parse_frame_map(Path(selected["frame_map_csv"]), Path(chosen["image_dir"]), groups[Path(chosen["image_dir"])])
             ordered = sorted(mapping.values(), key=lambda item: item["native_frame"])
             times = [item["time_s"] for item in ordered]
             natives = [item["native_frame"] for item in ordered]
             if len(set(natives)) != len(natives):
-                raise api.AgentError("FRAME_ID_DUPLICATE", "frame map contains duplicate native frame numbers")
+                raise AgentError("FRAME_ID_DUPLICATE", "frame map contains duplicate native frame numbers")
             if any(value is not None for value in times):
                 if any(value is None for value in times) or any(b <= a for a, b in zip(times, times[1:])):
-                    raise api.AgentError("FRAME_TIME_ORDER", "explicit frame times must be complete and strictly increasing")
+                    raise AgentError("FRAME_TIME_ORDER", "explicit frame times must be complete and strictly increasing")
                 explicit_times = True
-        except api.AgentError as exc:
+        except AgentError as exc:
             required.append({"field": "frame_map_csv", "reason": exc.message, "error_code": exc.code})
     elif chosen and (chosen["ambiguous_filename_count"] or chosen["duplicate_native_frame_count"]):
         required.append({"field": "frame_map_csv", "reason": "Native image identity requires an explicit unique filename/native_frame mapping.", "choices": [str(path) for path in maps]})
@@ -171,7 +174,7 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
     if selected.get("time_basis") == "frame_index" and selected.get("loads_csv"):
         required.append({"field": "time_basis", "reason": "frame_index cannot be used with loads_csv; provide physical_time.", "choices": ["physical_time"]})
     if selected.get("frame_interval_s") is not None:
-        api._positive_number(selected["frame_interval_s"], "frame_interval_s")
+        _positive_number(selected["frame_interval_s"], "frame_interval_s")
     if normalized in {"virtual_gauge", "stress_strain"} and not selected.get("gauges"):
         required.append({"field": "gauges", "reason": "Specify measurement endpoints and loading axis; automatic geometry candidates do not establish a physical gauge."})
     if normalized == "stress_strain":

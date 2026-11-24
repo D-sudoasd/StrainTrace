@@ -20,15 +20,13 @@ from tkinter import filedialog, ttk
 
 from PIL import Image, ImageTk
 
+from ._io import _read_json
+
 
 OBJECTIVES = {"全场位移与应变": "full_field", "虚拟标距应变": "virtual_gauge", "应力与应变": "stress_strain"}
 KINDS = ("统计 ROI", "虚拟标距", "排除区")
 GEOMETRY_KEYS = dict(zip(KINDS, ("regions", "gauges", "exclusions_px")))
 DRAW_TARGETS = ("计算区域", "统计 ROI", "排除区", "标距 A", "标距 B")
-
-
-def _read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _project_file(project, relative):
@@ -39,7 +37,9 @@ def _project_file(project, relative):
 
 
 def _time_basis(api, config):
-    """Resolve supplied timing in a worker, using the API's frame-map parser."""
+    """Resolve supplied timing in a worker using the API's time-basis helper."""
+    if hasattr(api, "resolve_time_basis"):
+        return api.resolve_time_basis(config)
     if config.get("frame_interval_s") is not None or config.get("loads") or config.get("loads_csv"):
         return "physical_time"
     if not config.get("frame_map_csv"):
@@ -49,7 +49,8 @@ def _time_basis(api, config):
     mask = Path(config["mask_file"]).expanduser().resolve() if config.get("mask_file") else None
     paths = [path.resolve() for path in source_files(image_root)
              if path.suffix.lower() in api.IMAGE_SUFFIXES and path.resolve() != mask]
-    mapping = api._explicit_frame_map(Path(config["frame_map_csv"]).expanduser().resolve(), image_root, paths)
+    parse_map = getattr(api, "parse_frame_map", None) or getattr(api, "_explicit_frame_map")
+    mapping = parse_map(Path(config["frame_map_csv"]).expanduser().resolve(), image_root, paths)
     return "physical_time" if any(row["time_s"] is not None for row in mapping.values()) else "frame_index"
 
 
@@ -58,18 +59,21 @@ def _snapshot(api, project):
     status = api.status(project)
     inventory = _read_json(project / "inventory.json").get("frames", [])
     plan = _read_json(_project_file(project, status["current_plan"])) if status.get("current_plan") else None
-    if plan is None:
-        # Use the planner's reference selection and its already loaded image.
+    if hasattr(api, "load_reference_frame"):
+        record, gray = api.load_reference_frame(config, inventory, plan=plan, allow_untextured_fallback=True)
+    elif plan is None:
+        # Fallback for minimal test doubles providing private reference hooks.
+        auto_ref = getattr(api, "_automatic_reference")
         try:
-            record, gray, _selection = api._automatic_reference(config, inventory, allow_untextured_fallback=True)
+            record, gray, _selection = auto_ref(config, inventory, allow_untextured_fallback=True)
         except TypeError:
-            record, gray, _selection = api._automatic_reference(config, inventory)
+            record, gray, _selection = auto_ref(config, inventory)
     else:
         native = plan.get("reference_native_frame")
         if native is None:
             raise ValueError("当前计划未指定参考原生帧；请重新生成计划。")
-        record = api._reference_record({"reference_native_frame": native}, inventory)
-        gray = api._load_image(record["path"])
+        record = getattr(api, "_reference_record")({"reference_native_frame": native}, inventory)
+        gray = getattr(api, "_load_image")(record["path"])
     import ezdic_core as core
     import numpy as np
     gray8 = core.normalize_to_uint8(gray)

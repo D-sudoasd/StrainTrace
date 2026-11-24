@@ -36,14 +36,6 @@ _NOTE = (
 )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _json(path: Path) -> dict[str, Any]:
     def invalid(value: str) -> None:
         raise ValueError(f"Nonfinite JSON token: {value}")
@@ -51,12 +43,6 @@ def _json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object: {path.name}")
     return value
-
-
-def _json_sha256(value: Mapping[str, Any]) -> str:
-    """Match the API's canonical hash for its validated JSON snapshots."""
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _validate_snapshot_binding(config: Mapping[str, Any], plan: Mapping[str, Any], source: Mapping[str, Any]) -> None:
@@ -102,61 +88,90 @@ def _read_table(path: Path, relative: str) -> dict[str, Any]:
     return {"path": relative, "columns": columns, "rows": rows}
 
 
-def _is_reparse_or_symlink(path: Path) -> bool:
+_USE_SHARED_IO = False
+if __package__:
     try:
-        attributes = path.lstat()
-    except FileNotFoundError:
-        return False
-    return bool(
-        stat.S_ISLNK(attributes.st_mode)
-        or getattr(attributes, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    )
+        from ._io import (
+            _DIR_REPLACE_RETRY_DELAYS_S as _DIR_REPLACE_RETRY_DELAYS_S,
+            _is_reparse_or_symlink as _is_reparse_or_symlink,
+            _json_sha256 as _json_sha256,
+            _relative_under_root as _relative_under_root,
+            _replace_with_retry as _io_replace_with_retry,
+            _safe_file as _safe_file,
+            _sha256_raw as _sha256,
+        )
+        _USE_SHARED_IO = True
+    except ImportError:
+        _USE_SHARED_IO = False
 
+if _USE_SHARED_IO:
+    def _replace_with_retry(source: Path, destination: Path) -> None:
+        _io_replace_with_retry(source, destination, delays=_DIR_REPLACE_RETRY_DELAYS_S)
+else:
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
-def _relative_under_root(root: Path, candidate: Path) -> str | None:
-    resolved_root = root.resolve()
-    candidate_abs = candidate.expanduser().absolute()
-    if candidate_abs.is_relative_to(resolved_root):
-        rel = candidate_abs.relative_to(resolved_root)
-        return rel.as_posix() if rel.parts else None
-    parts: list[str] = []
-    current = candidate_abs
-    while True:
+    def _json_sha256(value: Mapping[str, Any]) -> str:
+        """Match the API's canonical hash for its validated JSON snapshots."""
+        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _is_reparse_or_symlink(path: Path) -> bool:
         try:
-            if current.resolve() == resolved_root:
-                return PurePosixPath(*reversed(parts)).as_posix() if parts else None
-        except OSError:
-            pass
-        if current.parent == current:
-            return None
-        parts.append(current.name)
-        current = current.parent
+            attributes = path.lstat()
+        except FileNotFoundError:
+            return False
+        return bool(
+            stat.S_ISLNK(attributes.st_mode)
+            or getattr(attributes, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
 
+    def _relative_under_root(root: Path, candidate: Path) -> str | None:
+        resolved_root = root.resolve()
+        candidate_abs = candidate.expanduser().absolute()
+        if candidate_abs.is_relative_to(resolved_root):
+            rel = candidate_abs.relative_to(resolved_root)
+            return rel.as_posix() if rel.parts else None
+        parts: list[str] = []
+        current = candidate_abs
+        while True:
+            try:
+                if current.resolve() == resolved_root:
+                    return PurePosixPath(*reversed(parts)).as_posix() if parts else None
+            except OSError:
+                pass
+            if current.parent == current:
+                return None
+            parts.append(current.name)
+            current = current.parent
 
-def _replace_with_retry(source: Path, destination: Path) -> None:
-    for attempt in range(len(_DIR_REPLACE_RETRY_DELAYS_S) + 1):
-        try:
-            os.replace(source, destination)
-            return
-        except PermissionError:
-            if attempt == len(_DIR_REPLACE_RETRY_DELAYS_S):
-                raise
-            time.sleep(_DIR_REPLACE_RETRY_DELAYS_S[attempt])
+    def _replace_with_retry(source: Path, destination: Path) -> None:
+        for attempt in range(len(_DIR_REPLACE_RETRY_DELAYS_S) + 1):
+            try:
+                os.replace(source, destination)
+                return
+            except PermissionError:
+                if attempt == len(_DIR_REPLACE_RETRY_DELAYS_S):
+                    raise
+                time.sleep(_DIR_REPLACE_RETRY_DELAYS_S[attempt])
 
-
-def _safe_file(root: Path, relative: str) -> Path:
-    rel = PurePosixPath(relative)
-    if not relative or not rel.parts or rel.is_absolute() or ".." in rel.parts or "\\" in relative or ":" in relative:
-        raise ValueError(f"Unsafe package path: {relative!r}")
-    resolved_root = root.resolve()
-    current = resolved_root
-    for segment in rel.parts:
-        current = current / segment
-        if _is_reparse_or_symlink(current):
-            raise ValueError(f"Symlink or reparse point in package path: {relative!r}")
-    if not current.resolve().is_relative_to(resolved_root):
-        raise ValueError(f"Path escapes package: {relative!r}")
-    return current
+    def _safe_file(root: Path, relative: str) -> Path:
+        rel = PurePosixPath(relative)
+        if not relative or not rel.parts or rel.is_absolute() or ".." in rel.parts or "\\" in relative or ":" in relative:
+            raise ValueError(f"Unsafe package path: {relative!r}")
+        resolved_root = root.resolve()
+        current = resolved_root
+        for segment in rel.parts:
+            current = current / segment
+            if _is_reparse_or_symlink(current):
+                raise ValueError(f"Symlink or reparse point in package path: {relative!r}")
+        if not current.resolve().is_relative_to(resolved_root):
+            raise ValueError(f"Path escapes package: {relative!r}")
+        return current
 
 
 def _checkpoint_expectations(source: Mapping[str, Any]) -> dict[str, str]:
