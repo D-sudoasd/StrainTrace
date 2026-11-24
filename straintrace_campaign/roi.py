@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,7 +19,7 @@ import numpy as np
 from scipy import ndimage
 
 import ezdic_core as core
-from .storage import proposal_hash as _shared_proposal_hash
+from .storage import atomic_write_bytes, proposal_hash as _shared_proposal_hash
 
 _PROPOSAL_VERSION = "campaign_roi_v1"
 _GEOMETRY_KEYS = ("reference_frame", "reference_path", "reference_sha256", "image_shape", "free_region", "field_roi", "exclusions", "groups")
@@ -261,12 +263,14 @@ def _make_groups(image8, free_region, exclusions, geometry, mask, *, count=_DEFA
         # dimension defines the gauge direction when silhouette PCA is absent.
         if width >= height:
             center = np.array([x + width / 2, y + height / 2], dtype=float)
-            axis = np.array([1.0, 0.0]); normal = np.array([0.0, 1.0])
+            axis = np.array([1.0, 0.0])
+            normal = np.array([0.0, 1.0])
             s_min, s_max = -0.40 * width, 0.40 * width
             t_min, t_max = -0.25 * height, 0.25 * height
         else:
             center = np.array([x + width / 2, y + height / 2], dtype=float)
-            axis = np.array([0.0, 1.0]); normal = np.array([-1.0, 0.0])
+            axis = np.array([0.0, 1.0])
+            normal = np.array([-1.0, 0.0])
             s_min, s_max = -0.40 * height, 0.40 * height
             t_min, t_max = -0.25 * width, 0.25 * width
     else:
@@ -327,7 +331,8 @@ def _make_groups(image8, free_region, exclusions, geometry, mask, *, count=_DEFA
                 break
             candidates.sort(key=lambda item: item[0], reverse=True)
             _score, rect, metrics, occupancy = candidates[0]
-            rects.append(rect); rect_metrics.append({"texture": metrics, "mask_occupancy": occupancy})
+            rects.append(rect)
+            rect_metrics.append({"texture": metrics, "mask_occupancy": occupancy})
         if reason or len(rects) != 2:
             failures.append({"gauge": f"G{index + 1:02d}", "status": "NOT_PROPOSED", "reason": reason or "NO_SAFE_ENDPOINT_WINDOWS"})
             continue
@@ -363,7 +368,50 @@ def _preview(image8, path, proposal, label):
         cv2.line(canvas, c1, c2, (255, 0, 255), 1)
         cv2.putText(canvas, group["name"], (c1[0], max(12, c1[1] - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
     cv2.putText(canvas, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    core.write_image_checked(path, canvas)
+    suffix = Path(path).suffix or ".png"
+    ok, encoded = cv2.imencode(suffix, canvas)
+    if not ok:
+        raise core.CoreError("PREVIEW_ENCODE_FAILED", {"path": str(path)})
+    atomic_write_bytes(path, encoded.tobytes())
+
+
+def _safe_dir_component(value: Any) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "unknown")).strip("._")
+    return cleaned or "unknown"
+
+
+def _clipped_geometry_for_region(
+    mask: np.ndarray | None,
+    geometry: Mapping[str, Any],
+    region: list[int],
+) -> dict[str, Any] | None:
+    if mask is None:
+        return None
+    rx, ry, rw, rh = region
+    sub = mask[ry:ry + rh, rx:rx + rw]
+    ys, xs = np.nonzero(sub)
+    if len(xs) < 100:
+        return None
+    points = np.column_stack((xs + rx, ys + ry)).astype(np.float64)
+    center = points.mean(axis=0)
+    axis = np.asarray(geometry["axis"], dtype=np.float64)
+    axis /= max(float(np.linalg.norm(axis)), 1e-12)
+    normal = np.asarray(geometry["normal"], dtype=np.float64)
+    normal /= max(float(np.linalg.norm(normal)), 1e-12)
+    centered = points - center
+    along = centered @ axis
+    across = centered @ normal
+    s_lo, s_hi = np.percentile(along, [1, 99])
+    t_lo, t_hi = np.percentile(across, [2, 98])
+    return {
+        "center": center,
+        "axis": axis,
+        "normal": normal,
+        "s_min": float(s_lo),
+        "s_max": float(s_hi),
+        "t_min": float(t_lo),
+        "t_max": float(t_hi),
+    }
 
 
 def _geometry_basis(proposal: Mapping[str, Any]) -> dict[str, Any]:
@@ -383,7 +431,7 @@ def propose(acquisition: Mapping[str, Any], project_dir: str | Path, free_region
     """
     if not isinstance(acquisition, Mapping):
         raise core.CoreError("INVALID_ACQUISITION", {"message": "acquisition must be a mapping"})
-    frame_records = _frame_records(acquisition)
+    extra_frames = _frame_records(acquisition)
     ref, raw, reference_digest = _read_reference(acquisition)
     image8, normalization = _normalization8(raw)
     height, width = image8.shape
@@ -407,8 +455,8 @@ def propose(acquisition: Mapping[str, Any], project_dir: str | Path, free_region
             geometry_for_gauges = None
             mask_for_gauges = None
         else:
-            geometry_for_gauges = geometry
-            mask_for_gauges = segmentation_mask
+            geometry_for_gauges = _clipped_geometry_for_region(segmentation_mask, geometry, region)
+            mask_for_gauges = segmentation_mask if geometry_for_gauges is not None else None
     elif geometry is not None:
         # Exclude the silhouette ends (where shoulders/grips commonly intrude) and
         # narrow borders; geometry remains only a candidate pending human review.
@@ -432,9 +480,10 @@ def propose(acquisition: Mapping[str, Any], project_dir: str | Path, free_region
         groups, rejected = [], [{"gauge": f"G{i + 1:02d}", "status": "NOT_PROPOSED", "reason": "SPECIMEN_FREE_REGION_UNRESOLVED"} for i in range(_DEFAULT_GAUGE_COUNT)]
     else:
         groups, rejected = _make_groups(image8, region, exclusions, geometry_for_gauges, mask_for_gauges)
-    extra_frames = _frame_records(acquisition)
+        if manual and not groups and geometry_for_gauges is not None:
+            groups, rejected = _make_groups(image8, region, exclusions, None, mask_for_gauges)
     previews = []
-    preview_root = Path(project_dir).expanduser().resolve() / "proposals" / str(acquisition.get("acquisition_id", "unknown"))
+    preview_root = Path(project_dir).expanduser().resolve() / "proposals" / _safe_dir_component(acquisition.get("acquisition_id", "unknown"))
     # Proposal hash determines the immutable review folder after geometry is known.
     proposal = {
         "version": _PROPOSAL_VERSION,
@@ -487,17 +536,28 @@ def propose(acquisition: Mapping[str, Any], project_dir: str | Path, free_region
 
 
 def _validate_rect(rect, image_shape, name) -> list[int]:
-    try:
-        if len(rect) != 4:
-            raise ValueError("rectangle must contain [x, y, width, height]")
-        values = [int(value) for value in rect]
-    except (TypeError, ValueError) as exc:
-        raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": str(exc)}) from exc
-    if any(float(original) != converted for original, converted in zip(rect, values)):
-        raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": "ROI coordinates must be integers"})
+    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": "rectangle must contain [x, y, width, height]"})
+    values: list[int] = []
+    for original in rect:
+        if isinstance(original, bool):
+            raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": "ROI coordinates must be integers"})
+        if isinstance(original, (int, np.integer)):
+            values.append(int(original))
+        elif isinstance(original, (float, np.floating)):
+            number = float(original)
+            if not math.isfinite(number) or not number.is_integer():
+                raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": "ROI coordinates must be integers"})
+            values.append(int(number))
+        else:
+            raise core.CoreError("INVALID_ROI", {"name": name, "roi": rect, "message": "ROI coordinates must be integers"})
     if values[2] <= 0 or values[3] <= 0 or not core.rect_is_inside_image(values, image_shape):
         raise core.CoreError("ROI_OUT_OF_BOUNDS", {"name": name, "roi": values, "image_shape": list(image_shape)})
     return values
+
+
+def _same_path(first: str | Path, second: str | Path) -> bool:
+    return os.path.normcase(str(Path(first).expanduser().resolve())) == os.path.normcase(str(Path(second).expanduser().resolve()))
 
 
 def validate_approval(acquisition: Mapping[str, Any]) -> None:
@@ -519,8 +579,10 @@ def validate_approval(acquisition: Mapping[str, Any]) -> None:
         raise core.CoreError("ROI_REVIEW_REQUIRED", {"message": "automatic segmentation could not identify a safe free region; supply a human-selected free_region and review it"})
     if not str(approval.get("reviewer") or "").strip() or not str(approval.get("approved_at") or "").strip():
         raise core.CoreError("ROI_APPROVAL_INCOMPLETE", {"message": "reviewer and approval time are required"})
-    if proposal.get("diagnostics", {}).get("needs_manual_review") and not approval.get("specimen_confirmed"):
-        raise core.CoreError("ROI_REVIEW_REQUIRED", {"message": "automatic ROI candidates require human confirmation"})
+    frames = _frame_records(acquisition)
+    match = [item for item in frames if item["frame"] == proposal.get("reference_frame")]
+    if len(match) != 1 or not _same_path(match[0]["path"], str(proposal.get("reference_path", ""))):
+        raise core.CoreError("ROI_REFERENCE_FRAME_MISMATCH", {"reference_frame": proposal.get("reference_frame"), "reference_path": proposal.get("reference_path")})
     reference_path = Path(str(proposal.get("reference_path", ""))).expanduser()
     try:
         actual_sha = _sha256_file(reference_path)
@@ -534,9 +596,12 @@ def validate_approval(acquisition: Mapping[str, Any]) -> None:
     region = _validate_rect(proposal.get("free_region"), raw.shape, "free_region")
     exclusions = [_validate_rect(item, raw.shape, "exclusion") for item in proposal.get("exclusions", [])]
     if str(acquisition.get("analysis_mode", "extensometer")) == "fullfield":
-        field_roi = _validate_rect(proposal.get("field_roi", region), raw.shape, "field_roi")
+        field_roi_raw = proposal.get("field_roi") if proposal.get("field_roi") is not None else region
+        field_roi = _validate_rect(field_roi_raw, raw.shape, "field_roi")
         if not _inside(field_roi, region):
             raise core.CoreError("ROI_OUTSIDE_FREE_REGION", {"field_roi": field_roi, "free_region": region})
+        if any(_overlap(field_roi, excluded) for excluded in exclusions):
+            raise core.CoreError("ROI_OVERLAPS_EXCLUSION", {"field_roi": field_roi})
         return None
     if not isinstance(proposal.get("groups"), list):
         raise core.CoreError("ROI_GROUPS_UNAVAILABLE", {"message": "proposal groups must be an array"})
@@ -564,7 +629,7 @@ def validate_proposal(acquisition: Mapping[str, Any], proposal: Mapping[str, Any
         raise core.CoreError("ROI_PROPOSAL_HASH_MISMATCH", {"expected": expected, "actual": proposal.get("proposal_hash")})
     frames = _frame_records(acquisition)
     match = [item for item in frames if item["frame"] == proposal.get("reference_frame")]
-    if len(match) != 1 or str(match[0]["path"]) != str(Path(str(proposal.get("reference_path"))).resolve()):
+    if len(match) != 1 or not _same_path(match[0]["path"], str(proposal.get("reference_path", ""))):
         raise core.CoreError("ROI_REFERENCE_FRAME_MISMATCH", {"reference_frame": proposal.get("reference_frame"), "reference_path": proposal.get("reference_path")})
     if _sha256_file(match[0]["path"]) != proposal.get("reference_sha256"):
         raise core.CoreError("ROI_REFERENCE_CHANGED", {"reference_path": str(match[0]["path"])})
@@ -572,9 +637,12 @@ def validate_proposal(acquisition: Mapping[str, Any], proposal: Mapping[str, Any
     region = _validate_rect(proposal.get("free_region"), raw.shape, "free_region")
     exclusions = [_validate_rect(item, raw.shape, "exclusion") for item in proposal.get("exclusions", [])]
     if str(acquisition.get("analysis_mode", "extensometer")) == "fullfield":
-        field_roi = _validate_rect(proposal.get("field_roi", region), raw.shape, "field_roi")
+        field_roi_raw = proposal.get("field_roi") if proposal.get("field_roi") is not None else region
+        field_roi = _validate_rect(field_roi_raw, raw.shape, "field_roi")
         if not _inside(field_roi, region):
             raise core.CoreError("ROI_OUTSIDE_FREE_REGION", {"field_roi": field_roi, "free_region": region})
+        if any(_overlap(field_roi, excluded) for excluded in exclusions):
+            raise core.CoreError("ROI_OVERLAPS_EXCLUSION", {"field_roi": field_roi})
         return
     if not isinstance(proposal.get("groups"), list):
         raise core.CoreError("ROI_GROUPS_UNAVAILABLE", {"message": "proposal groups must be an array"})

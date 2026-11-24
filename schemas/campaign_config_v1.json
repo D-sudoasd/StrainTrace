@@ -38,8 +38,30 @@
         "width_mm": {"allOf": [{"$ref": "#/$defs/finiteOrNull"}, {"type": ["number", "null"], "exclusiveMinimum": 0}]},
         "thickness_mm": {"allOf": [{"$ref": "#/$defs/finiteOrNull"}, {"type": ["number", "null"], "exclusiveMinimum": 0}]},
         "status": {"type": "string", "minLength": 1},
-        "source": {"type": ["string", "null"]}
-      }
+        "source": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1}]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["status"],
+            "properties": {
+              "status": {
+                "type": "string",
+                "pattern": "^([Cc][Oo][Nn][Ff][Ii][Rr][Mm][Ee][Dd]|[Vv][Ee][Rr][Ii][Ff][Ii][Ee][Dd]_[Rr][Ee][Cc][Oo][Rr][Dd][Ee][Dd]_[Dd][Ii][Mm][Ee][Nn][Ss][Ii][Oo][Nn][Ss]|[Vv][Ee][Rr][Ii][Ff][Ii][Ee][Dd]_[Rr][Ee][Cc][Oo][Rr][Dd][Ee][Dd]_[Aa][Rr][Ee][Aa])$"
+              }
+            },
+            "anyOf": [
+              {"properties": {"area_mm2": {"type": "number"}}},
+              {"properties": {"width_mm": {"type": "number"}, "thickness_mm": {"type": "number"}}}
+            ]
+          },
+          "then": {
+            "properties": {
+              "source": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
     },
     "imageFrame": {
       "type": "object",
@@ -89,6 +111,7 @@
       "required": ["free_region", "groups", "reference_frame", "reference_path", "reference_sha256", "proposal_hash"],
       "properties": {
         "free_region": {"$ref": "#/$defs/rect"},
+        "field_roi": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rect"}]},
         "exclusions": {"type": "array", "items": {"$ref": "#/$defs/rect"}},
         "groups": {"type": "array", "items": {"$ref": "#/$defs/roiGroup"}},
         "reference_frame": {"type": "integer", "minimum": 0},
@@ -121,8 +144,8 @@
         "status": {"type": "string", "minLength": 1},
         "fingerprint": {"type": "string", "minLength": 1},
         "rows_path": {"type": "string", "minLength": 1},
-        "artifacts": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "checksums": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "artifacts": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "checksums": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
         "provenance": {"type": "object"},
         "summary": {"type": "object"}
       }

@@ -53,3 +53,54 @@ def test_cli_requires_explicit_specimen_confirmation(tmp_path: Path, capsys):
     assert code == cli.EXIT_GATE
     error = json.loads(captured.err)
     assert error["error"]["error_code"] == "GATE_SPECIMEN_UNCONFIRMED"
+
+
+def test_cli_rejects_duplicate_root_alias_and_invalid_timeout(tmp_path: Path, capsys):
+    project = tmp_path / "campaign"
+    source = tmp_path / "source"
+    source.mkdir()
+    code = cli.main(["init", str(project), "--name", "dup", "--root", f"raw={source}", "--root", f"raw={source}"])
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_ARGUMENT
+    assert json.loads(captured.err)["error"]["error_code"] == "PROJECT_ROOT_DUPLICATE_ALIAS"
+
+    assert cli.main(["init", str(project), "--name", "ok", "--root", f"raw={source}"]) == cli.EXIT_OK
+    capsys.readouterr()
+    try:
+        cli.main(["export", str(project), str(tmp_path / "out"), "--timeout-s", "nan"])
+    except SystemExit as exc:
+        assert exc.code == cli.EXIT_ARGUMENT
+    else:
+        raise AssertionError("expected argparse SystemExit(2) for --timeout-s nan")
+    capsys.readouterr()
+    from straintrace_campaign.models import CampaignError
+
+    assert cli._exit_for(CampaignError("EXPORT_TIMEOUT_INVALID", "bad")) == cli.EXIT_ARGUMENT
+
+
+def test_cli_subcommands_verify_project_json_and_blocked_run_dict(tmp_path: Path, monkeypatch, capsys):
+    from straintrace_campaign import workflow
+
+    project = tmp_path / "campaign"
+    source = tmp_path / "source"
+    (source / "batch_01").mkdir(parents=True)
+    (source / "batch_01" / "dic_000001.tif").write_bytes(b"img")
+    assert cli.main(["init", str(project), "--name", "cli-test", "--root", f"raw={source}"]) == cli.EXIT_OK
+    capsys.readouterr()
+
+    assert cli.main(["scan", str(project), "raw", "--adapter", "generic"]) == cli.EXIT_OK
+    scan_event = json.loads(capsys.readouterr().out)
+    assert scan_event["event"] == "scan_complete"
+    assert len(scan_event["acquisitions"]) == 1
+
+    # Verify accepts both project directory and direct project.json path.
+    assert cli.main(["verify", str(project / "project.json")]) == cli.EXIT_OK
+    verify_event = json.loads(capsys.readouterr().out)
+    assert verify_event["report"]["valid"] is True
+
+    # Single-acquisition run returning dict with status=BLOCKED exits with EXIT_GATE.
+    monkeypatch.setattr(workflow, "run", lambda *_a, **_k: {"status": "BLOCKED", "reason": "gate"})
+    blocked_code = cli.main(["run", str(project), "--acquisition", scan_event["acquisitions"][0]["acquisition_id"]])
+    blocked_out = json.loads(capsys.readouterr().out)
+    assert blocked_code == cli.EXIT_GATE
+    assert blocked_out["result"]["status"] == "BLOCKED"

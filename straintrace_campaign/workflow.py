@@ -155,8 +155,13 @@ def _normalize_discovered(
             rel_raw = source.relative_to(root.resolve()).as_posix()
         except ValueError as exc:
             raise CampaignError("DISCOVERY_OUTSIDE_ROOT", f"discovered path lies outside root {root}: {source}") from exc
-    rel = validate_relative_path(rel_raw, "discovered relative_path")
-    normalized_rel = "/".join(part for part in rel.replace("\\", "/").split("/") if part not in ("", "."))
+    if rel_raw.strip() in {".", "./", ".\\"}:
+        normalized_rel = "_root_sequence"
+    else:
+        rel = validate_relative_path(rel_raw, "discovered relative_path")
+        normalized_rel = "/".join(part for part in rel.replace("\\", "/").split("/") if part not in ("", "."))
+        if not normalized_rel:
+            normalized_rel = "_root_sequence"
     canonical_root = root.resolve().as_posix().casefold()
     identity_seed = f"{root_alias.casefold()}\n{canonical_root}\n{normalized_rel.casefold()}"
     acquisition_id = str(uuid.uuid5(_ACQUISITION_NAMESPACE, identity_seed))
@@ -291,7 +296,17 @@ def scan(
                         if not current["measurement_frames"]:
                             _archive_alignment(current, reason="measurement_axis_added")
                             current["measurement_frames"] = new_measurements
-                            current.setdefault("metadata", {}).setdefault("last_scan_inventory_change", {}).update({"measurement_frames_changed": True})
+                            last_change = current.setdefault("metadata", {}).setdefault(
+                                "last_scan_inventory_change",
+                                {
+                                    "image_frames_changed": False,
+                                    "image_frame_metadata_changed": False,
+                                    "measurement_frames_changed": True,
+                                    "observed_at_utc": _now_utc(),
+                                },
+                            )
+                            last_change["measurement_frames_changed"] = True
+                            last_change.setdefault("observed_at_utc", _now_utc())
                             changed = True
                     if changed:
                         current.setdefault("metadata", {})["discovery_root_alias"] = root_alias
@@ -320,19 +335,17 @@ def scan(
                     if measurement_changed:
                         _archive_alignment(current, reason="measurement_axis_changed")
                         current["measurement_frames"] = _clone(acq["measurement_frames"])
-                    if image_changed or measurement_changed:
-                        current.setdefault("metadata", {})["discovery_root_alias"] = root_alias
-                        current["metadata"]["discovery_root_path"] = root.resolve().as_posix().casefold()
-                        current["metadata"]["discovery_adapter"] = adapter
-                        current["metadata"]["last_scan_inventory_change"] = {
-                            "image_frames_changed": image_changed,
-                            "image_frame_metadata_changed": image_inventory_changed and not image_changed,
-                            "measurement_frames_changed": measurement_changed,
-                            "observed_at_utc": _now_utc(),
-                        }
+                    current.setdefault("metadata", {})["discovery_root_alias"] = root_alias
+                    current["metadata"]["discovery_root_path"] = root.resolve().as_posix().casefold()
+                    current["metadata"]["discovery_adapter"] = adapter
+                    current["metadata"]["last_scan_inventory_change"] = {
+                        "image_frames_changed": image_changed,
+                        "image_frame_metadata_changed": image_inventory_changed and not image_changed,
+                        "measurement_frames_changed": measurement_changed,
+                        "observed_at_utc": _now_utc(),
+                    }
                     validate_acquisition(current)
-                    if image_inventory_changed or measurement_changed:
-                        updated.append(current)
+                    updated.append(current)
                 continue
             if any(old["acquisition_id"] == acq["acquisition_id"] for old in project["acquisitions"]):
                 raise CampaignError("ACQUISITION_IDENTITY_CONFLICT", f"stable identity collision for {acq['relative_path']}")
@@ -409,48 +422,60 @@ def import_keystone(path: str | os.PathLike[str], source: str | os.PathLike[str]
                 item for item in project["acquisitions"]
                 if item.get("metadata", {}).get("keystone_import", {}).get("source_version_id") == version_id
             ])
+        import shutil
+
         delivery = _module("delivery")
-        imported = _external_call("keystone_import", delivery.import_keystone, root, source_path)
-        if not isinstance(imported, list):
-            raise CampaignError("IMPORT_RESULT_INVALID", "delivery.import_keystone must return a list")
+        try:
+            staged_import_dir = artifact_path(root, f"imports/keystone/{version_id}")
+        except CampaignError:
+            staged_import_dir = None
+        existed_before_import = staged_import_dir is not None and staged_import_dir.exists()
         known_by_id = {a["acquisition_id"]: a for a in project["acquisitions"]}
         appended: list[dict[str, Any]] = []
-        for raw in imported:
-            raw_acq = _clone(dict(raw))
-            extra_dims = {k: _clone(v) for k, v in dict(raw_acq.get("dimensions") or {}).items() if k not in {"area_mm2", "width_mm", "thickness_mm", "status", "source"}}
-            if extra_dims:
-                raw_acq.setdefault("metadata", {}).setdefault("keystone_import", {})["dimension_source_fields"] = extra_dims
-                raw_acq["dimensions"] = {k: v for k, v in raw_acq["dimensions"].items() if k in {"area_mm2", "width_mm", "thickness_mm", "status", "source"}}
-            acq = validate_acquisition(raw_acq)
-            imported_digest = fingerprint_data("keystone_acquisition", acq)
-            # Imported acquisition IDs are source identities and are never replaced.
-            if acq["acquisition_id"] in known_by_id:
-                old = known_by_id[acq["acquisition_id"]]
-                previous_digest = old.get("metadata", {}).get("imported_keystone_digest")
-                if previous_digest == imported_digest:
-                    continue
-                raise CampaignError("IMPORTED_IDENTITY_CONFLICT", f"imported acquisition {acq['acquisition_id']} conflicts with the project")
-            acq.setdefault("metadata", {})["imported_keystone_digest"] = imported_digest
-            if acq["result"] is not None:
-                record = dict(acq["result"])
-                if record.get("status") != "IMPORTED_ACCEPTED":
-                    record["provenance"] = dict(record.get("provenance") or {})
-                    record["provenance"].setdefault("import_source", source_path)
-                    record["provenance"]["imported_status_before_tag"] = record.get("status")
-                    record["status"] = "IMPORTED_ACCEPTED"
-                finalized = finalize_stage_record(root, record)
-                rows = read_jsonl(artifact_path(root, finalized["rows_path"]))
-                _validate_imported_rows(rows, acq)
-                acq["result"] = finalized
-            project["acquisitions"].append(acq)
-            known_by_id[acq["acquisition_id"]] = acq
-            appended.append(acq)
-        if appended:
-            project.setdefault("metadata", {}).setdefault("imports", []).append(
-                {"kind": "keystone", "source": source_path, "source_version_id": version_id,
-                 "source_version_sha256": version_digest, "acquisition_count": len(appended), "imported_at_utc": _now_utc()}
-            )
-            _write_project(root, project)
+        try:
+            imported = _external_call("keystone_import", delivery.import_keystone, root, source_path)
+            if not isinstance(imported, list):
+                raise CampaignError("IMPORT_RESULT_INVALID", "delivery.import_keystone must return a list")
+            for raw in imported:
+                raw_acq = _clone(dict(raw))
+                extra_dims = {k: _clone(v) for k, v in dict(raw_acq.get("dimensions") or {}).items() if k not in {"area_mm2", "width_mm", "thickness_mm", "status", "source"}}
+                if extra_dims:
+                    raw_acq.setdefault("metadata", {}).setdefault("keystone_import", {})["dimension_source_fields"] = extra_dims
+                    raw_acq["dimensions"] = {k: v for k, v in raw_acq["dimensions"].items() if k in {"area_mm2", "width_mm", "thickness_mm", "status", "source"}}
+                acq = validate_acquisition(raw_acq)
+                imported_digest = fingerprint_data("keystone_acquisition", acq)
+                # Imported acquisition IDs are source identities and are never replaced.
+                if acq["acquisition_id"] in known_by_id:
+                    old = known_by_id[acq["acquisition_id"]]
+                    previous_digest = old.get("metadata", {}).get("imported_keystone_digest")
+                    if previous_digest == imported_digest:
+                        continue
+                    raise CampaignError("IMPORTED_IDENTITY_CONFLICT", f"imported acquisition {acq['acquisition_id']} conflicts with the project")
+                acq.setdefault("metadata", {})["imported_keystone_digest"] = imported_digest
+                if acq["result"] is not None:
+                    record = dict(acq["result"])
+                    if record.get("status") != "IMPORTED_ACCEPTED":
+                        record["provenance"] = dict(record.get("provenance") or {})
+                        record["provenance"].setdefault("import_source", source_path)
+                        record["provenance"]["imported_status_before_tag"] = record.get("status")
+                        record["status"] = "IMPORTED_ACCEPTED"
+                    finalized = finalize_stage_record(root, record)
+                    rows = read_jsonl(artifact_path(root, finalized["rows_path"]))
+                    _validate_imported_rows(rows, acq)
+                    acq["result"] = finalized
+                project["acquisitions"].append(acq)
+                known_by_id[acq["acquisition_id"]] = acq
+                appended.append(acq)
+            if appended:
+                project.setdefault("metadata", {}).setdefault("imports", []).append(
+                    {"kind": "keystone", "source": source_path, "source_version_id": version_id,
+                     "source_version_sha256": version_digest, "acquisition_count": len(appended), "imported_at_utc": _now_utc()}
+                )
+                _write_project(root, project)
+        except Exception:
+            if staged_import_dir is not None and not existed_before_import and staged_import_dir.exists():
+                shutil.rmtree(staged_import_dir, ignore_errors=True)
+            raise
         return _clone(appended)
 
 
@@ -494,8 +519,8 @@ def _validate_imported_rows(rows: list[dict[str, Any]], acq: Mapping[str, Any]) 
         if "frame" not in row:
             raise CampaignError("IMPORTED_ROWS_INVALID", f"imported row {i} has no explicit frame number")
         frame = row["frame"]
-        if type(frame) is not int:
-            raise CampaignError("IMPORTED_ROWS_INVALID", f"imported row {i} frame must be an integer")
+        if type(frame) is not int or frame < 0:
+            raise CampaignError("IMPORTED_ROWS_INVALID", f"imported row {i} frame must be a non-negative integer")
         key = ("frame", frame)
         if key in seen:
             raise CampaignError("IMPORTED_ROWS_DUPLICATE_FRAME", f"duplicate imported frame {frame}")
@@ -518,8 +543,6 @@ def _reference_frame(acq: Mapping[str, Any], proposal: Mapping[str, Any]) -> Map
     if type(frame_number) is not int:
         raise CampaignError("ROI_REFERENCE_FRAME_INVALID", "ROI proposal reference_frame must be an integer")
     matching = [f for f in acq["image_frames"] if f.get("frame") == frame_number]
-    if not matching:
-        matching = [f for f in acq["image_frames"] if f.get("native_frame") == frame_number]
     if len(matching) != 1:
         raise CampaignError("ROI_REFERENCE_FRAME_INVALID", f"reference frame {frame_number} is absent or ambiguous")
     return matching[0]
@@ -728,7 +751,11 @@ def update_acquisition(
             dimensions = _default_dimensions(patch["dimensions"])
             # A candidate size may be recorded, but only confirmed dimensions
             # with an explicit locator/source can be used as a formal area.
-            if dimensions["status"].lower() == "confirmed" and dimensions["area_mm2"] is not None and not dimensions["source"]:
+            confirmed_statuses = {"confirmed", "verified_recorded_dimensions", "verified_recorded_area"}
+            has_area = dimensions["area_mm2"] is not None or (
+                dimensions["width_mm"] is not None and dimensions["thickness_mm"] is not None
+            )
+            if str(dimensions["status"]).strip().casefold() in confirmed_statuses and has_area and not dimensions["source"]:
                 raise CampaignError("DIMENSION_SOURCE_REQUIRED", "confirmed area requires a source or record locator")
             if dimensions != acq["dimensions"]:
                 _archive_alignment(acq, reason="dimensions_changed")
@@ -1152,9 +1179,12 @@ def _write_roi_sensitivity_comparison(
     atomic_write_bytes(csv_path, stream.getvalue().encode("utf-8"))
     json_rel = relative_artifact(root, json_path)
     csv_rel = relative_artifact(root, csv_path)
+    artifacts_list = candidate.setdefault("artifacts", [])
+    checksums_map = candidate.setdefault("checksums", {})
     for rel in (json_rel, csv_rel):
-        candidate.setdefault("artifacts", []).append(rel)
-        candidate.setdefault("checksums", {})[rel] = sha256_file(artifact_path(root, rel))
+        if rel not in artifacts_list:
+            artifacts_list.append(rel)
+        checksums_map[rel] = sha256_file(artifact_path(root, rel))
     report = {
         "status": comparison_status,
         "fingerprint": fingerprint,
@@ -1188,54 +1218,91 @@ def _expected_alignment_fingerprint(
     })
 
 
+def _normalize_alignment_options(raw_options: Mapping[str, Any]) -> dict[str, Any]:
+    opts = dict(raw_options)
+    legacy_time_field = opts.pop("time_column", None)
+    if "measurement_time_field" in opts and legacy_time_field is not None:
+        raise CampaignError("ALIGNMENT_OPTION_INVALID", "provide either measurement_time_field or legacy time_column, not both")
+    allowed = {
+        "mode", "max_gap_s", "force_column", "dic_max_gap_s", "force_unit",
+        "measurement_time_field", "load_time_column",
+        "exposure_start_column", "exposure_end_column",
+    }
+    unknown = sorted(set(opts) - allowed)
+    if unknown:
+        raise CampaignError("ALIGNMENT_OPTION_INVALID", f"unsupported alignment option {unknown[0]!r}")
+    mode_norm = str(opts.get("mode", "instantaneous")).strip().casefold()
+    if mode_norm in {"exposure_window_mean", "window", "exposure_mean"}:
+        mode_norm = "window_mean"
+    measurement_time_field = str(opts.get("measurement_time_field") or legacy_time_field or "timestamp_unix_s")
+    load_time_column = str(opts.get("load_time_column") or measurement_time_field)
+    return {
+        "mode": mode_norm,
+        "max_gap_s": opts.get("max_gap_s", 2.5),
+        "force_column": opts.get("force_column", "force_N"),
+        "dic_max_gap_s": opts.get("dic_max_gap_s"),
+        "force_unit": opts.get("force_unit"),
+        "measurement_time_field": measurement_time_field,
+        "load_time_column": load_time_column,
+        "exposure_start_column": opts.get("exposure_start_column") or "exposure_start_unix_s",
+        "exposure_end_column": opts.get("exposure_end_column") or "exposure_end_unix_s",
+    }
+
+
 def _alignment_options_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
     provenance = record.get("provenance") or {}
     workflow_options = provenance.get("workflow_alignment_options")
     if isinstance(workflow_options, Mapping):
-        return dict(workflow_options)
-    return {
+        return _normalize_alignment_options(workflow_options)
+    return _normalize_alignment_options({
         "mode": provenance.get("mode", "instantaneous"),
         "max_gap_s": provenance.get("max_gap_s", 2.5),
         "force_column": provenance.get("load_force_column", "force_N"),
         "dic_max_gap_s": provenance.get("dic_max_gap_s"),
         "force_unit": provenance.get("load_force_unit_override"),
         "measurement_time_field": provenance.get("measurement_time_field", "timestamp_unix_s"),
-        "load_time_column": provenance.get("load_time_column", "timestamp_unix_s"),
-    }
+        "load_time_column": provenance.get("load_time_column"),
+        "exposure_start_column": provenance.get("exposure_start_column"),
+        "exposure_end_column": provenance.get("exposure_end_column"),
+    })
+
+
+def _validate_acquisition_freshness(root: Path, acq: dict[str, Any]) -> None:
+    metadata = acq.get("metadata", {})
+    result = acq.get("result")
+    if result is not None:
+        if result.get("status") == "IMPORTED_ACCEPTED":
+            if not stage_record_reusable(root, result, result["fingerprint"]):
+                raise CampaignError("EXPORT_IMPORTED_RESULT_INVALID", f"imported accepted rows or checksums are invalid for {acq['acquisition_id']}")
+        else:
+            if metadata.get("workflow_result_stale"):
+                raise CampaignError("EXPORT_STALE_RESULT", f"tracking output is stale for {acq['acquisition_id']}; approve and rerun tracking")
+            _ensure_approval(acq)
+            numerics = _module("numerics")
+            expected = _expected_analysis_fingerprint(numerics, acq)
+            if result.get("fingerprint") != expected or not stage_record_reusable(root, result, expected):
+                raise CampaignError("EXPORT_STALE_RESULT", f"tracking fingerprint or artifacts are stale for {acq['acquisition_id']}; rerun tracking")
+    alignment = acq.get("alignment")
+    if alignment is None:
+        return
+    if alignment.get("status") == "IMPORTED_ACCEPTED":
+        if not stage_record_reusable(root, alignment, alignment["fingerprint"]):
+            raise CampaignError("EXPORT_IMPORTED_ALIGNMENT_INVALID", f"imported alignment artifacts are invalid for {acq['acquisition_id']}")
+        return
+    provenance = alignment.get("provenance") or {}
+    load_path = provenance.get("load_source_path")
+    if not isinstance(load_path, str) or not Path(load_path).is_file():
+        raise CampaignError("EXPORT_ALIGNMENT_SOURCE_MISSING", f"alignment source is missing for {acq['acquisition_id']}")
+    aligner = _module("alignment")
+    options = _alignment_options_from_record(alignment)
+    expected = _expected_alignment_fingerprint(aligner, acq, Path(load_path), options)
+    if alignment.get("fingerprint") != expected or not stage_record_reusable(root, alignment, expected):
+        raise CampaignError("EXPORT_STALE_ALIGNMENT", f"alignment is stale for {acq['acquisition_id']}; realign before export")
 
 
 def _validate_export_freshness(root: Path, project: dict[str, Any]) -> None:
     for acq in project["acquisitions"]:
-        metadata = acq.get("metadata", {})
-        result = acq.get("result")
-        if result is not None:
-            if result.get("status") == "IMPORTED_ACCEPTED":
-                if not stage_record_reusable(root, result, result["fingerprint"]):
-                    raise CampaignError("EXPORT_IMPORTED_RESULT_INVALID", f"imported accepted rows or checksums are invalid for {acq['acquisition_id']}")
-            else:
-                if metadata.get("workflow_result_stale"):
-                    raise CampaignError("EXPORT_STALE_RESULT", f"tracking output is stale for {acq['acquisition_id']}; approve and rerun tracking")
-                _ensure_approval(acq)
-                numerics = _module("numerics")
-                expected = _expected_analysis_fingerprint(numerics, acq)
-                if result.get("fingerprint") != expected or not stage_record_reusable(root, result, expected):
-                    raise CampaignError("EXPORT_STALE_RESULT", f"tracking fingerprint or artifacts are stale for {acq['acquisition_id']}; rerun tracking")
-        alignment = acq.get("alignment")
-        if alignment is None:
-            continue
-        if alignment.get("status") == "IMPORTED_ACCEPTED":
-            if not stage_record_reusable(root, alignment, alignment["fingerprint"]):
-                raise CampaignError("EXPORT_IMPORTED_ALIGNMENT_INVALID", f"imported alignment artifacts are invalid for {acq['acquisition_id']}")
-            continue
-        provenance = alignment.get("provenance") or {}
-        load_path = provenance.get("load_source_path")
-        if not isinstance(load_path, str) or not Path(load_path).is_file():
-            raise CampaignError("EXPORT_ALIGNMENT_SOURCE_MISSING", f"alignment source is missing for {acq['acquisition_id']}")
-        aligner = _module("alignment")
-        options = _alignment_options_from_record(alignment)
-        expected = _expected_alignment_fingerprint(aligner, acq, Path(load_path), options)
-        if alignment.get("fingerprint") != expected or not stage_record_reusable(root, alignment, expected):
-            raise CampaignError("EXPORT_STALE_ALIGNMENT", f"alignment is stale for {acq['acquisition_id']}; realign before export")
+        _validate_acquisition_freshness(root, acq)
 
 
 def _ensure_approval(acq: dict[str, Any]) -> None:
@@ -1358,26 +1425,17 @@ def align(
     load = Path(load_path).expanduser().resolve()
     if not load.is_file():
         raise CampaignError("LOAD_SOURCE_NOT_FOUND", f"load source file does not exist: {load}")
-    kwargs = dict(kwargs)
-    legacy_time_field = kwargs.pop("time_column", None)
-    if "measurement_time_field" in kwargs and legacy_time_field is not None:
-        raise CampaignError("ALIGNMENT_OPTION_INVALID", "provide either measurement_time_field or legacy time_column, not both")
-    kwargs.setdefault("measurement_time_field", legacy_time_field or "timestamp_unix_s")
-    kwargs.setdefault("load_time_column", "timestamp_unix_s")
-    allowed = {"mode", "max_gap_s", "force_column", "dic_max_gap_s", "force_unit", "measurement_time_field", "load_time_column"}
-    unknown = sorted(set(kwargs) - allowed)
-    if unknown:
-        raise CampaignError("ALIGNMENT_OPTION_INVALID", f"unsupported alignment option {unknown[0]!r}")
+    normalized_options = _normalize_alignment_options(kwargs)
     with acquire_project_lock(root):
         project = _read_project(root)
         acq = _find_acquisition(project, acquisition_id)
         aligner = _module("alignment")
         source_fingerprint = sha256_file(load)
-        expected = _expected_alignment_fingerprint(aligner, acq, load, kwargs)
+        expected = _expected_alignment_fingerprint(aligner, acq, load, normalized_options)
         current = acq.get("alignment")
         if stage_record_reusable(root, current, expected):
             return _clone(current)
-        raw = _external_call("alignment", aligner.align, acq, root, load, **kwargs)
+        raw = _external_call("alignment", aligner.align, acq, root, load, **normalized_options)
         if sha256_file(load) != source_fingerprint:
             raise CampaignError("INPUT_CHANGED_DURING_ALIGNMENT", "load source changed while alignment was running")
         if not isinstance(raw, Mapping):
@@ -1388,7 +1446,7 @@ def align(
         record.setdefault("provenance", {}).update({
             "load_source_path": str(load),
             "load_source_sha256": source_fingerprint,
-            "workflow_alignment_options": dict(kwargs),
+            "workflow_alignment_options": dict(normalized_options),
         })
         acq["alignment"] = record
         acq.get("metadata", {}).pop("alignment_recalculation_required", None)
@@ -1404,27 +1462,32 @@ def export(
     timeout_s: float = 60,
 ) -> dict[str, Any]:
     root = _project_dir(path)
-    if not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
-        raise CampaignError("EXPORT_TIMEOUT_INVALID", "timeout_s must be a positive number")
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not math.isfinite(float(timeout_s)) or timeout_s <= 0:
+        raise CampaignError("EXPORT_TIMEOUT_INVALID", "timeout_s must be a positive finite number")
     output_path = Path(output).expanduser().resolve()
     publish_path = Path(publish_to).expanduser().resolve() if publish_to is not None else None
     with acquire_project_lock(root):
         project = _read_project(root)
         _validate_export_freshness(root, project)
-        output_dirs = project.setdefault("metadata", {}).setdefault("output_dirs", [])
-        for output_dir in (str(output_path), str(publish_path) if publish_path is not None else None):
-            if output_dir and output_dir not in output_dirs:
-                output_dirs.append(output_dir)
-        _write_project(root, project)
         delivery = _module("delivery")
         receipt = _external_call("delivery", delivery.export_project, root, project, output_path, publish_to=publish_path, timeout_s=float(timeout_s))
         if not isinstance(receipt, Mapping):
             raise CampaignError("EXPORT_RECEIPT_INVALID", "delivery.export_project must return a receipt object")
+        output_dirs = project.setdefault("metadata", {}).setdefault("output_dirs", [])
+        changed = False
+        for output_dir in (str(output_path), str(publish_path) if publish_path is not None else None):
+            if output_dir and output_dir not in output_dirs:
+                output_dirs.append(output_dir)
+                changed = True
+        if changed:
+            _write_project(root, project)
         return dict(receipt)
 
 
 def verify(path: str | os.PathLike[str]) -> dict[str, Any]:
     value = Path(path).expanduser()
+    if value.is_file() and value.name.lower() == "project.json":
+        value = value.parent
     if value.is_file() or not (value / "project.json").is_file():
         delivery = _module("delivery")
         report = _external_call("delivery", delivery.verify_package, value)
@@ -1441,16 +1504,34 @@ def verify(path: str | os.PathLike[str]) -> dict[str, Any]:
             if record is None:
                 continue
             checked += 1
-            for rel, expected in record["checksums"].items():
+            checksums_by_norm = {
+                rel.replace("\\", "/"): expected for rel, expected in record["checksums"].items()
+            }
+            required_rels = list(dict.fromkeys([
+                record["rows_path"].replace("\\", "/"),
+                *(item.replace("\\", "/") for item in record["artifacts"]),
+                *checksums_by_norm.keys(),
+            ]))
+            for rel in required_rels:
+                expected = checksums_by_norm.get(rel)
+                if not expected:
+                    failures.append({"acquisition_id": acq["acquisition_id"], "stage": stage_name, "artifact": rel, "reason": "checksum_missing"})
+                    continue
                 target = artifact_path(root, rel)
                 if not target.is_file():
                     failures.append({"acquisition_id": acq["acquisition_id"], "stage": stage_name, "artifact": rel, "reason": "missing"})
                 elif sha256_file(target) != expected:
                     failures.append({"acquisition_id": acq["acquisition_id"], "stage": stage_name, "artifact": rel, "reason": "sha256_mismatch"})
-    try:
-        _validate_export_freshness(root, project)
-    except CampaignError as exc:
-        failures.append({"acquisition_id": "", "stage": "project_freshness", "artifact": "", "reason": exc.code})
+        try:
+            _validate_acquisition_freshness(root, acq)
+        except CampaignError as exc:
+            failures.append({
+                "acquisition_id": acq["acquisition_id"],
+                "stage": "project_freshness",
+                "artifact": "",
+                "reason": exc.code,
+                "message": exc.message,
+            })
     return {
         "valid": not failures,
         "project_id": project["project_id"],

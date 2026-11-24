@@ -115,7 +115,11 @@ def test_instantaneous_alignment_uses_explicit_frames_and_bounded_support(tmp_pa
     assert row["dic_support_status"] == "DIC_BOUNDED_INTERPOLATION"
     assert row["dic_source_frames"] == [1, 2]
     assert row["engineering_strain"] == pytest.approx(0.03)
-    assert row["true_strain"] == pytest.approx(math.log1p(0.03))
+    expected_true = [math.log1p(v) for v in (0.02, 0.03, 0.04)]
+    expected_true_mean = sum(expected_true) / 3
+    expected_true_sd = math.sqrt(sum((v - expected_true_mean) ** 2 for v in expected_true) / 2)
+    assert row["true_strain"] == pytest.approx(expected_true_mean)
+    assert row["true_strain_sd"] == pytest.approx(expected_true_sd)
     assert row["valid_gauge_count"] == 3
     assert row["engineering_strain_sd"] == pytest.approx(0.01)
     assert record["checksums"][record["rows_path"]]
@@ -351,3 +355,118 @@ def test_alignment_rejects_nonmonotonic_load_axis(tmp_path: Path) -> None:
     ])
     with pytest.raises(CampaignError, match="unique and increasing"):
         alignment.align(acquisition, tmp_path, load_path)
+
+
+def test_alignment_short_window_dense_knots_and_end_boundary(tmp_path: Path) -> None:
+    acquisition = _acquisition(tmp_path, [], [
+        {
+            "frame": 1, "native_cbf_frame": 1, "scan_id": None, "scan_id_is_global_fio": False,
+            "timestamp_unix_s": T0 + 0.5, "exposure_start_unix_s": T0 + 0.5, "exposure_end_unix_s": T0 + 0.5 + 1e-6,
+        },
+        {
+            "frame": 2, "native_cbf_frame": 2, "scan_id": None, "scan_id_is_global_fio": False,
+            "timestamp_unix_s": T0 + 1.5, "exposure_start_unix_s": T0 + 1.0, "exposure_end_unix_s": T0 + 2.0,
+        },
+    ])
+    load_path = _load(tmp_path / "force.csv", [
+        {"timestamp_unix_s": T0, "force_N": 100},
+        {"timestamp_unix_s": T0 + 1.0, "force_N": 200},
+        {"timestamp_unix_s": T0 + 1.0 + 1e-6, "force_N": 200},
+        {"timestamp_unix_s": T0 + 2.0, "force_N": 300},
+    ])
+    record = alignment.align(acquisition, tmp_path, load_path, mode="window_mean", max_gap_s=2.0)
+    rows = _read_aligned(tmp_path, record)
+    assert rows[0]["force_interpolation_status"] == "EXPOSURE_WINDOW_MEAN"
+    assert rows[0]["force_N"] == pytest.approx(150.0, rel=1e-4)
+    assert rows[1]["force_interpolation_status"] == "EXPOSURE_WINDOW_MEAN"
+    assert rows[1]["force_N"] == pytest.approx(250.0, rel=1e-4)
+
+
+def test_alignment_clock_discipline_delimiter_sniff_and_empty_unit_fallback(tmp_path: Path) -> None:
+    derived_acq = _acquisition(tmp_path, [], [
+        {
+            "frame": 1, "native_cbf_frame": 1, "scan_id": None, "scan_id_is_global_fio": False,
+            "custom_unix_s": T0 + 1.0, "timestamp_status": "ESTIMATED_FROM_LOG",
+        },
+        {
+            "frame": 2, "native_cbf_frame": 2, "scan_id": None, "scan_id_is_global_fio": False,
+            "time_s": 1.0,
+        },
+    ])
+    semi_load = tmp_path / "semi_load.csv"
+    semi_load.write_text(
+        f"timestamp_unix_s;force_N;unit\n{T0};100;\n{T0 + 2};300;\n",
+        encoding="utf-8",
+    )
+    derived_rec = alignment.align(
+        derived_acq, tmp_path, semi_load,
+        measurement_time_field="custom_unix_s", load_time_column="timestamp_unix_s",
+    )
+    derived_rows = _read_aligned(tmp_path, derived_rec)
+    assert derived_rows[0]["force_N"] is None
+    assert derived_rows[0]["force_interpolation_status"] == "TIME_FIELD_MARKED_DERIVED"
+
+    rel_load = _load(tmp_path / "rel.csv", [{"time_s": 0.0, "clock_id": "clk-1", "force_N": 10}, {"time_s": 2.0, "clock_id": "clk-1", "force_N": 30}])
+    rel_rec = alignment.align(derived_acq, tmp_path, rel_load, measurement_time_field="time_s", load_time_column="time_s")
+    rel_rows = _read_aligned(tmp_path, rel_rec)
+    assert rel_rows[1]["force_N"] is None
+    assert rel_rows[1]["force_interpolation_status"] == "RELATIVE_CLOCK_ID_REQUIRED"
+
+    ok_acq = _acquisition(tmp_path, [], [{
+        "frame": 1, "native_cbf_frame": 1, "scan_id": None, "scan_id_is_global_fio": False, "timestamp_unix_s": T0 + 1.0,
+    }])
+    ok_rec = alignment.align(ok_acq, tmp_path, semi_load, max_gap_s=3.0)
+    ok_row = _read_aligned(tmp_path, ok_rec)[0]
+    assert ok_row["force_N"] == pytest.approx(200.0)
+
+
+def test_alignment_dic_namespace_common_gauges_and_unsorted_exact(tmp_path: Path) -> None:
+    # Unsorted timestamps still allow exact native_dic_frame join without failing time-axis check.
+    unsorted_dic = [_dic_row(5, T0 + 5.0, (0.01, 0.02, 0.03)), _dic_row(6, T0 + 2.0, (0.04, 0.05, 0.06))]
+    acq = _acquisition(tmp_path, unsorted_dic, [
+        {"frame": 1, "native_cbf_frame": 1, "native_dic_frame": 5, "scan_id": None, "scan_id_is_global_fio": False, "timestamp_unix_s": T0 + 1.0},
+        {"frame": 2, "native_cbf_frame": 2, "native_dic_frame": 99, "scan_id": None, "scan_id_is_global_fio": False, "timestamp_unix_s": T0 + 1.0},
+    ])
+    load_path = _load(tmp_path / "force.csv", [{"timestamp_unix_s": T0, "force_N": 100}, {"timestamp_unix_s": T0 + 2, "force_N": 200}])
+    rec = alignment.align(acq, tmp_path, load_path, max_gap_s=3.0)
+    rows = _read_aligned(tmp_path, rec)
+    assert rows[0]["dic_support_status"] == "DIC_EXACT_NATIVE_FRAME"
+    assert rows[0]["engineering_strain"] == pytest.approx(0.02)
+    assert rows[1]["dic_support_status"] == "DIC_EXPLICIT_NATIVE_FRAME_MISSING"
+    assert rows[1]["engineering_strain"] is None
+
+    # Disjoint gauges across left/right brackets (<3 common gauges) must fail closed.
+    left = {**_dic_row(1, T0, (0.01, 0.02, 0.03)), "G04_engineering_strain": None}
+    right = {
+        "frame": 2, "native_dic_frame": 2, "timestamp_unix_s": T0 + 1.0,
+        "valid_gauge_count": 3, "G01_engineering_strain": 0.02, "G02_engineering_strain": 0.03,
+        "G03_engineering_strain": None, "G04_engineering_strain": 0.04,
+    }
+    acq_disjoint = _acquisition(tmp_path, [left, right], [
+        {"frame": 10, "native_cbf_frame": 10, "scan_id": None, "scan_id_is_global_fio": False, "timestamp_unix_s": T0 + 0.5},
+    ])
+    disjoint_rec = alignment.align(acq_disjoint, tmp_path, load_path, max_gap_s=3.0, dic_max_gap_s=2.0)
+    disjoint_row = _read_aligned(tmp_path, disjoint_rec)[0]
+    assert disjoint_row["dic_support_status"] == "DIC_INSUFFICIENT_COMMON_GAUGES"
+    assert disjoint_row["engineering_strain"] is None
+
+
+def test_alignment_imported_preserves_metadata_and_distinct_stage_dirs(tmp_path: Path) -> None:
+    source = [{
+        "frame": 4, "native_dic_frame": 4, "timestamp_unix_s": T0,
+        "force_N": 123.0, "area_mm2": 4.2, "stress_MPa": 29.28, "engineering_strain": 0.04,
+        "true_strain": math.log1p(0.04), "valid_gauge_count": 3, "strain_status": "TRACKED",
+        "quality_status": "ACCEPTED_GAUGES_PRESENT", "reasons": ["minor_note"], "custom_note": "keep-me",
+    }]
+    acq = _acquisition(tmp_path, source, status="IMPORTED_ACCEPTED")
+    load_path = _load(tmp_path / "force.csv", [{"timestamp_unix_s": T0, "force_N": 200}])
+    rec1 = alignment.align(acq, tmp_path, load_path, max_gap_s=2.0)
+    rec2 = alignment.align(acq, tmp_path, load_path, max_gap_s=5.0)
+    assert rec1["rows_path"] != rec2["rows_path"]
+    assert rec1["fingerprint"] != rec2["fingerprint"]
+    assert rec1["summary"]["finite_force_count"] == 1
+    row = _read_aligned(tmp_path, rec1)[0]
+    assert row["area_mm2"] == pytest.approx(4.2)
+    assert row["quality_status"] == "ACCEPTED_GAUGES_PRESENT"
+    assert row["reasons"] == ["minor_note"]
+    assert row["custom_note"] == "keep-me"

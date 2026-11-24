@@ -12,7 +12,7 @@ from straintrace_campaign.adapters.desy import (
     parse_load_table_text,
     parse_time_value,
 )
-from straintrace_campaign.adapters.generic import read_explicit_frame_mapping
+from straintrace_campaign.adapters.generic import _is_excluded, _parse_cell, read_explicit_frame_mapping
 
 
 def _write(path: Path, content: str) -> Path:
@@ -189,3 +189,102 @@ def test_cbf_header_time_requires_explicit_timezone_and_no_interval_is_inferred(
     absent = parse_cbf_header_text("# Detector: synthetic\n")
     assert absent["timestamp_unix_s"] is None
     assert absent["exposure_s"] is None
+
+
+def test_parse_cell_preserves_newton_unit_and_rejects_nonfinite() -> None:
+    assert _parse_cell("N") == "N"
+    assert _parse_cell("n") == "n"
+    assert _parse_cell("y") == "y"
+    assert _parse_cell("true") is True
+    assert _parse_cell("false") is False
+    assert _parse_cell("inf") is None
+    assert _parse_cell("-inf") is None
+    assert _parse_cell("infinity") is None
+    assert _parse_cell("+nan") is None
+
+
+def test_generic_mapping_metadata_rejects_booleans_and_matches_relative_paths(tmp_path: Path) -> None:
+    mapping_csv = _write(
+        tmp_path / "mapping.csv",
+        "frame,native_cbf_frame,scan_id,scan_id_is_global_fio,timestamp_unix_s\n"
+        "true,10,5,true,1700000000\n"
+        "1,false,5,true,1700000000\n"
+        "2,20,5,maybe,not_a_number\n",
+    )
+    rows, issues = read_explicit_frame_mapping(mapping_csv)
+    assert [row["frame"] for row in rows] == [2]
+    assert rows[0]["timestamp_unix_s"] is None
+    assert rows[0]["scan_id_is_global_fio"] is False
+    codes = {issue["code"] for issue in issues}
+    assert {"MAPPING_FRAME_ID_MISSING", "MAPPING_NATIVE_CBF_COUNTER_INVALID", "MAPPING_TIMESTAMP_INVALID", "MAPPING_SCAN_ID_FLAG_INVALID"}.issubset(codes)
+
+    root = tmp_path / "rel_match"
+    _write(root / "sample" / "DIC" / "dic_000001.tif", "one")
+    _write(root / "sample" / "DIC" / "dic_000002.tif", "two")
+    _write(root / "sample" / "other" / "dic_000002.tif", "conflict-two")
+    _write(
+        root / "sample" / "frame_metadata.csv",
+        "filename,timestamp_unix_s\nDIC/dic_000001.tif,1700000001\n",
+    )
+    batch = discover(str(root), pattern={"image_patterns": ["**/*.tif"], "acquisition_parent_levels": 1})[0]
+    assert len(batch["image_frames"]) == 1
+    assert batch["image_frames"][0]["timestamp_unix_s"] == 1_700_000_001
+    issue_codes = {issue["code"] for issue in batch["discovery_issues"]}
+    assert "DUPLICATE_NATIVE_COUNTER_CONTENT_CONFLICT" in issue_codes
+    assert "UNPARSED_NATIVE_COUNTER_FILES" not in issue_codes
+    assert _is_excluded(tmp_path / "outside.tif", root, ()) is True
+
+
+def test_desy_discovery_ignores_ancestors_handles_root_brackets_mixed_kinds_and_fio_csv(tmp_path: Path) -> None:
+    # Ancestor directories named DIC and FIO999 must not affect classification or scan_id_candidate.
+    root = tmp_path / "DIC" / "FIO999" / "campaign_root"
+    _write(root / "plain_000001.tif", "root-img")
+    _write(root / "mixed" / "sample[1]_000002.tif", "bracket-tif")
+    _write(root / "mixed" / "cam_000002.cbf", "cam-cbf")
+    _write(root / "mixed" / "eh3scan_77.fio", "%d\n Col 1 Varex_1 DOUBLE\n Col 2 timestamp DOUBLE\n 2 1700000002\n")
+    _write(
+        root / "mixed" / "measurement_frames.csv",
+        "frame,native_cbf_frame,scan_id,scan_id_is_global_fio\n2,2,77,true\n",
+    )
+
+    batches = discover_desy(root)
+    rel_paths = [item["relative_path"] for item in batches]
+    assert "." not in rel_paths
+    assert len(set(rel_paths)) == len(rel_paths)
+
+    root_batch = next(item for item in batches if item["relative_path"] == "_root_sequence")
+    assert root_batch["source_kind"] == "desy_other_image"
+    assert root_batch["metadata"]["scan_id_candidate"] is None
+
+    mixed_tif = next(item for item in batches if item["relative_path"] == "mixed__desy_other_image")
+    assert [f["filename"] for f in mixed_tif["image_frames"]] == ["sample[1]_000002.tif"]
+
+    mixed_cbf = next(item for item in batches if item["relative_path"] == "mixed__desy_camera_cbf")
+    assert [row["frame"] for row in mixed_cbf["measurement_frames"]] == [2]
+
+
+def test_fio_iso_duplicate_columns_quoted_load_csv_and_space_cbf_headers() -> None:
+    fio = parse_fio_text(
+        "%d\n Col 1 Varex_1 DOUBLE\n Col 2 Varex_1 DOUBLE\n Col 3 timestamp STRING\n"
+        " 1 10 2026-10-15T10:00:00+02:00\n",
+        source_path="eh3scan_5.fio",
+    )
+    assert "FIO_DUPLICATE_COLUMN_NAMES" in {issue["code"] for issue in fio["issues"]}
+    assert "FIO_NONNUMERIC_VALUE" not in {issue["code"] for issue in fio["issues"]}
+    assert fio["rows"][0]["Varex_1"] == 1
+    assert fio["rows"][0]["Varex_1__col2"] == 10
+    assert fio["rows"][0]["timestamp"] == "2026-10-15T10:00:00+02:00"
+
+    load_parsed = parse_load_table_text(
+        'time,force_N,note\n1700000000,150,"line1\nline2"\n',
+        time_column="time",
+        force_column="force_N",
+    )
+    assert len(load_parsed["rows"]) == 1
+    assert load_parsed["rows"][0]["force_N"] == 150.0
+
+    cbf_s = parse_cbf_header_text("# timestamp 2026-10-15T10:00:00+02:00\n# Exposure_time 0.5 s\n")
+    assert cbf_s["timestamp_status"] == "RECORDED_ABSOLUTE_TIMEZONE_AWARE"
+    assert cbf_s["exposure_s"] == 0.5
+    cbf_ms = parse_cbf_header_text("# Exposure_time 250 ms\n")
+    assert cbf_ms["exposure_s"] == 0.25

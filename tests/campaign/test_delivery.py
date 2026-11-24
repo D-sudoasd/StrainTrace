@@ -3,11 +3,14 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import stat
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from straintrace_campaign import delivery
+from straintrace_campaign.models import validate_acquisition
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -119,7 +122,9 @@ def test_import_preserves_ids_frames_exact_rows_and_source_metadata(tmp_path: Pa
     assert dic["measurement_frames"][1]["frame"] == 2
     assert dic["measurement_frames"][1]["native_cbf_frame"] == 3
     assert dic["dimensions"]["area_mm2"] == 3.0
-    assert dic["dimensions"]["alternate_area_mm2"] == 3.1
+    assert set(dic["dimensions"]) == {"area_mm2", "width_mm", "thickness_mm", "status", "source"}
+    assert dic["metadata"]["keystone_import"]["dimension_source_fields"]["alternate_area_mm2"] == 3.1
+    validate_acquisition(dic)
     import_root = project_dir / dic["result"]["rows_path"]
     source_root = tmp_path / "keystone" / "20261015_v001"
     assert (import_root.parent / "frames.jsonl").read_bytes() == (source_root / "samples" / "5_Grip_5mm/condition/coupon-dic/frames.jsonl").read_bytes()
@@ -381,3 +386,65 @@ def test_keystone_import_rejects_wrong_checksum_and_duplicate_frames(tmp_path: P
     with pytest.raises(ValueError, match="checksum mismatch"):
         delivery.import_keystone(project_dir, source)
     assert not (project_dir / "imports/keystone").exists()
+
+
+def test_zip_validation_rejects_traversal_backslashes_and_symlinks(tmp_path: Path) -> None:
+    traversal_zip = tmp_path / "traversal.zip"
+    with zipfile.ZipFile(traversal_zip, "w") as zf:
+        zf.writestr("../escape.txt", "bad")
+    report = delivery.verify_package(traversal_zip)
+    assert not report["valid"]
+
+    backslash_zip = tmp_path / "backslash.zip"
+    with zipfile.ZipFile(backslash_zip, "w") as zf:
+        zf.writestr("sub\\file.txt", "bad")
+    assert not delivery.verify_package(backslash_zip)["valid"]
+
+    symlink_zip = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(symlink_zip, "w") as zf:
+        info = zipfile.ZipInfo("link.txt")
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(info, "/etc/passwd")
+    assert not delivery.verify_package(symlink_zip)["valid"]
+
+
+def test_verify_package_requires_validation_json_and_checks_nested_checksums_and_headers(tmp_path: Path) -> None:
+    project_dir, acquisitions = _project_with_import(tmp_path)
+    receipt = delivery.export_project(project_dir, _campaign(project_dir, acquisitions), tmp_path / "out")
+    version = Path(receipt["version_path"])
+
+    # Nested CHECKSUMS.json must NOT be silently excluded from hashing.
+    nested = version / "samples/5_Grip_5mm/condition/coupon-dic/CHECKSUMS.json"
+    nested.write_text("{}", encoding="utf-8")
+    assert not delivery.verify_package(version)["valid"]
+    nested.unlink()
+
+    # Missing VALIDATION.json must fail verification.
+    validation_path = version / "VALIDATION.json"
+    saved_validation = validation_path.read_bytes()
+    validation_path.unlink()
+    assert not delivery.verify_package(version)["valid"]
+    validation_path.write_bytes(saved_validation)
+
+    # Non-dict CURRENT.json must return invalid report instead of raising AttributeError.
+    root_current = tmp_path / "out/CURRENT.json"
+    root_current.write_text("[]", encoding="utf-8")
+    root_report = delivery.verify_package(tmp_path / "out")
+    assert not root_report["valid"]
+
+
+def test_export_rejects_invalid_timeout_and_has_dic_tracks_reanalysis(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project_dir, acquisitions = _project_with_import(tmp_path)
+    with pytest.raises(ValueError, match="timeout"):
+        delivery.export_project(project_dir, _campaign(project_dir, acquisitions), tmp_path / "out", timeout_s=True)
+    with pytest.raises(ValueError, match="timeout"):
+        delivery.export_project(project_dir, _campaign(project_dir, acquisitions), tmp_path / "out", timeout_s=float("nan"))
+
+    assert delivery.worker_main([]) != 0
+    assert capsys.readouterr().err
+
+    reanalyzed = {
+        "image_frames": [{"frame": 1, "path": "a.tif"}],
+        "metadata": {"keystone_import": {"dic_present": False}},
+    }
+    assert delivery._has_dic(reanalyzed, [{"frame": 1, "engineering_strain": 0.01}]) is True

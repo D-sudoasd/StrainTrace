@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import json
-import os
 import threading
 import time
 import tkinter as tk
@@ -28,6 +28,12 @@ def tk_root():
     root = _tk_root()
     yield root
     try:
+        for job in root.tk.call("after", "info"):
+            try:
+                root.after_cancel(job)
+            except tk.TclError:
+                pass
+        gc.collect()
         root.destroy()
     except tk.TclError:
         pass
@@ -424,3 +430,96 @@ def test_roi_edit_save_and_approval_use_real_workflow(tmp_path, monkeypatch, tk_
     assert all(len(row["gauge_results"]) == len(analyzed["roi"]["groups"]) for row in rows)
     assert rows[0]["engineering_strain"] == pytest.approx(0.0)
     page.destroy()
+
+
+def test_gui_state_badges_verification_progress_dimensions_and_theme(campaign_case, tmp_path):
+    root, page, wf, _tmp = campaign_case
+    # None dimension source must render as empty string, never literal "None".
+    assert page.identity_vars["dimension_source"].get() == ""
+
+    # Confirmed status variants are preserved and state badges distinguish COMPLETED vs BLOCKED.
+    acq = page._selected_acquisition()
+    acq["dimensions"] = {"area_mm2": 3.0, "width_mm": None, "thickness_mm": None, "status": "verified_recorded_dimensions", "source": "lab book"}
+    page._set_current_acquisition(acq)
+    assert page.dimension_confirmed_var.get() is True
+
+    assert page._acquisition_state({"result": {"status": "COMPLETED"}}) == "已分析"
+    assert page._acquisition_state({"result": {"status": "SCIENTIFIC_GATE_FAILED"}}) == "异常"
+    assert page._acquisition_state({"result": {"status": "BLOCKED"}}) == "异常"
+    assert not page._matches_state("已分析", {"result": {"status": "BLOCKED"}}, "异常")
+    assert page._matches_state("异常", {"result": {"status": "BLOCKED"}}, "异常")
+
+    # _show_progress reads "fraction" from numerics._notify.
+    page._show_progress((({"fraction": 0.5, "status": "tracking"},), {}))
+    assert float(page.progress["value"]) == pytest.approx(50.0)
+
+    # _show_verification handles both real workflow {"valid": bool} and fake {"status": "PASS"}.
+    page._show_verification({"valid": True, "errors": []})
+    assert "通过" in page.status_var.get()
+    page._show_verification({"valid": False, "errors": ["bad"]})
+    assert "未通过" in page.status_var.get()
+
+    # Stale async proposal callback must not overwrite a newly selected acquisition.
+    page._proposal = {"proposal_hash": "keep"}
+    page._accept_proposal({"proposal_hash": "stale"}, acquisition_id="other-acq")
+    assert page._proposal["proposal_hash"] == "keep"
+
+    # Fullfield mode syncs field_roi on free_region edit and permits approval without extensometer groups.
+    acq["analysis_mode"] = "fullfield"
+    page._proposal = {
+        "free_region": [5, 5, 60, 40], "field_roi": [5, 5, 60, 40], "exclusions": [], "groups": [],
+        "reference_frame": 1, "reference_path": acq["image_frames"][0]["path"],
+        "reference_sha256": "a" * 64, "proposal_hash": "b" * 64,
+    }
+    page._show_roi_proposal()
+    assert page._proposal_ready_for_approval() is True
+    page.roi_entries[("free_region", None, None)][0].set("8")
+    edited_prop = page._proposal_from_editors()
+    assert edited_prop["free_region"][0] == 8
+    assert edited_prop["field_roi"] == edited_prop["free_region"]
+
+    # Mixed rows never mix engineering_strain and force_N on the same Y axis, and NO_VALID_GAUGES appears in exceptions.
+    rows_file = page.project_dir / "stages" / "acq-synthetic-001" / "rows.jsonl"
+    rows_file.parent.mkdir(parents=True, exist_ok=True)
+    rows_file.write_text(
+        json.dumps({"frame": 1, "engineering_strain": 0.01, "force_N": 500.0, "strain_status": "TRACKED_MEAN"}) + "\n"
+        + json.dumps({"frame": 2, "engineering_strain": None, "force_N": 600.0, "strain_status": "NO_VALID_GAUGES"}) + "\n",
+        encoding="utf-8",
+    )
+    acq["result"] = {"status": "COMPLETED", "rows_path": "stages/acq-synthetic-001/rows.jsonl"}
+    page._render_acquisition_result(acq)
+    assert page._result_plot_labels == ("frame", "engineering_strain")
+    assert page._result_plot_points == [(1.0, 0.01)]
+    assert "NO_VALID_GAUGES" in page.result_text.get("1.0", tk.END)
+
+    # apply_theme updates canvases and text widgets safely.
+    class FakeApp:
+        panel_bg = "#1e293b"
+        card_bg = "#0f172a"
+        input_bg = "#0f172a"
+        text_color = "#f8fafc"
+        muted_color = "#94a3b8"
+
+    page.app = FakeApp()
+    page.apply_theme()
+    assert page.result_canvas.cget("background") == "#0f172a"
+    assert page.result_text.cget("background") == "#0f172a"
+    page.app = None
+
+
+def test_gui_16bit_tiff_preview_loads_and_caches(campaign_case, tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    _root, page, _wf, _tmp = campaign_case
+    tif16 = tmp_path / "frame16.tif"
+    arr = np.linspace(1000, 60000, 64 * 64, dtype=np.uint16).reshape(64, 64)
+    Image.fromarray(arr).save(tif16)
+    before = len(page._preview_image_cache)
+    img1, size1 = page._load_preview_rgb(tif16)
+    after_first = len(page._preview_image_cache)
+    img2, size2 = page._load_preview_rgb(tif16)
+    assert size1 == (64, 64) and size2 == (64, 64)
+    assert img1.mode == "RGB" and img2.mode == "RGB"
+    assert after_first == before + 1
+    assert len(page._preview_image_cache) == after_first

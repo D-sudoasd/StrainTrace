@@ -46,6 +46,17 @@ def strict_json_load(path: str | os.PathLike[str]) -> Any:
     return value
 
 
+def _replace_with_retry(source: Path, target: Path, *, attempts: int = 6, delay_s: float = 0.02) -> None:
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt + 1 >= attempts:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+
+
 def atomic_write_bytes(path: str | os.PathLike[str], payload: bytes) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -55,13 +66,19 @@ def atomic_write_bytes(path: str | os.PathLike[str], payload: bytes) -> Path:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, target)
+        _replace_with_retry(temp, target)
     except OSError as exc:
         try:
             temp.unlink(missing_ok=True)
         except OSError:
             pass
         raise CampaignError("PROJECT_WRITE_ERROR", f"cannot atomically write {target}: {exc}") from exc
+    except BaseException:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return target
 
 
@@ -81,7 +98,7 @@ def write_jsonl_atomic(path: str | os.PathLike[str], rows: Iterable[Mapping[str,
                 stream.write(_json_bytes(dict(row), pretty=False))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, target)
+        _replace_with_retry(temp, target)
     except CampaignError:
         try:
             temp.unlink(missing_ok=True)
@@ -219,7 +236,7 @@ def finalize_stage_record(
         normalized["summary"] = {}
     if "rows_path" not in normalized:
         raise CampaignError("STAGE_RECORD_INVALID", "worker stage record must provide rows_path")
-    rows_rel = validate_relative_path(normalized["rows_path"], "stage.rows_path")
+    rows_rel = validate_relative_path(normalized["rows_path"], "stage.rows_path").replace("\\", "/")
     artifacts = normalized.get("artifacts", [])
     if isinstance(artifacts, Mapping):
         artifacts = list(artifacts.values())
@@ -227,19 +244,25 @@ def finalize_stage_record(
         raise CampaignError("STAGE_RECORD_INVALID", "stage artifacts must be an array of relative file paths")
     clean_artifacts: list[str] = []
     for artifact in [rows_rel, *artifacts]:
-        rel = validate_relative_path(artifact, "stage.artifact")
+        rel = validate_relative_path(artifact, "stage.artifact").replace("\\", "/")
         if rel not in clean_artifacts:
             clean_artifacts.append(rel)
     supplied = normalized.get("checksums", {})
     if not isinstance(supplied, Mapping):
         raise CampaignError("STAGE_RECORD_INVALID", "stage checksums must be an object")
+    supplied_norm: dict[str, Any] = {}
+    for raw_rel, raw_digest in supplied.items():
+        norm_rel = validate_relative_path(raw_rel, "stage.checksums key").replace("\\", "/")
+        if norm_rel in supplied_norm and supplied_norm[norm_rel] != raw_digest:
+            raise CampaignError("STAGE_CHECKSUM_MISMATCH", f"conflicting worker checksums for artifact: {norm_rel}")
+        supplied_norm[norm_rel] = raw_digest
     checksums: dict[str, str] = {}
     for rel in clean_artifacts:
         path = artifact_path(project_root, rel)
         if not path.is_file():
             raise CampaignError("STAGE_ARTIFACT_MISSING", f"stage artifact does not exist: {rel}")
         digest = sha256_file(path)
-        claimed = supplied.get(rel)
+        claimed = supplied_norm.get(rel)
         if claimed is not None and claimed != digest:
             raise CampaignError("STAGE_CHECKSUM_MISMATCH", f"worker checksum does not match artifact: {rel}")
         checksums[rel] = digest
@@ -260,17 +283,25 @@ def stage_record_reusable(
         return False
     try:
         validate_stage_record(dict(record), "stage")
-        if record.get("status") == "IMPORTED_ACCEPTED":
-            # Imported results are immutable accepted evidence, not a cache hit
-            # produced by the current numerical implementation.
-            for rel, expected in record["checksums"].items():
-                path = artifact_path(project_root, rel)
-                if not path.is_file() or sha256_file(path) != expected:
-                    return False
-            return bool(record["artifacts"])
-        if record.get("fingerprint") != expected_fingerprint:
+        if record.get("status") != "IMPORTED_ACCEPTED" and record.get("fingerprint") != expected_fingerprint:
             return False
-        for rel, expected in record["checksums"].items():
+        checksums_by_norm = {
+            validate_relative_path(rel, "stage.checksums key").replace("\\", "/"): expected
+            for rel, expected in record["checksums"].items()
+        }
+        required_rels = [
+            validate_relative_path(record["rows_path"], "stage.rows_path").replace("\\", "/"),
+            *(validate_relative_path(item, "stage.artifact").replace("\\", "/") for item in record["artifacts"]),
+            *checksums_by_norm.keys(),
+        ]
+        seen: set[str] = set()
+        for rel in required_rels:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            expected = checksums_by_norm.get(rel)
+            if not expected:
+                return False
             path = artifact_path(project_root, rel)
             if not path.is_file() or sha256_file(path) != expected:
                 return False
@@ -303,14 +334,17 @@ def acquire_project_lock(project_root: str | os.PathLike[str]) -> Iterator[Path]
         raise CampaignError("PROJECT_LOCKED", f"another writer holds {lock_path}; inspect the lock receipt before recovery") from exc
     except OSError as exc:
         raise CampaignError("PROJECT_LOCK_ERROR", f"cannot create project lock: {exc}") from exc
-    try:
-        created_stat = os.fstat(fd)
-        created_identity = (created_stat.st_dev, created_stat.st_ino, created_stat.st_ctime_ns)
-    except OSError:
-        created_identity = None
+    created_identity = None
     initialized = False
+    fd_owned = True
     try:
         try:
+            created_stat = os.fstat(fd)
+            created_identity = (created_stat.st_dev, created_stat.st_ino, created_stat.st_ctime_ns)
+        except OSError:
+            created_identity = None
+        try:
+            fd_owned = False
             with os.fdopen(fd, "wb") as stream:
                 stream.write(payload)
                 stream.flush()
@@ -320,6 +354,11 @@ def acquire_project_lock(project_root: str | os.PathLike[str]) -> Iterator[Path]
             raise CampaignError("PROJECT_LOCK_ERROR", f"cannot initialize project lock: {exc}") from exc
         yield lock_path
     finally:
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         # Normal release requires our unguessable receipt token. If setup
         # itself failed, remove only the exact file created by our O_EXCL open;
         # never guess whether a pre-existing lock left by a crashed process is
