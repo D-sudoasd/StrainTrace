@@ -68,6 +68,10 @@ source_datas = [
 ]
 source_datas += [
     (str(path), "sources/" + str(path.parent.relative_to(PROJECT_ROOT)).replace("\\", "/"))
+    for path in sorted((PROJECT_ROOT / "ezdic_gui").rglob("*.py"))
+]
+source_datas += [
+    (str(path), "sources/" + str(path.parent.relative_to(PROJECT_ROOT)).replace("\\", "/"))
     for path in sorted((PROJECT_ROOT / "straintrace_campaign").rglob("*.py"))
 ]
 source_datas += [
@@ -78,6 +82,7 @@ benchmark_datas = [
     # The JSON is runtime data; source copies are retained for audit hashes
     # when the package modules execute from the PyInstaller archive.
     (source_file("benchmarks/cases_v1.json"), "benchmarks"),
+    (source_file("benchmarks/_common.py"), "sources/benchmarks"),
     (source_file("benchmarks/run_benchmark.py"), "sources/benchmarks"),
     (source_file("benchmarks/synthetic_cases.py"), "sources/benchmarks"),
 ]
@@ -86,10 +91,18 @@ common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
     "ezdic_benchmark",
+    "ezdic_gui",
+    "ezdic_gui.tooltips",
+    "ezdic_gui.theme",
+    "ezdic_gui.canvas",
+    "ezdic_gui.viewers",
     "benchmarks",
+    "benchmarks._common",
     "benchmarks.run_benchmark",
     "benchmarks.synthetic_cases",
     "straintrace_campaign",
+    "straintrace_campaign.__main__",
+    "straintrace_campaign._time_io",
     "straintrace_campaign.models",
     "straintrace_campaign.storage",
     "straintrace_campaign.workflow",
@@ -103,6 +116,13 @@ common_hiddenimports = [
     "straintrace_campaign.adapters.generic",
     "straintrace_campaign.adapters.desy",
     "straintrace_agent",
+    "straintrace_agent.__main__",
+    "straintrace_agent._io",
+    "straintrace_agent._locks",
+    "straintrace_agent._config",
+    "straintrace_agent._inventory",
+    "straintrace_agent._outputs",
+    "straintrace_agent._verify",
     "straintrace_agent.api",
     "straintrace_agent.cli",
     "straintrace_agent.fields",

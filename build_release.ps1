@@ -52,7 +52,14 @@ $ModernSourceFiles = @(
     $CliScriptName,
     "schemas\run_config_v1.json",
     "schemas\campaign_config_v1.json",
+    "ezdic_gui\__init__.py",
+    "ezdic_gui\tooltips.py",
+    "ezdic_gui\theme.py",
+    "ezdic_gui\canvas.py",
+    "ezdic_gui\viewers.py",
     "straintrace_campaign\__init__.py",
+    "straintrace_campaign\__main__.py",
+    "straintrace_campaign\_time_io.py",
     "straintrace_campaign\models.py",
     "straintrace_campaign\storage.py",
     "straintrace_campaign\workflow.py",
@@ -66,6 +73,7 @@ $ModernSourceFiles = @(
     "straintrace_campaign\adapters\generic.py",
     "straintrace_campaign\adapters\desy.py",
     "benchmarks\cases_v1.json",
+    "benchmarks\_common.py",
     "benchmarks\run_benchmark.py",
     "benchmarks\synthetic_cases.py",
     "pyproject.toml",
@@ -426,7 +434,11 @@ function Test-SpecDataInventory {
     if ($Modern) {
         [void](Read-RequiredText (Join-Path $Root "schemas\run_config_v1.json"))
         [void](Read-RequiredText (Join-Path $Root "schemas\campaign_config_v1.json"))
-        foreach ($pkg in @("straintrace_campaign", "straintrace_agent")) {
+        [void](Read-RequiredText (Join-Path $Root "benchmarks\_common.py"))
+        if ($normalizedSpec -notmatch [regex]::Escape("benchmarks/_common.py")) {
+            throw "ezDIC.spec is missing required data entry: benchmarks/_common.py"
+        }
+        foreach ($pkg in @("ezdic_gui", "straintrace_campaign", "straintrace_agent")) {
             if ($normalizedSpec -notmatch [regex]::Escape($pkg)) {
                 throw "ezDIC.spec is missing required package collection: $pkg"
             }
@@ -565,17 +577,32 @@ function Test-BundleInventory {
         "_internal\sources\ezdic_core.py",
         "_internal\sources\ezdic_cli.py",
         "_internal\sources\ezdic_benchmark.py",
+        "_internal\sources\ezdic_gui\__init__.py",
+        "_internal\sources\ezdic_gui\tooltips.py",
+        "_internal\sources\ezdic_gui\theme.py",
+        "_internal\sources\ezdic_gui\canvas.py",
+        "_internal\sources\ezdic_gui\viewers.py",
         "_internal\sources\straintrace_campaign\__init__.py",
+        "_internal\sources\straintrace_campaign\__main__.py",
+        "_internal\sources\straintrace_campaign\_time_io.py",
         "_internal\sources\straintrace_campaign\workflow.py",
         "_internal\sources\straintrace_campaign\cli.py",
         "_internal\sources\straintrace_agent\__init__.py",
+        "_internal\sources\straintrace_agent\__main__.py",
+        "_internal\sources\straintrace_agent\_io.py",
+        "_internal\sources\straintrace_agent\_locks.py",
+        "_internal\sources\straintrace_agent\_config.py",
+        "_internal\sources\straintrace_agent\_inventory.py",
+        "_internal\sources\straintrace_agent\_outputs.py",
+        "_internal\sources\straintrace_agent\_verify.py",
         "_internal\sources\straintrace_agent\api.py",
         "_internal\sources\straintrace_agent\cli.py",
         "_internal\benchmarks\cases_v1.json",
+        "_internal\sources\benchmarks\_common.py",
         "_internal\sources\benchmarks\run_benchmark.py",
         "_internal\sources\benchmarks\synthetic_cases.py"
     ) + $BundleFiles
-    foreach ($pkgDir in @("straintrace_campaign", "straintrace_agent")) {
+    foreach ($pkgDir in @("ezdic_gui", "straintrace_campaign", "straintrace_agent")) {
         $pkgRoot = Join-Path $Root $pkgDir
         if (Test-Path -LiteralPath $pkgRoot -PathType Container) {
             $pkgFiles = @(Get-ChildItem -LiteralPath $pkgRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
