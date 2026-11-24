@@ -1127,3 +1127,35 @@ def test_extensometer_viewer_ordering_and_aliases_and_tooltip_cleanup(workbench,
     app.root.update()
     assert tip.motion_command is None and tip.selection_command is None and tip.hide_command is None
 
+
+def test_modular_ezdic_gui_package_and_core_reexport_identities():
+    import ezdic_gui
+
+    assert issubclass(gui.MultiROIGUI, (ezdic_gui.ThemeMixin, ezdic_gui.CanvasMixin, ezdic_gui.ViewersMixin))
+    assert gui.ToolTip is ezdic_gui.ToolTip
+    assert gui.ChoiceToolTip is ezdic_gui.ChoiceToolTip
+    assert gui.HelpNavigationToolbar is ezdic_gui.HelpNavigationToolbar
+    assert gui.choose_ui_font_family is ezdic_gui.choose_ui_font_family
+    assert gui.enable_windows_dpi_awareness is ezdic_gui.enable_windows_dpi_awareness
+    assert gui.DIC_COMPONENT_LABELS is ezdic_gui.DIC_COMPONENT_LABELS
+    assert gui.DIC_COMPONENT_HELP is ezdic_gui.DIC_COMPONENT_HELP
+
+    for name in (
+        "PLOT_COLOR_CYCLE",
+        "PLOT_EXPORT_FORMATS",
+        "PLOT_EXPORT_PRESETS",
+        "format_tracking_status_line",
+        "write_image_checked",
+        "natural_sort_key",
+        "safe_name",
+        "draw_group_overlay",
+        "validate_poisson_role_groups",
+        "create_plot_figure",
+        "save_plot_figure",
+        "write_origin_opju_project",
+        "run_2d_dic",
+        "export_dic_field_outputs",
+    ):
+        assert getattr(gui, name) is getattr(core, name), f"{name} alias diverged from ezdic_core"
+
+
