@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -24,15 +27,11 @@ jobs:
 
       - name: Compile all source entrypoints and modules
         shell: pwsh
-        run: >-
-          python -B -m py_compile
-          dic_virtual_extensometer_gui_v7_multi_roi_range.py
-          ezdic_core.py ezdic_cli.py ezdic_benchmark.py
-          ezdic_frozen_entrypoint.py ezdic_cli_entrypoint.py
-          straintrace_agent/__init__.py straintrace_agent/api.py
-          straintrace_agent/cli.py straintrace_agent/fields.py
-          straintrace_agent/mechanics.py
-          benchmarks/run_benchmark.py benchmarks/synthetic_cases.py
+        run: |
+          $files = @(git ls-files '*.py' | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($files.Count -eq 0) { throw "No tracked Python files found to compile." }
+          python -B -m py_compile @files
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run full pytest without repository cache output
         shell: pwsh

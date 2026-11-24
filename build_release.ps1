@@ -4,7 +4,9 @@ param(
     [switch]$GuardTest,
     [string]$GuardPath,
     [switch]$BundleTest,
-    [string]$BundlePath
+    [string]$BundlePath,
+    [switch]$UpgradePip,
+    [switch]$KeepTempArtifacts
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +68,7 @@ $ModernSourceFiles = @(
     "benchmarks\cases_v1.json",
     "benchmarks\run_benchmark.py",
     "benchmarks\synthetic_cases.py",
+    "pyproject.toml",
     "ezDIC.spec"
 )
 $AgentSourceRoot = Join-Path $Root "straintrace_agent"
@@ -233,6 +236,24 @@ function Remove-SafeBuildPath {
     }
 }
 
+function Remove-TempWorkDir {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($KeepTempArtifacts -or [string]::IsNullOrWhiteSpace($Path)) { return }
+    $fullPath = Get-FullPath $Path
+    $tempRoot = (Get-FullPath ([IO.Path]::GetTempPath())).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label is outside the system temp root: $fullPath"
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        [void](Assert-NoReparseTree -Path $fullPath -Label $Label)
+        Remove-Item -LiteralPath $fullPath -Recurse -Force
+    }
+}
+
 function Invoke-NativeChecked {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
@@ -289,7 +310,12 @@ function Invoke-WindowedChecked {
         # PowerShell does not reliably populate $LASTEXITCODE for a GUI
         # subsystem executable.  Wait explicitly and inspect Process.ExitCode
         # so a frozen smoke cannot be reported before it has finished.
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+        if ($null -ne $Arguments -and $Arguments.Count -gt 0) {
+            $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+        }
+        else {
+            $process = Start-Process -FilePath $Executable -WindowStyle Hidden -Wait -PassThru
+        }
     }
     catch {
         throw "$Label could not start: $($_.Exception.Message)"
@@ -381,10 +407,15 @@ function Test-SpecDataInventory {
         [Parameter(Mandatory = $true)][string]$SpecText,
         [Parameter(Mandatory = $true)][bool]$Modern
     )
-    $requiredData = if ($Modern) { $BundleFiles + @("schemas/run_config_v1.json", "benchmarks/cases_v1.json") } else { $LegacyBundleFiles }
+    $requiredData = if ($Modern) {
+        $BundleFiles + @("schemas/run_config_v1.json", "schemas/campaign_config_v1.json", "benchmarks/cases_v1.json")
+    }
+    else {
+        $LegacyBundleFiles
+    }
+    $normalizedSpec = $SpecText -replace "\\", "/"
     foreach ($relativePath in $requiredData) {
         $token = [regex]::Escape(($relativePath -replace "\\", "/"))
-        $normalizedSpec = $SpecText -replace "\\", "/"
         if ($normalizedSpec -notmatch $token) {
             throw "ezDIC.spec is missing required data entry: $relativePath"
         }
@@ -394,6 +425,12 @@ function Test-SpecDataInventory {
     }
     if ($Modern) {
         [void](Read-RequiredText (Join-Path $Root "schemas\run_config_v1.json"))
+        [void](Read-RequiredText (Join-Path $Root "schemas\campaign_config_v1.json"))
+        foreach ($pkg in @("straintrace_campaign", "straintrace_agent")) {
+            if ($normalizedSpec -notmatch [regex]::Escape($pkg)) {
+                throw "ezDIC.spec is missing required package collection: $pkg"
+            }
+        }
     }
 }
 
@@ -416,6 +453,32 @@ function Test-ReleaseContracts {
     $appVersionValue = $Matches[1]
     if ($Version -ne $versionFileValue -or $Version -ne $appVersionValue) {
         throw "Version mismatch: -Version=$Version, VERSION.txt=$versionFileValue, APP_VERSION=$appVersionValue."
+    }
+
+    $corePath = Join-Path $Root "ezdic_core.py"
+    if ($Modern -or (Test-Path -LiteralPath $corePath -PathType Leaf)) {
+        $coreSourceText = Read-RequiredText $corePath
+        if ($coreSourceText -notmatch '(?m)^\s*APP_VERSION\s*=\s*["'']([^"'']+)["'']') {
+            throw "ezdic_core.py does not define a readable APP_VERSION."
+        }
+        if ($Matches[1] -ne $Version) {
+            throw "ezdic_core.py APP_VERSION $($Matches[1]) does not match $Version."
+        }
+    }
+
+    $pyprojectPath = Join-Path $Root "pyproject.toml"
+    if ($Modern -or (Test-Path -LiteralPath $pyprojectPath -PathType Leaf)) {
+        $pyprojectText = Read-RequiredText $pyprojectPath
+        if ($pyprojectText -notmatch '(?ms)^\[project\]\s*(.*?)(?=^\[|\z)') {
+            throw "pyproject.toml does not define a [project] section."
+        }
+        $projectSection = $Matches[1]
+        if ($projectSection -notmatch '(?m)^\s*version\s*=\s*["'']([^"'']+)["'']') {
+            throw "pyproject.toml [project] does not define a readable version."
+        }
+        if ($Matches[1] -ne $Version) {
+            throw "pyproject.toml version $($Matches[1]) does not match $Version."
+        }
     }
 
     $citationText = Read-RequiredText (Join-Path $Root "CITATION.cff")
@@ -472,17 +535,22 @@ function Invoke-SourceSmoke {
     $oldMarker = $env:EZDIC_FROZEN_SMOKE_MARKER
     $env:EZDIC_FROZEN_SMOKE_MARKER = $markerPath
     try {
-        Invoke-PythonCommand -CommandParts @($PythonPath) -Arguments @("-B", $MainScriptName, "--smoke-test") -Label "source/frozen contract smoke"
+        try {
+            Invoke-PythonCommand -CommandParts @($PythonPath) -Arguments @("-B", $MainScriptName, "--smoke-test") -Label "source/frozen contract smoke"
+        }
+        finally {
+            if ($null -eq $oldMarker) { Remove-Item Env:EZDIC_FROZEN_SMOKE_MARKER -ErrorAction SilentlyContinue }
+            else { $env:EZDIC_FROZEN_SMOKE_MARKER = $oldMarker }
+        }
+        $markerText = Read-RequiredText $markerPath
+        try { $marker = $markerText | ConvertFrom-Json }
+        catch { throw "Source smoke marker is not valid JSON: $markerPath" }
+        if ($marker.smoke -ne "passed") { throw "Source smoke did not pass: $markerText" }
+        Write-Host "Source/frozen contract smoke passed: $markerPath"
     }
     finally {
-        if ($null -eq $oldMarker) { Remove-Item Env:EZDIC_FROZEN_SMOKE_MARKER -ErrorAction SilentlyContinue }
-        else { $env:EZDIC_FROZEN_SMOKE_MARKER = $oldMarker }
+        Remove-TempWorkDir -Path $markerRoot -Label "source smoke temp directory"
     }
-    $markerText = Read-RequiredText $markerPath
-    try { $marker = $markerText | ConvertFrom-Json }
-    catch { throw "Source smoke marker is not valid JSON: $markerPath" }
-    if ($marker.smoke -ne "passed") { throw "Source smoke did not pass: $markerText" }
-    Write-Host "Source/frozen contract smoke passed: $markerPath"
 }
 
 function Test-BundleInventory {
@@ -492,14 +560,34 @@ function Test-BundleInventory {
         "ezDIC.exe",
         "ezDIC-cli.exe",
         "_internal\schemas\run_config_v1.json",
+        "_internal\schemas\campaign_config_v1.json",
         "_internal\sources\dic_virtual_extensometer_gui_v7_multi_roi_range.py",
         "_internal\sources\ezdic_core.py",
         "_internal\sources\ezdic_cli.py",
         "_internal\sources\ezdic_benchmark.py",
+        "_internal\sources\straintrace_campaign\__init__.py",
+        "_internal\sources\straintrace_campaign\workflow.py",
+        "_internal\sources\straintrace_campaign\cli.py",
+        "_internal\sources\straintrace_agent\__init__.py",
+        "_internal\sources\straintrace_agent\api.py",
+        "_internal\sources\straintrace_agent\cli.py",
         "_internal\benchmarks\cases_v1.json",
         "_internal\sources\benchmarks\run_benchmark.py",
         "_internal\sources\benchmarks\synthetic_cases.py"
     ) + $BundleFiles
+    foreach ($pkgDir in @("straintrace_campaign", "straintrace_agent")) {
+        $pkgRoot = Join-Path $Root $pkgDir
+        if (Test-Path -LiteralPath $pkgRoot -PathType Container) {
+            $pkgFiles = @(Get-ChildItem -LiteralPath $pkgRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
+                "_internal\sources\" + $_.FullName.Substring($Root.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1)
+            })
+            foreach ($pkgFile in $pkgFiles) {
+                if ($required -notcontains $pkgFile) {
+                    $required += $pkgFile
+                }
+            }
+        }
+    }
     foreach ($relativePath in $required) {
         $path = Join-Path $BundleRoot $relativePath
         [void](Assert-NoReparsePath -Path $path -Label "portable bundle entry $relativePath")
@@ -712,8 +800,13 @@ if ($SmokeRequested) {
         Invoke-SourceSmoke -PythonPath $VenvPython
         $smokeBenchmarkRoot = Join-Path ([IO.Path]::GetTempPath()) ("ezdic-smoke-benchmark-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $smokeBenchmarkRoot -Force | Out-Null
-        Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "ezdic_cli.py", "benchmark", "--cases", (Join-Path $Root "benchmarks\cases_v1.json"), "--output", $smokeBenchmarkRoot) -Label "source v6 benchmark smoke"
-        [void](Assert-BenchmarkV6Report -ReportPath (Join-Path $smokeBenchmarkRoot "benchmark_report.json") -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "source smoke")
+        try {
+            Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "ezdic_cli.py", "benchmark", "--cases", (Join-Path $Root "benchmarks\cases_v1.json"), "--output", $smokeBenchmarkRoot) -Label "source v6 benchmark smoke"
+            [void](Assert-BenchmarkV6Report -ReportPath (Join-Path $smokeBenchmarkRoot "benchmark_report.json") -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "source smoke")
+        }
+        finally {
+            Remove-TempWorkDir -Path $smokeBenchmarkRoot -Label "smoke benchmark temp directory"
+        }
         Write-Host "ezDIC build smoke test: modern source contract passed."
     }
     else {
@@ -730,7 +823,9 @@ Test-ModernSourceInventory | Out-Null
 Test-ReleaseContracts -Modern
 Ensure-BuildVenv
 
-Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "--upgrade", "pip") -Label "pip upgrade"
+if ($UpgradePip) {
+    Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "--upgrade", "pip") -Label "pip upgrade"
+}
 Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "-r", (Join-Path $Root "requirements-build.txt")) -Label "build requirements installation"
 
 $compileFiles = @($ModernSourceFiles | Where-Object { $_ -like "*.py" } | ForEach-Object { Join-Path $Root $_ })
@@ -738,86 +833,95 @@ Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments (@("-B", "-m", "py_
 Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "-m", "pytest", "-q", "-p", "no:cacheprovider") -Label "pytest"
 
 $benchmarkRoot = Join-Path ([IO.Path]::GetTempPath()) ("ezdic-build-benchmark-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $benchmarkRoot -Force | Out-Null
-Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "ezdic_cli.py", "benchmark", "--cases", (Join-Path $Root "benchmarks\cases_v1.json"), "--output", $benchmarkRoot) -Label "locked v6 synthetic benchmark"
-$benchmarkReportPath = Join-Path $benchmarkRoot "benchmark_report.json"
-$benchmarkReport = Assert-BenchmarkV6Report -ReportPath $benchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "source"
-
-Remove-SafeBuildPath -Path $BuildRoot -Label "build output"
-Remove-SafeBuildPath -Path $DistRoot -Label "dist output"
- [void](Assert-SafeBuildPath -Path $BuildRoot -Label "build output creation target")
- [void](Assert-SafeBuildPath -Path $DistRoot -Label "dist output creation target")
-Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "-m", "PyInstaller", (Join-Path $Root "ezDIC.spec"), "--clean", "--noconfirm") -Label "PyInstaller"
-
- [void](Assert-NoReparseTree -Path $DistDir -Label "dist bundle")
-if (!(Test-Path -LiteralPath $DistDir -PathType Container)) { throw "PyInstaller output was not found: $DistDir" }
-
-if (Test-Path -LiteralPath $ReleaseDir) { Remove-SafeBuildPath -Path $ReleaseDir -Label "release package" }
- [void](Assert-SafeBuildPath -Path $ReleaseRoot -Label "release root creation target")
-New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
- [void](Assert-SafeBuildPath -Path $ReleaseRoot -Label "release root")
- [void](Assert-SafeBuildPath -Path $ReleaseDir -Label "release package creation target")
-Copy-Item -LiteralPath $DistDir -Destination $ReleaseDir -Recurse -Force
- [void](Assert-NoReparseTree -Path $ReleaseDir -Label "copied release package")
-foreach ($bundleFile in $BundleFiles) {
-    $source = Join-Path $Root $bundleFile
-    $destination = Join-Path $ReleaseDir $bundleFile
-    [void](Assert-NoReparsePath -Path $source -Label "release source $bundleFile")
-    [void](Assert-SafeBuildPath -Path $destination -Label "release destination $bundleFile")
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-}
-Test-BundleInventory -BundleRoot $ReleaseDir
-[void](Assert-FrozenGuiProvenance -BundleRoot $DistDir)
-
 $frozenMarkerRoot = Join-Path ([IO.Path]::GetTempPath()) ("ezdic-frozen-smoke-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $frozenMarkerRoot -Force | Out-Null
-$frozenMarker = Join-Path $frozenMarkerRoot "smoke.json"
-$frozenExe = Join-Path $DistDir "ezDIC.exe"
-$oldFrozenMarker = $env:EZDIC_FROZEN_SMOKE_MARKER
-$env:EZDIC_FROZEN_SMOKE_MARKER = $frozenMarker
+$frozenBenchmarkRoot = Join-Path ([IO.Path]::GetTempPath()) ("ezdic-frozen-benchmark-" + [guid]::NewGuid().ToString("N"))
 try {
-    Invoke-WindowedChecked -Label "frozen GUI contract smoke" -Executable $frozenExe -Arguments @("--smoke-test")
+    New-Item -ItemType Directory -Path $benchmarkRoot -Force | Out-Null
+    Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "ezdic_cli.py", "benchmark", "--cases", (Join-Path $Root "benchmarks\cases_v1.json"), "--output", $benchmarkRoot) -Label "locked v6 synthetic benchmark"
+    $benchmarkReportPath = Join-Path $benchmarkRoot "benchmark_report.json"
+    $benchmarkReport = Assert-BenchmarkV6Report -ReportPath $benchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "source"
+
+    Remove-SafeBuildPath -Path $BuildRoot -Label "build output"
+    Remove-SafeBuildPath -Path $DistRoot -Label "dist output"
+    [void](Assert-SafeBuildPath -Path $BuildRoot -Label "build output creation target")
+    [void](Assert-SafeBuildPath -Path $DistRoot -Label "dist output creation target")
+    Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "-m", "PyInstaller", (Join-Path $Root "ezDIC.spec"), "--clean", "--noconfirm") -Label "PyInstaller"
+
+    [void](Assert-NoReparseTree -Path $DistDir -Label "dist bundle")
+    if (!(Test-Path -LiteralPath $DistDir -PathType Container)) { throw "PyInstaller output was not found: $DistDir" }
+
+    if (Test-Path -LiteralPath $ReleaseDir) { Remove-SafeBuildPath -Path $ReleaseDir -Label "release package" }
+    [void](Assert-SafeBuildPath -Path $ReleaseRoot -Label "release root creation target")
+    New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
+    [void](Assert-SafeBuildPath -Path $ReleaseRoot -Label "release root")
+    [void](Assert-SafeBuildPath -Path $ReleaseDir -Label "release package creation target")
+    Copy-Item -LiteralPath $DistDir -Destination $ReleaseDir -Recurse -Force
+    [void](Assert-NoReparseTree -Path $ReleaseDir -Label "copied release package")
+    foreach ($bundleFile in $BundleFiles) {
+        $source = Join-Path $Root $bundleFile
+        $destination = Join-Path $ReleaseDir $bundleFile
+        [void](Assert-NoReparsePath -Path $source -Label "release source $bundleFile")
+        [void](Assert-SafeBuildPath -Path $destination -Label "release destination $bundleFile")
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+    }
+    Test-BundleInventory -BundleRoot $ReleaseDir
+    [void](Assert-FrozenGuiProvenance -BundleRoot $DistDir)
+
+    New-Item -ItemType Directory -Path $frozenMarkerRoot -Force | Out-Null
+    $frozenMarker = Join-Path $frozenMarkerRoot "smoke.json"
+    $frozenExe = Join-Path $DistDir "ezDIC.exe"
+    $oldFrozenMarker = $env:EZDIC_FROZEN_SMOKE_MARKER
+    $env:EZDIC_FROZEN_SMOKE_MARKER = $frozenMarker
+    try {
+        Invoke-WindowedChecked -Label "frozen GUI contract smoke" -Executable $frozenExe -Arguments @("--smoke-test")
+    }
+    finally {
+        if ($null -eq $oldFrozenMarker) { Remove-Item Env:EZDIC_FROZEN_SMOKE_MARKER -ErrorAction SilentlyContinue }
+        else { $env:EZDIC_FROZEN_SMOKE_MARKER = $oldFrozenMarker }
+    }
+    $frozenMarkerText = Read-RequiredText $frozenMarker
+    try { $frozenResult = $frozenMarkerText | ConvertFrom-Json }
+    catch { throw "Frozen smoke marker is not valid JSON: $frozenMarker" }
+    if ($frozenResult.smoke -ne "passed") { throw "Frozen smoke did not pass: $frozenMarkerText" }
+    $frozenHashSources = @{
+        "core_sha256" = "ezdic_core.py"
+        "cli_sha256" = "ezdic_cli.py"
+        "benchmark_sha256" = "ezdic_benchmark.py"
+        "schema_sha256" = "schemas\run_config_v1.json"
+    }
+    foreach ($field in $frozenHashSources.Keys) {
+        $reported = [string]$frozenResult.PSObject.Properties[$field].Value
+        if ($reported -notmatch '^[0-9a-fA-F]{64}$') { throw "Frozen smoke marker is missing a real code/data hash: $field" }
+        $sourcePath = Join-Path $Root $frozenHashSources[$field]
+        [void](Assert-NoReparsePath -Path $sourcePath -Label "frozen smoke source $field")
+        $observed = Get-Sha256 $sourcePath
+        if ($reported.ToLowerInvariant() -ne $observed) { throw "Frozen smoke hash mismatch: $field" }
+    }
+
+    $cliExe = Join-Path $DistDir "ezDIC-cli.exe"
+    Invoke-NativeChecked -Label "frozen CLI help smoke" -CommandParts @($cliExe, "--help")
+    New-Item -ItemType Directory -Path $frozenBenchmarkRoot -Force | Out-Null
+    Invoke-NativeChecked -Label "frozen CLI locked v6 benchmark" -CommandParts @($cliExe, "benchmark", "--output", $frozenBenchmarkRoot)
+    $frozenBenchmarkReportPath = Join-Path $frozenBenchmarkRoot "benchmark_report.json"
+    $frozenBenchmarkReport = Assert-BenchmarkV6Report -ReportPath $frozenBenchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "frozen CLI"
+
+    if (Test-Path -LiteralPath $ZipPath) { Remove-SafeBuildPath -Path $ZipPath -Label "release archive" }
+    [void](Assert-NoReparseTree -Path $ReleaseDir -Label "release package before compression")
+    [void](Assert-SafeBuildPath -Path $ZipPath -Label "release archive creation target")
+    Compress-Archive -Path $ReleaseDir -DestinationPath $ZipPath -Force
+    [void](Assert-SafeBuildPath -Path $ZipPath -Label "release archive")
+    if (!(Test-Path -LiteralPath $ZipPath -PathType Leaf)) { throw "Release zip was not created: $ZipPath" }
+
+    Write-Host "Release folder: $ReleaseDir"
+    Write-Host "Release zip: $ZipPath"
+    if ($KeepTempArtifacts) {
+        Write-Host "Locked benchmark report: $benchmarkReportPath"
+        Write-Host "Frozen CLI benchmark report: $frozenBenchmarkReportPath"
+        Write-Host "Frozen smoke marker: $frozenMarker"
+    }
 }
 finally {
-    if ($null -eq $oldFrozenMarker) { Remove-Item Env:EZDIC_FROZEN_SMOKE_MARKER -ErrorAction SilentlyContinue }
-    else { $env:EZDIC_FROZEN_SMOKE_MARKER = $oldFrozenMarker }
+    Remove-TempWorkDir -Path $benchmarkRoot -Label "build benchmark temp directory"
+    Remove-TempWorkDir -Path $frozenMarkerRoot -Label "frozen smoke temp directory"
+    Remove-TempWorkDir -Path $frozenBenchmarkRoot -Label "frozen benchmark temp directory"
 }
-$frozenMarkerText = Read-RequiredText $frozenMarker
-try { $frozenResult = $frozenMarkerText | ConvertFrom-Json }
-catch { throw "Frozen smoke marker is not valid JSON: $frozenMarker" }
-if ($frozenResult.smoke -ne "passed") { throw "Frozen smoke did not pass: $frozenMarkerText" }
-$frozenHashSources = @{
-    "core_sha256" = "ezdic_core.py"
-    "cli_sha256" = "ezdic_cli.py"
-    "benchmark_sha256" = "ezdic_benchmark.py"
-    "schema_sha256" = "schemas\run_config_v1.json"
-}
-foreach ($field in $frozenHashSources.Keys) {
-    $reported = [string]$frozenResult.PSObject.Properties[$field].Value
-    if ($reported -notmatch '^[0-9a-fA-F]{64}$') { throw "Frozen smoke marker is missing a real code/data hash: $field" }
-    $sourcePath = Join-Path $Root $frozenHashSources[$field]
-    [void](Assert-NoReparsePath -Path $sourcePath -Label "frozen smoke source $field")
-    $observed = Get-Sha256 $sourcePath
-    if ($reported.ToLowerInvariant() -ne $observed) { throw "Frozen smoke hash mismatch: $field" }
-}
-
-$cliExe = Join-Path $DistDir "ezDIC-cli.exe"
-Invoke-NativeChecked -Label "frozen CLI help smoke" -CommandParts @($cliExe, "--help")
-$frozenBenchmarkRoot = Join-Path ([IO.Path]::GetTempPath()) ("ezdic-frozen-benchmark-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $frozenBenchmarkRoot -Force | Out-Null
-Invoke-NativeChecked -Label "frozen CLI locked v6 benchmark" -CommandParts @($cliExe, "benchmark", "--output", $frozenBenchmarkRoot)
-$frozenBenchmarkReportPath = Join-Path $frozenBenchmarkRoot "benchmark_report.json"
-$frozenBenchmarkReport = Assert-BenchmarkV6Report -ReportPath $frozenBenchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "frozen CLI"
-
-if (Test-Path -LiteralPath $ZipPath) { Remove-SafeBuildPath -Path $ZipPath -Label "release archive" }
- [void](Assert-NoReparseTree -Path $ReleaseDir -Label "release package before compression")
- [void](Assert-SafeBuildPath -Path $ZipPath -Label "release archive creation target")
-Compress-Archive -Path $ReleaseDir -DestinationPath $ZipPath -Force
- [void](Assert-SafeBuildPath -Path $ZipPath -Label "release archive")
-if (!(Test-Path -LiteralPath $ZipPath -PathType Leaf)) { throw "Release zip was not created: $ZipPath" }
-
-Write-Host "Release folder: $ReleaseDir"
-Write-Host "Release zip: $ZipPath"
-Write-Host "Locked benchmark report: $benchmarkReportPath"
-Write-Host "Frozen CLI benchmark report: $frozenBenchmarkReportPath"
-Write-Host "Frozen smoke marker: $frozenMarker"

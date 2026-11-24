@@ -52,8 +52,16 @@ if not exist "%VENV_PY%" (
     set "BASE_PYTHON="
     where py >nul 2>nul
     if not errorlevel 1 (
-        py -3 --version >nul 2>nul
-        if not errorlevel 1 set "BASE_PYTHON=py -3"
+        for %%V in (3.11 3.12 3.13) do (
+            if not defined BASE_PYTHON (
+                py -%%V --version >nul 2>nul
+                if not errorlevel 1 set "BASE_PYTHON=py -%%V"
+            )
+        )
+        if not defined BASE_PYTHON (
+            py -3 --version >nul 2>nul
+            if not errorlevel 1 set "BASE_PYTHON=py -3"
+        )
     )
 
     if not defined BASE_PYTHON (
