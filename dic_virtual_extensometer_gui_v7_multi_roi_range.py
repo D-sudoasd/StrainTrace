@@ -31,6 +31,7 @@ DIC Virtual Extensometer GUI v7 Multi-ROI Range Preview
     python dic_virtual_extensometer_gui_v7_multi_roi_range.py
 """
 
+import contextlib
 import os
 import re
 import math
@@ -38,6 +39,8 @@ import glob
 import json
 import queue
 import shutil
+import subprocess
+import sys
 import threading
 import traceback
 from collections.abc import Mapping
@@ -217,22 +220,23 @@ USAGE_NOTICE = f"""ezDIC Attribution and Usage Notice
 Developer:
 {APP_DEVELOPER}
 
+License:
+MIT License (see LICENSE.txt and NOTICE_Attribution_and_Usage.txt)
+
 DOI:
 {APP_DOI}
 
-This software was developed by {APP_DEVELOPER} for lightweight extraction of linear strain from image sequences.
+This software was developed by {APP_DEVELOPER} for lightweight extraction of linear strain and 2D full-field DIC from image sequences.
 
 {CITATION_TEXT.strip()}
 
-Users are not permitted to:
-1. claim that they developed this software;
-2. remove or alter the developer attribution;
-3. redistribute, copy, forward, or share this software with unauthorized users;
-4. use this software outside the authorized research or teaching context.
+Licensing and Attribution:
+- Modification, commercial use, and redistribution are permitted under the MIT License.
+- Please preserve the copyright notice and permission notice in all copies or substantial portions of the Software.
+- Citation in scholarly work (thesis, paper, presentation, or report) is encouraged, not an additional license restriction.
 
-If you use ezDIC in a thesis, paper, presentation, or report, please cite the DOI above.
-
-If you need to share or reuse this software, please obtain permission from {APP_DEVELOPER} first.
+Warranty Disclaimer:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 """
 
 
@@ -355,9 +359,14 @@ def open_output_folder(path):
         raise RuntimeError(f"结果目录不存在：{folder}")
     if not folder.is_dir():
         raise RuntimeError(f"结果路径不是文件夹：{folder}")
-    if not hasattr(os, "startfile"):
-        raise RuntimeError("自动打开结果目录仅支持 Windows Explorer。")
-    os.startfile(str(folder))
+    if hasattr(os, "startfile"):
+        os.startfile(str(folder))
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.Popen([opener, str(folder)])
+    except OSError as exc:
+        raise RuntimeError(f"无法使用 {opener} 打开结果目录：{exc}") from exc
 
 
 def write_image_checked(path, image):
@@ -375,6 +384,37 @@ def write_image_checked(path, image):
     if not ok or not path.exists() or path.stat().st_size <= 0:
         raise RuntimeError(f"写入图像失败：{path}")
     return path
+
+
+_WIN32_MONITOR_USER32 = None
+_WIN32_MONITOR_INFO_CLS = None
+_WIN32_POINT_CLS = None
+
+
+def _get_win32_monitor_api():
+    """Initialize Win32 monitor bounds bindings once without mutating ctypes.windll."""
+    global _WIN32_MONITOR_USER32, _WIN32_MONITOR_INFO_CLS, _WIN32_POINT_CLS
+    if _WIN32_MONITOR_USER32 is None and os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("size", wintypes.DWORD),
+                ("monitor", wintypes.RECT),
+                ("work", wintypes.RECT),
+                ("flags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        _WIN32_MONITOR_INFO_CLS = _MonitorInfo
+        _WIN32_POINT_CLS = wintypes.POINT
+        _WIN32_MONITOR_USER32 = user32
+    return _WIN32_MONITOR_USER32, _WIN32_MONITOR_INFO_CLS, _WIN32_POINT_CLS
 
 
 class ToolTip:
@@ -444,21 +484,14 @@ class ToolTip:
     def screen_bounds(self, x, y):
         if os.name == "nt":
             import ctypes
-            from ctypes import wintypes
 
-            class MonitorInfo(ctypes.Structure):
-                _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
-                            ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
-
-            user32 = ctypes.windll.user32
-            user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-            user32.MonitorFromPoint.restype = wintypes.HANDLE
-            user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
-            info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
-            monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
-            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-                rect = info.work
-                return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+            user32, monitor_info_cls, point_cls = _get_win32_monitor_api()
+            if user32 is not None and monitor_info_cls is not None and point_cls is not None:
+                info = monitor_info_cls(size=ctypes.sizeof(monitor_info_cls))
+                monitor = user32.MonitorFromPoint(point_cls(int(x), int(y)), 2)
+                if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    rect = info.work
+                    return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
         return 0, 0, self.widget.winfo_screenwidth(), self.widget.winfo_screenheight()
 
     def show(self):
@@ -543,6 +576,7 @@ class ChoiceToolTip(ToolTip):
         self.choices = {str(value): explanation for value, explanation in choices.items()}
         self.popup_choice = None
         self.listbox = None
+        self._disposed = False
         super().__init__(widget, self.choice_text)
         widget._tooltip_choices = self.choices
         self.previous_postcommand = widget.cget("postcommand")
@@ -579,15 +613,26 @@ class ChoiceToolTip(ToolTip):
             self.widget.tk.call("bind", listbox, sequence, "+" + script)
 
     def on_choice_motion(self, y, x_root, y_root):
-        index = int(self.widget.tk.call(self.listbox, "nearest", int(y)))
-        box = self.widget.tk.call(self.listbox, "bbox", index)
+        if not self.listbox or self._disposed:
+            return
+        try:
+            index = int(self.widget.tk.call(self.listbox, "nearest", int(y)))
+            box = self.widget.tk.call(self.listbox, "bbox", index)
+        except (tk.TclError, ValueError):
+            self.hide_choices()
+            return
         if not box or not int(box[1]) <= int(y) < int(box[1]) + int(box[3]):
             self.hide_choices()
             return
         self.schedule_choice(index, x_root, y_root)
 
     def on_choice_selection(self):
-        selected = self.widget.tk.call(self.listbox, "curselection")
+        if not self.listbox or self._disposed:
+            return
+        try:
+            selected = self.widget.tk.call(self.listbox, "curselection")
+        except tk.TclError:
+            return
         if selected:
             index = int(selected[0])
             box = self.widget.tk.call(self.listbox, "bbox", index)
@@ -614,7 +659,20 @@ class ChoiceToolTip(ToolTip):
         self.hide()
 
     def dispose(self, event=None):
+        self._disposed = True
         super().dispose(event)
+        for attr in ("motion_command", "selection_command", "hide_command"):
+            cmd = getattr(self, attr, None)
+            if cmd:
+                try:
+                    self.widget.deletecommand(cmd)
+                except tk.TclError:
+                    tcl_cmds = getattr(self.widget, "_tclCommands", None)
+                    if isinstance(tcl_cmds, list) and cmd in tcl_cmds:
+                        tcl_cmds.remove(cmd)
+                setattr(self, attr, None)
+        self.listbox = None
+        self.popup_choice = None
         self.summary = ""
         self.previous_postcommand = ""
 
@@ -1507,7 +1565,7 @@ def validate_image_sequence_dimensions(paths):
     return reference_shape
 
 
-def validate_fullfield_snapshot(settings):
+def validate_fullfield_snapshot(settings, *, check_sequence_dimensions=True):
     """Validate a frozen full-field settings snapshot without touching Tk.
 
     ``start_processing`` freezes all GUI values into ``settings`` before it
@@ -1586,7 +1644,7 @@ def validate_fullfield_snapshot(settings):
         raise RuntimeError(f"输出路径已存在但不是文件夹：{output_path}")
 
     selected_paths = image_paths[start_idx : end_idx + 1]
-    image_shape = validate_image_sequence_dimensions(selected_paths)
+    image_shape = validate_image_sequence_dimensions(selected_paths) if check_sequence_dimensions else None
     try:
         reference_raw = read_gray_image(image_paths[reference_frame - 1])
     except Exception as exc:
@@ -1691,6 +1749,19 @@ def validate_fullfield_snapshot(settings):
         supported = ndimage.minimum_filter(mask.astype(np.uint8), size=subset, mode="constant", cval=0)
         if np.count_nonzero(supported[Y.astype(int), X.astype(int)]) < 9:
             raise RuntimeError("遮罩内至少需要 9 个能容纳完整子集的测量点。请检查遮罩或减小子集。")
+    display = settings.get("display")
+    if isinstance(display, Mapping) and display:
+        color_mode = display.get("color_mode", "range")
+        if color_mode not in ("range", "symmetric", "manual"):
+            raise RuntimeError("全场 DIC 色标范围模式无效。")
+        if color_mode == "manual":
+            try:
+                vmin = float(display["vmin"])
+                vmax = float(display["vmax"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("手动色标需要有限且递增的最小值和最大值。") from exc
+            if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmin >= vmax:
+                raise RuntimeError("手动色标需要有限且递增的最小值和最大值。")
 
 
 def fullfield_field_has_finite_strain(field):
@@ -2732,8 +2803,10 @@ def save_plot_figure(fig, path, preset_name="publication"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     preset = get_plot_preset(preset_name)
-    fig.savefig(path, dpi=preset["dpi"], bbox_inches="tight", pad_inches=0.04, facecolor="white")
-    plt.close(fig)
+    try:
+        fig.savefig(path, dpi=preset["dpi"], bbox_inches="tight", pad_inches=0.04, facecolor="white")
+    finally:
+        plt.close(fig)
 
 
 def publication_figure_paths(folder, stem):
@@ -3072,9 +3145,13 @@ class MultiROIGUI:
         self.image_paths = []
         self.loaded_image_folder = None
         self.loaded_image_sequence_fingerprint = None
-        self.first_raw = None
-        self.first_img8 = None  # 当前预览帧的 8-bit 图像，用于显示、画 ROI、纹理检查
+        self.preview_raw = None
+        self.preview_img8 = None  # 当前预览帧的 8-bit 图像，用于画布预览与交互绘制
+        self.reference_raw = None
+        self.reference_img8 = None  # 当前起始/参考帧（start_idx）对应的原始/8-bit 图像
+        self._reference_cache_key = None
         self.current_fullres_img8 = None  # 用于动态缩放的原始分辨率图
+        self._canvas_mask_overlay_rgb = None  # 遮罩预览的原始分辨率彩色叠加图
         self.display_img = None
         self.display_scale = 1.0
         self.photo = None
@@ -3133,12 +3210,6 @@ class MultiROIGUI:
         self.zoom_factor = 1.0          # 相对于原始图像的缩放倍率
         self.auto_fit_enabled = True    # 是否跟随窗口自动适应
 
-        if hasattr(self, "preview_scale_var"):
-            try:
-                self.preview_scale_var.set("")
-            except Exception:
-                pass
-
         self.preview_frame_1based = tk.IntVar(value=1)
         self.start_frame_1based = tk.IntVar(value=1)
         self.end_frame_1based = tk.IntVar(value=1)
@@ -3154,10 +3225,15 @@ class MultiROIGUI:
         self.next_group_idx = 1
         self.group_name_var = tk.StringVar(value="")
 
+        self._state_lock = threading.Lock()
         self.is_processing = False
         self._completion_pending = False
         self._run_generation = 0
         self._active_run_token = None
+        self._worker_thread = None
+        self._closing = False
+        self._ui_poll_after_id = None
+        self._group_context_menu = None
         self._worker_context = threading.local()
         self.tooltips = []
         self.ui_queue = queue.Queue()
@@ -3221,8 +3297,154 @@ class MultiROIGUI:
         self.configure_final_window_limits()
         self._compact_control_layout = None
         self.root.bind("<Configure>", self._on_control_window_configure, add="+")
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_window)
         self._on_control_window_configure()
         self.start_ui_queue_polling()
+
+    @property
+    def first_raw(self):
+        """Backward-compatible alias for the currently previewed raw frame."""
+        return getattr(self, "preview_raw", None)
+
+    @first_raw.setter
+    def first_raw(self, value):
+        self.preview_raw = value
+
+    @property
+    def first_img8(self):
+        """Backward-compatible alias for the currently previewed 8-bit frame."""
+        return getattr(self, "preview_img8", None)
+
+    @first_img8.setter
+    def first_img8(self, value):
+        self.preview_img8 = value
+
+    def _state_lock_ctx(self):
+        lock = getattr(self, "_state_lock", None)
+        return lock if lock is not None else contextlib.nullcontext()
+
+    def _invalidate_reference_cache(self):
+        self.reference_raw = None
+        self.reference_img8 = None
+        self._reference_cache_key = None
+
+    def _get_reference_frame_images(self, start_idx=None):
+        """Return ``(reference_raw, reference_img8)`` for ``image_paths[start_idx]``.
+
+        Never substitutes a non-reference preview frame when ``start_idx`` is valid.
+        Falls back to ``preview_raw``/``preview_img8`` only when tests inject an
+        in-memory image without loading ``image_paths``.
+        """
+        if not getattr(self, "image_paths", None):
+            return getattr(self, "preview_raw", None), getattr(self, "preview_img8", None)
+
+        if start_idx is None:
+            start_1based, err = self._safe_int_var(self.start_frame_1based)
+            if err is not None:
+                return None, None
+            start_idx = start_1based - 1
+
+        if start_idx < 0 or start_idx >= len(self.image_paths):
+            return None, None
+
+        path = self.image_paths[start_idx]
+        cache_key = (
+            int(start_idx),
+            str(path),
+            getattr(self, "loaded_image_sequence_fingerprint", None),
+        )
+        if (
+            getattr(self, "_reference_cache_key", None) == cache_key
+            and getattr(self, "reference_raw", None) is not None
+            and getattr(self, "reference_img8", None) is not None
+        ):
+            return self.reference_raw, self.reference_img8
+
+        if (
+            getattr(self, "current_preview_index", None) == start_idx
+            and getattr(self, "preview_raw", None) is not None
+            and getattr(self, "preview_img8", None) is not None
+        ):
+            raw = self.preview_raw
+            img8 = self.preview_img8
+        else:
+            raw = read_gray_image(path)
+            img8 = normalize_to_uint8(raw)
+
+        self.reference_raw = raw
+        self.reference_img8 = img8
+        self._reference_cache_key = cache_key
+        return raw, img8
+
+    def _on_close_window(self):
+        with self._state_lock_ctx():
+            busy = bool(self.is_processing or self._completion_pending)
+        busy = (
+            busy
+            or bool(getattr(getattr(self, "agent_page", None), "_busy", False))
+            or bool(getattr(getattr(self, "campaign_page", None), "_busy", False))
+        )
+        if busy:
+            if not messagebox.askyesno(
+                "确认退出",
+                "当前仍有后台分析任务正在运行，强行关闭可能中断结果写入。确定要退出吗？",
+            ):
+                return
+        self._closing = True
+        for attr in ("_ui_poll_after_id", "_resize_after_id"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+        menu = getattr(self, "_group_context_menu", None)
+        if menu is not None:
+            try:
+                menu.destroy()
+            except tk.TclError:
+                pass
+            self._group_context_menu = None
+        try:
+            self._dispose_viewer_plot()
+        except tk.TclError:
+            pass
+        for tip in list(getattr(self, "tooltips", [])):
+            try:
+                tip.dispose()
+            except tk.TclError:
+                pass
+        for page_attr in ("agent_page", "campaign_page"):
+            page = getattr(self, page_attr, None)
+            if page is None:
+                continue
+            for hook in ("shutdown", "close"):
+                fn = getattr(page, hook, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        if sys.stderr is not None:
+                            traceback.print_exc()
+                    break
+            try:
+                if page.winfo_exists():
+                    page.destroy()
+            except tk.TclError:
+                pass
+        visual = getattr(self, "visual_window", None)
+        if visual is not None:
+            try:
+                if visual.winfo_exists():
+                    visual.destroy()
+            except tk.TclError:
+                pass
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except tk.TclError:
+            pass
 
     # ---------- UI ----------
 
@@ -3419,10 +3641,15 @@ class MultiROIGUI:
         return explanation if region == "heading" else explanation + "\n" + action
 
     def _on_gui_state_change(self, *args):
+        if getattr(self, "_closing", False):
+            return
         try:
             self.update_workflow_action_states()
-        except Exception:
+        except tk.TclError:
             pass
+        except Exception:
+            if sys.stderr is not None:
+                traceback.print_exc()
 
     def bind_common_shortcuts(self):
         for window in (self.root, self.visual_window):
@@ -3476,17 +3703,30 @@ class MultiROIGUI:
 
     def save_recent_paths(self):
         try:
+            pyramid_levels = int(self.dic_pyramid_levels.get())
+            if not (1 <= pyramid_levels <= 8):
+                pyramid_levels = 1
+        except (tk.TclError, TypeError, ValueError):
+            pyramid_levels = 1
+        try:
+            pyramid_scale = float(self.dic_pyramid_scale.get())
+            if not math.isfinite(pyramid_scale) or not (0.0 < pyramid_scale < 1.0):
+                pyramid_scale = 0.5
+        except (tk.TclError, TypeError, ValueError):
+            pyramid_scale = 0.5
+        try:
             path = Path(self._recent_config_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "image_dir": self.recent_image_dir,
                 "output_dir": self.recent_output_dir,
-                "pyramid_levels": int(self.dic_pyramid_levels.get()),
-                "pyramid_scale": float(self.dic_pyramid_scale.get()),
+                "pyramid_levels": pyramid_levels,
+                "pyramid_scale": pyramid_scale,
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError) as exc:
+            if sys.stderr is not None:
+                print(f"Warning: failed to save recent paths: {exc}", file=sys.stderr)
 
     def remember_recent_paths(self, image_dir=None, output_dir=None):
         if image_dir:
@@ -3539,7 +3779,7 @@ class MultiROIGUI:
 
     def build_preflight_items(self, update_display=True):
         items = []
-        has_sequence = bool(self.image_paths) and self.first_img8 is not None
+        has_sequence = bool(self.image_paths) and self.preview_img8 is not None
         frame_count = len(self.image_paths)
 
         if has_sequence:
@@ -3558,19 +3798,26 @@ class MultiROIGUI:
         elif start is not None and end is not None:
             items.append(self._preflight_item("ok", "分析范围", f"第 {start} 到 {end} 帧。"))
 
+        ref_img8 = None
+        if has_sequence and start_err is None and 1 <= start <= frame_count:
+            try:
+                _ref_raw, ref_img8 = self._get_reference_frame_images(start - 1)
+            except Exception as exc:
+                items.append(self._preflight_item("block", "参考帧", f"无法读取第 {start} 帧参考图像：{exc}"))
+
         is_ff = self.is_fullfield_mode()
         if is_ff:
             field_roi = self.field_roi
             if field_roi is None:
                 items.append(self._preflight_item("block", "全场 ROI", "请在参考帧拖出全场分析 ROI。"))
-            elif has_sequence and not rect_is_inside_image(field_roi, self.first_img8.shape):
+            elif ref_img8 is not None and not rect_is_inside_image(field_roi, ref_img8.shape):
                 items.append(self._preflight_item("block", "全场 ROI", "全场 ROI 必须完整位于参考图像内。"))
             else:
                 x, y, w, h = field_roi
                 items.append(self._preflight_item("ok", "全场 ROI", f"ROI {w}×{h} px @ ({x},{y})。"))
 
-            if field_roi is not None and has_sequence and rect_is_inside_image(field_roi, self.first_img8.shape):
-                metrics, texture_code = self._core_texture_metrics_and_code(field_roi)
+            if field_roi is not None and ref_img8 is not None and rect_is_inside_image(field_roi, ref_img8.shape):
+                metrics, texture_code = self._core_texture_metrics_and_code(field_roi, image=ref_img8)
                 if texture_code is not None:
                     level = "block" if texture_code == "AMBIGUOUS_TEXTURE" else "warn"
                     items.append(
@@ -3626,12 +3873,12 @@ class MultiROIGUI:
                     items.append(self._preflight_item("block", "应变窗口", "应变窗口必须 >= 3。"))
                 elif window % 2 == 0:
                     items.append(self._preflight_item("block", "应变窗口", "应变窗口必须为奇数；当前偶数值会改变实际窗口。"))
-                elif smooth_sigma < 0:
-                    items.append(self._preflight_item("block", "高斯平滑", "高斯平滑 σ 不能为负。"))
+                elif not math.isfinite(smooth_sigma) or smooth_sigma < 0:
+                    items.append(self._preflight_item("block", "高斯平滑", "高斯平滑 σ 必须为非负有限数字。"))
                 elif solver not in DIC_SOLVERS:
                     items.append(self._preflight_item("block", "求解器", "请选择 IC-GN 或 IC-LM。"))
-                elif field_roi is not None and has_sequence:
-                    X, Y = build_poi_grid(field_roi, subset, step, self.first_img8.shape)
+                elif field_roi is not None and ref_img8 is not None:
+                    X, Y = build_poi_grid(field_roi, subset, step, ref_img8.shape)
                     if not poi_grid_is_usable(X, Y, min_rows=3, min_cols=3):
                         items.append(self._preflight_item("block", "POI 网格", "当前 ROI / 子集 / 步长至少需要 3×3 个可分析的 2D POI。"))
                     else:
@@ -3646,12 +3893,50 @@ class MultiROIGUI:
                     items.append(self._preflight_item("ok", "DIC 参数", f"subset={subset} px, step={step} px, window={window}, {solver}。"))
             except (tk.TclError, TypeError, ValueError):
                 items.append(self._preflight_item("block", "DIC 参数", "子集、步长、应变窗口和高斯平滑必须是有效数字。"))
+
+            try:
+                search_radius = int(self.dic_search_radius.get())
+                zncc_min = float(self.dic_zncc_min.get())
+                pyramid_levels = int(self.dic_pyramid_levels.get())
+                pyramid_scale = float(self.dic_pyramid_scale.get())
+                strain_degree = int(self.dic_strain_degree.get())
+                outlier_threshold = float(self.dic_outlier_threshold.get())
+            except (tk.TclError, TypeError, ValueError):
+                items.append(self._preflight_item("block", "DIC 高级参数", "搜索半径、ZNCC 下限、金字塔、拟合阶次与异常位移阈值必须是有效数字。"))
+            else:
+                if search_radius < 1:
+                    items.append(self._preflight_item("block", "DIC 搜索半径", "DIC 搜索半径必须 > 0。"))
+                if not math.isfinite(zncc_min) or not (0.0 <= zncc_min <= 1.0):
+                    items.append(self._preflight_item("block", "ZNCC 下限", "ZNCC 下限必须位于 0 到 1 之间。"))
+                if not (1 <= pyramid_levels <= 8):
+                    items.append(self._preflight_item("block", "金字塔层数", "金字塔层数必须位于 1 到 8 之间。"))
+                if not math.isfinite(pyramid_scale) or not (0.0 < pyramid_scale < 1.0):
+                    items.append(self._preflight_item("block", "金字塔缩放", "金字塔缩放必须位于 0 到 1 之间（不含端点）。"))
+                if strain_degree not in (1, 2):
+                    items.append(self._preflight_item("block", "拟合阶次", "拟合最高阶次必须为 1 或 2。"))
+                if not math.isfinite(outlier_threshold) or outlier_threshold < 0.0:
+                    items.append(self._preflight_item("block", "异常位移阈值", "异常位移阈值必须为非负有限数字。"))
+
+            try:
+                mask_settings = self.dic_mask_settings()
+            except RuntimeError as exc:
+                items.append(self._preflight_item("block", "试样遮罩", str(exc)))
+            else:
+                if mask_settings["mode"] == "file":
+                    mask_path = mask_settings.get("path") or ""
+                    if not mask_path or not Path(mask_path).is_file():
+                        items.append(self._preflight_item("block", "试样遮罩", "导入遮罩模式需要选择有效的遮罩图像文件。"))
+
+            try:
+                self.dic_display_options()
+            except RuntimeError as exc:
+                items.append(self._preflight_item("block", "显示设置", str(exc)))
         elif self.roi_groups:
             items.append(self._preflight_item("ok", "ROI 组", f"已添加 {len(self.roi_groups)} 组。"))
-            if has_sequence:
+            if ref_img8 is not None:
                 for group in self.roi_groups:
                     for label, rect in (("ROI1", group.get("roi1")), ("ROI2", group.get("roi2"))):
-                        metrics, texture_code = self._core_texture_metrics_and_code(rect)
+                        metrics, texture_code = self._core_texture_metrics_and_code(rect, image=ref_img8)
                         if texture_code is None:
                             continue
                         level = "block" if texture_code == "AMBIGUOUS_TEXTURE" else "warn"
@@ -3666,12 +3951,25 @@ class MultiROIGUI:
             items.append(self._preflight_item("block", "ROI 组", "请至少添加一组 ROI1/ROI2。"))
 
         if (not is_ff) and self.roi_groups and start is not None:
+            missing_ref = [
+                g["name"]
+                for g in self.roi_groups
+                if g.get("reference_frame_1based") is None
+            ]
             mismatched = [
                 g["name"]
                 for g in self.roi_groups
                 if g.get("reference_frame_1based") is not None and int(g.get("reference_frame_1based")) != start
             ]
-            if mismatched:
+            if missing_ref:
+                items.append(
+                    self._preflight_item(
+                        "block",
+                        "参考帧",
+                        f"ROI 组 {', '.join(missing_ref)} 缺少参考帧记录，请载入后在当前起始/参考帧重画并更新。",
+                    )
+                )
+            elif mismatched:
                 items.append(
                     self._preflight_item(
                         "block",
@@ -3743,16 +4041,28 @@ class MultiROIGUI:
     def refresh_preflight_panel(self):
         return self.build_preflight_items(update_display=True)
 
+    def _safe_texture_thresholds(self):
+        """Read 1D texture thresholds safely, falling back to core defaults in fullfield or mid-edit."""
+        if self.is_fullfield_mode():
+            return 8.0, 25.0, 0.20
+        defaults = (8.0, 25.0, 0.20)
+        vars_ = (self.min_texture_std, self.min_texture_contrast, self.max_saturated_frac)
+        resolved = []
+        for var, default in zip(vars_, defaults):
+            try:
+                val = float(var.get())
+                resolved.append(val if math.isfinite(val) else default)
+            except (tk.TclError, TypeError, ValueError):
+                resolved.append(default)
+        return tuple(resolved)
+
     def _roi_texture_status_text(self, rect):
-        if self.first_img8 is None or rect is None:
+        img8 = self.preview_img8
+        if img8 is None or rect is None:
             return "未检查"
-        metrics = roi_texture_metrics(self.first_img8, rect)
-        ok = texture_is_ok(
-            metrics,
-            self.min_texture_std.get(),
-            self.min_texture_contrast.get(),
-            self.max_saturated_frac.get(),
-        )
+        metrics = roi_texture_metrics(img8, rect)
+        min_std, min_contrast, max_sat = self._safe_texture_thresholds()
+        ok = texture_is_ok(metrics, min_std, min_contrast, max_sat)
         status = "良好" if ok else "偏弱"
         return f"{status}(std={metrics['std_gray']:.1f}, P95-P5={metrics['contrast_p95_p5']:.1f})"
 
@@ -3845,14 +4155,21 @@ class MultiROIGUI:
 
     def get_float_setting(self, var, label):
         try:
-            return float(var.get())
-        except (tk.TclError, TypeError, ValueError):
-            raise RuntimeError(f"{label}必须是数字。")
+            value = float(var.get())
+        except tk.TclError as exc:
+            if "not a number" in str(exc).lower():
+                raise RuntimeError(f"{label}必须是有限数字。") from exc
+            raise RuntimeError(f"{label}必须是数字。") from exc
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{label}必须是数字。") from exc
+        if not math.isfinite(value):
+            raise RuntimeError(f"{label}必须是有限数字。")
+        return value
 
     def configure_ui_style(self):
         self.style = ttk.Style(self.root)
         try:
-            if "clam" in self.style.theme_names():
+            if "clam" in self.style.theme_names() and self.style.theme_use() != "clam":
                 self.style.theme_use("clam")
         except tk.TclError:
             pass
@@ -4004,16 +4321,26 @@ class MultiROIGUI:
             self._update_preflight_text()
         if hasattr(self, "controls_canvas"):
             self.controls_canvas.configure(bg=self.card_bg, highlightbackground=self.border_color)
-        if hasattr(self, "agent_page"):
+        if hasattr(self, "campaign_result_canvas"):
+            self.campaign_result_canvas.configure(background=self.card_bg)
+        if hasattr(self, "agent_page") and hasattr(self.agent_page, "apply_theme"):
             self.agent_page.apply_theme()
+        if hasattr(self, "campaign_page"):
+            if hasattr(self.campaign_page, "apply_theme"):
+                self.campaign_page.apply_theme()
+            elif hasattr(self.campaign_page, "_draw_result_curve"):
+                try:
+                    self.campaign_page._draw_result_curve()
+                except Exception as exc:
+                    self.log(f"刷新批次曲线主题失败：{exc}")
         self._draw_image_empty_state()
 
         # 刷新结果预览器（matplotlib）
         if (hasattr(self, "results_df") and self.results_df is not None) or getattr(self, "dic_last_field", None) is not None:
             try:
                 self._refresh_viewer_for_dark_mode()
-            except Exception:
-                pass
+            except Exception as exc:
+                self.log(f"刷新暗色主题预览图失败：{exc}")
 
         self.root.update_idletasks()
         if hasattr(self, "dark_mode_btn"):
@@ -4030,8 +4357,8 @@ class MultiROIGUI:
         if hasattr(self, "viewer_figure") and self.viewer_figure is not None:
             try:
                 self._rebuild_viewer_plot()
-            except Exception:
-                pass
+            except Exception as exc:
+                self.log(f"重绘结果预览图失败：{exc}")
 
     def build_ui(self):
         self.root.configure(background=self.ui_bg)
@@ -4216,7 +4543,7 @@ class MultiROIGUI:
         campaign_results.add(campaign_overlay_frame, weight=1)
         campaign_plot_frame.columnconfigure(0, weight=1)
         campaign_plot_frame.rowconfigure(0, weight=1)
-        self.campaign_result_canvas = tk.Canvas(campaign_plot_frame, background="#ffffff", height=390,
+        self.campaign_result_canvas = tk.Canvas(campaign_plot_frame, background=self.card_bg, height=390,
                                                 highlightthickness=0)
         self.campaign_result_canvas.grid(row=0, column=0, sticky="nsew")
         self.add_tooltip(self.campaign_result_canvas,
@@ -4248,10 +4575,11 @@ class MultiROIGUI:
                   wraplength=700, justify=tk.LEFT).grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
     def _on_control_tab_changed(self, _event=None):
-        """The automatic project owns its source and run controls."""
-        automatic = self.control_notebook.select() == str(self.agent_page)
+        """The automatic and campaign tabs own their own source and run controls."""
+        selected = self.control_notebook.select()
+        standalone = selected in (str(self.agent_page), str(self.campaign_page))
         for frame in (self.project_frame, self.run_frame):
-            frame.grid_remove() if automatic else frame.grid()
+            frame.grid_remove() if standalone else frame.grid()
 
     def _control_workspace_help(self, event=None):
         try:
@@ -4857,19 +5185,31 @@ class MultiROIGUI:
         self.fullfield_frame.grid_remove()
 
     def dic_mask_settings(self):
-        mode = {"矩形 ROI": "none", "自动纹理": "auto", "导入遮罩": "file"}[self.dic_mask_mode.get()]
+        mode_label = self.dic_mask_mode.get()
+        mode_map = {"矩形 ROI": "none", "自动纹理": "auto", "导入遮罩": "file"}
+        if mode_label not in mode_map:
+            raise RuntimeError(f"未知的试样遮罩模式：{mode_label}")
+        mode = mode_map[mode_label]
         return {"mode": mode, "path": self.dic_mask_path.get().strip() if mode == "file" else None,
                 "texture_threshold": 3.0, "exclusions": [list(rect) for rect in self.dic_mask_exclusions]}
 
     def dic_display_options(self):
+        bg_label = self.dic_view_background.get()
+        bg_map = {"无底图": "none", "参考图": "reference", "变形图": "deformed"}
+        if bg_label not in bg_map:
+            raise RuntimeError(f"未知的显示底图选项：{bg_label}")
+        color_label = self.dic_color_mode.get()
+        color_map = {"数据范围": "range", "零点对称": "symmetric", "手动范围": "manual"}
+        if color_label not in color_map:
+            raise RuntimeError(f"未知的色标范围模式：{color_label}")
         options = {"style": "contour" if self.dic_display_style.get() == "连续云图" else "points",
-                   "background": {"无底图": "none", "参考图": "reference", "变形图": "deformed"}[self.dic_view_background.get()],
-                   "color_mode": {"数据范围": "range", "零点对称": "symmetric", "手动范围": "manual"}[self.dic_color_mode.get()],
+                   "background": bg_map[bg_label],
+                   "color_mode": color_map[color_label],
                    "percent": bool(self.dic_percent.get()), "cmap": self.dic_colormap.get(), "alpha": .65}
         if options["color_mode"] == "manual":
             try:
                 options["vmin"], options["vmax"] = float(self.dic_color_min.get()), float(self.dic_color_max.get())
-                if not np.isfinite([options["vmin"],options["vmax"]]).all() or options["vmin"] >= options["vmax"]:
+                if not np.isfinite([options["vmin"], options["vmax"]]).all() or options["vmin"] >= options["vmax"]:
                     raise ValueError()
             except ValueError as exc:
                 raise RuntimeError("手动色标需要有限且递增的最小值和最大值。") from exc
@@ -4888,19 +5228,42 @@ class MultiROIGUI:
         if self.is_processing or self._completion_pending or self.field_roi is None:
             return
         try:
-            index = int(self.field_roi_reference_frame_1based)-1
-            raw = read_gray_image(self.image_paths[index])
-            reference = normalize_to_uint8(raw)
+            if self.field_roi_reference_frame_1based is None:
+                raise RuntimeError("全场 ROI 缺少绘制参考帧记录，请先在参考帧重画全场 ROI。")
+            index = int(self.field_roi_reference_frame_1based) - 1
+            if not self.image_paths or index < 0 or index >= len(self.image_paths):
+                raise RuntimeError("全场 ROI 的参考帧超出已加载图像序列范围。")
+            start, start_err = self._safe_int_var(self.start_frame_1based)
+            if start_err is None and start - 1 == index:
+                raw, reference = self._get_reference_frame_images(index)
+            else:
+                raw = read_gray_image(self.image_paths[index])
+                reference = normalize_to_uint8(raw)
             mask, record, _ = _core._resolve_specimen_mask(reference, self.field_roi, {"mask": self.dic_mask_settings()})
             self.current_preview_index = index
-            self.current_fullres_img8 = reference
+            self.preview_frame_1based.set(index + 1)
+            self.preview_raw = raw
+            self.preview_img8 = reference
+            self.current_fullres_img8 = reference.copy()
             self._canvas_shows_field_overlay = False
             rgb = cv2.cvtColor(reference, cv2.COLOR_GRAY2RGB)
             if mask is not None:
-                rgb[~mask] = (.45*rgb[~mask]+.55*np.array([220,55,55])).astype(np.uint8)
-            height, width = reference.shape
-            self.display_img = cv2.resize(rgb, (max(1,round(width*self.display_scale)), max(1,round(height*self.display_scale))))
-            self.show_image()
+                rgb[~mask] = (.45 * rgb[~mask] + .55 * np.array([220, 55, 55])).astype(np.uint8)
+            self._canvas_mask_overlay_rgb = rgb
+            if getattr(self, "auto_fit_enabled", True):
+                self.display_img = None
+                self._rescale_display_to_current_size()
+                if self.display_img is None:
+                    height, width = rgb.shape[:2]
+                    scale = min(1.0, 1280.0 / max(width, 1), 820.0 / max(height, 1))
+                    disp_w = max(1, int(round(width * scale)))
+                    disp_h = max(1, int(round(height * scale)))
+                    self.display_img = cv2.resize(rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+                    self.display_scale = disp_w / max(width, 1)
+                    self.zoom_factor = self.display_scale
+                    self.show_image()
+            else:
+                self._apply_manual_zoom()
             self._show_image_workspace()
             self.log(f"遮罩预览：{record.get('included_pixels', reference.size)} 个保留像素；排除区 {len(self.dic_mask_exclusions)} 个。请核对孔洞、背景和试样边缘。")
         except Exception as exc:
@@ -4938,9 +5301,18 @@ class MultiROIGUI:
                     self.log("分析进行中，已保持当前模式。")
             return
         self._committed_analysis_mode = requested
+        self._drawing_mask_exclusion = False
+        self.drag_start = None
+        if getattr(self, "temp_rect_id", None) is not None and hasattr(self, "canvas"):
+            try:
+                self.canvas.delete(self.temp_rect_id)
+            except tk.TclError:
+                pass
+            self.temp_rect_id = None
         is_ff = self.is_fullfield_mode()
         previous_kind = getattr(self, "_viewer_kind", "extensometer")
         target_kind = "fullfield" if is_ff else "extensometer"
+        canvas_restored = False
         if previous_kind != target_kind and (
             getattr(self, "viewer_figure", None) is not None
             or getattr(self, "results_df", None) is not None
@@ -4952,6 +5324,12 @@ class MultiROIGUI:
             if hasattr(self, "clear_viewer"):
                 self.clear_viewer(keep_placeholder=True)
             self._restore_sequence_preview()
+            canvas_restored = True
+        if not is_ff and getattr(self, "_canvas_mask_overlay_rgb", None) is not None:
+            self._canvas_mask_overlay_rgb = None
+            if not canvas_restored:
+                self._restore_sequence_preview()
+                canvas_restored = True
         if hasattr(self, "fullfield_frame"):
             if is_ff:
                 self.fullfield_frame.grid()
@@ -5008,8 +5386,10 @@ class MultiROIGUI:
             try:
                 self.controls_panel.update_idletasks()
                 self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox("all"))
-            except Exception:
+            except tk.TclError:
                 pass
+        if not canvas_restored and getattr(self, "display_img", None) is not None and hasattr(self, "canvas"):
+            self.show_image()
         self.update_workflow_action_states()
 
     def _build_advanced_controls(self):
@@ -5628,11 +6008,16 @@ class MultiROIGUI:
     def log_user_error(self, context, exc, details=None):
         message = str(exc).strip() or exc.__class__.__name__
         self.log(f"{context}失败：{message}")
-        self.log("请检查输入路径、图像文件、ROI 和参数设置；详细调试信息已输出到控制台。")
-        if details:
-            print(details)
+        has_console = sys.stderr is not None or sys.stdout is not None
+        if has_console:
+            self.log("请检查输入路径、图像文件、ROI 和参数设置；详细调试信息已输出到控制台。")
+            if details:
+                stream = sys.stderr if sys.stderr is not None else sys.stdout
+                print(details, file=stream)
+            elif sys.stderr is not None:
+                traceback.print_exc()
         else:
-            traceback.print_exc()
+            self.log("请检查输入路径、图像文件、ROI 和参数设置。")
 
     def show_completion_and_open_output_folder(self, done_msg, output_dir):
         messagebox.showinfo("完成", done_msg)
@@ -5651,6 +6036,7 @@ class MultiROIGUI:
         self.field_roi = None
         self.dic_mask_exclusions = []
         self._drawing_mask_exclusion = False
+        self._canvas_mask_overlay_rgb = None
         self.dic_mask_path.set("")
         self.dic_mask_mode.set("矩形 ROI")
         self.roi1_reference_frame_1based = None
@@ -5735,9 +6121,13 @@ class MultiROIGUI:
             "image_paths": list(self.image_paths),
             "loaded_image_folder": self.loaded_image_folder,
             "loaded_image_sequence_fingerprint": self.loaded_image_sequence_fingerprint,
-            "first_raw": self.first_raw,
-            "first_img8": self.first_img8,
+            "preview_raw": self.preview_raw,
+            "preview_img8": self.preview_img8,
+            "reference_raw": self.reference_raw,
+            "reference_img8": self.reference_img8,
+            "reference_cache_key": self._reference_cache_key,
             "current_fullres_img8": self.current_fullres_img8,
+            "canvas_mask_overlay_rgb": self._canvas_mask_overlay_rgb,
             "display_img": self.display_img,
             "display_scale": self.display_scale,
             "photo": self.photo,
@@ -5763,6 +6153,7 @@ class MultiROIGUI:
             self.end_frame_1based.set(n)
 
         self.image_paths = new_image_paths
+        self._invalidate_reference_cache()
         # Preview is display-only and may be brought into range for a valid
         # first render.  Start/end remain untouched so out-of-range input is
         # surfaced by preflight instead of silently clamped.
@@ -5775,6 +6166,8 @@ class MultiROIGUI:
                 self.clear_sequence_dependent_state()
             self.loaded_image_folder = folder_key
             self.loaded_image_sequence_fingerprint = new_fingerprint
+            if 1 <= start <= n:
+                self._get_reference_frame_images(start - 1)
             self.show_image()
             self.log(f"找到 {n} 张图像。")
             self.log(f"当前预览：第 {self.current_preview_index + 1} 帧 / 共 {n} 帧")
@@ -5784,9 +6177,13 @@ class MultiROIGUI:
             self.image_paths = old_state["image_paths"]
             self.loaded_image_folder = old_state["loaded_image_folder"]
             self.loaded_image_sequence_fingerprint = old_state["loaded_image_sequence_fingerprint"]
-            self.first_raw = old_state["first_raw"]
-            self.first_img8 = old_state["first_img8"]
+            self.preview_raw = old_state["preview_raw"]
+            self.preview_img8 = old_state["preview_img8"]
+            self.reference_raw = old_state["reference_raw"]
+            self.reference_img8 = old_state["reference_img8"]
+            self._reference_cache_key = old_state["reference_cache_key"]
             self.current_fullres_img8 = old_state["current_fullres_img8"]
+            self._canvas_mask_overlay_rgb = old_state["canvas_mask_overlay_rgb"]
             self.display_img = old_state["display_img"]
             self.display_scale = old_state["display_scale"]
             self.photo = old_state["photo"]
@@ -5811,10 +6208,23 @@ class MultiROIGUI:
         self.preview_frame_1based.set(index0 + 1)
 
         path = self.image_paths[index0]
-        self.first_raw = read_gray_image(path)
-        self.first_img8 = normalize_to_uint8(self.first_raw)
-        self.current_fullres_img8 = self.first_img8.copy()
+        self.preview_raw = read_gray_image(path)
+        self.preview_img8 = normalize_to_uint8(self.preview_raw)
+        self.current_fullres_img8 = self.preview_img8.copy()
+        self._canvas_mask_overlay_rgb = None
         self._canvas_shows_field_overlay = False
+
+        # Keep the cached reference frame strictly bound to start_idx; only
+        # refresh it here when the user is previewing the current start frame.
+        start_val, start_err = self._safe_int_var(self.start_frame_1based)
+        if start_err is None and start_val - 1 == index0:
+            self.reference_raw = self.preview_raw
+            self.reference_img8 = self.preview_img8
+            self._reference_cache_key = (
+                int(index0),
+                str(path),
+                getattr(self, "loaded_image_sequence_fingerprint", None),
+            )
 
         self.display_img = None
         self.display_scale = 1.0
@@ -5823,7 +6233,7 @@ class MultiROIGUI:
         self.root.update_idletasks()
         self._rescale_display_to_current_size()
         if self.display_img is None:
-            self.display_img, self.display_scale = get_display_image(self.first_img8, max_w=1280, max_h=820)
+            self.display_img, self.display_scale = get_display_image(self.preview_img8, max_w=1280, max_h=820)
             self.zoom_factor = self.display_scale
             self.show_image()
         self._update_zoom_label()
@@ -5833,7 +6243,7 @@ class MultiROIGUI:
         self._bind_image_resize_handler()
         try:
             self.root.after_idle(self._rescale_display_to_current_size)
-        except Exception:
+        except tk.TclError:
             pass
         start, _ = self._safe_int_var(self.start_frame_1based)
         end, _ = self._safe_int_var(self.end_frame_1based)
@@ -5843,7 +6253,7 @@ class MultiROIGUI:
         )
         self._update_preview_scale_label()
         self.log(f"已显示第 {index0 + 1} 帧：{path}")
-        self.log(f"图像尺寸：{self.first_img8.shape[1]} × {self.first_img8.shape[0]} px")
+        self.log(f"图像尺寸：{self.preview_img8.shape[1]} × {self.preview_img8.shape[0]} px")
 
     def go_to_preview_frame(self):
         if not self.image_paths:
@@ -5881,9 +6291,9 @@ class MultiROIGUI:
         )
         if has_reference_state:
             msg = (
-                f"当前已有 {len(self.roi_groups)} 组 ROI 或正在编辑的 ROI。\\n\\n"
-                f"这些 ROI 应该是在当前起始/参考帧第 {old_start if old_start is not None else '未知'} 帧上定义的。\\n"
-                f"如果把起始/参考帧改为第 {new_start_1based} 帧，已有 ROI 模板可能不再对应。\\n\\n"
+                f"当前已有 {len(self.roi_groups)} 组 ROI 或正在编辑的 ROI。\n\n"
+                f"这些 ROI 应该是在当前起始/参考帧第 {old_start if old_start is not None else '未知'} 帧上定义的。\n"
+                f"如果把起始/参考帧改为第 {new_start_1based} 帧，已有 ROI 模板可能不再对应。\n\n"
                 f"建议清空已有 ROI、结果和 QC，并在新参考帧上重画。是否清空并修改起始帧？"
             )
             if not messagebox.askyesno("修改起始/参考帧", msg):
@@ -5902,6 +6312,7 @@ class MultiROIGUI:
             return
 
         self.start_frame_1based.set(new_start)
+        self._get_reference_frame_images(new_start - 1)
         end, end_err = self._safe_int_var(self.end_frame_1based)
         if end_err is not None or end < new_start:
             self.end_frame_1based.set(len(self.image_paths))
@@ -6011,6 +6422,24 @@ class MultiROIGUI:
         self.image_frame.bind("<Configure>", on_image_frame_configure, add="+")
         self.canvas.bind("<Configure>", on_image_frame_configure, add="+")
 
+    def _canvas_source_rgb(self):
+        if (
+            getattr(self, "_canvas_mask_overlay_rgb", None) is not None
+            and self.is_fullfield_mode()
+            and not getattr(self, "_canvas_shows_field_overlay", False)
+        ):
+            return self._canvas_mask_overlay_rgb
+        if self.current_fullres_img8 is None:
+            return None
+        return cv2.cvtColor(self.current_fullres_img8, cv2.COLOR_GRAY2RGB)
+
+    @staticmethod
+    def _zoom_bounds(width, height):
+        max_dim = max(int(width), int(height), 1)
+        min_zoom = min(1.0, max(0.05, 50.0 / max_dim))
+        max_zoom = max(1.0, min(8.0, 6144.0 / max_dim))
+        return min_zoom, max_zoom
+
     def _rescale_display_to_current_size(self):
         """根据当前图像区可用空间重新计算显示图像（支持窗口拉大获得更高细节）。"""
         if self.current_fullres_img8 is None:
@@ -6024,13 +6453,33 @@ class MultiROIGUI:
             self.root.update_idletasks()
             cw = max(200, self.canvas.winfo_width())
             ch = max(150, self.canvas.winfo_height())
-        except Exception:
+        except tk.TclError:
             cw, ch = 900, 620
 
         target_w = max(200, cw - 8)
         target_h = max(150, ch - 8)
 
-        new_disp, new_scale = get_display_image(self.current_fullres_img8, max_w=target_w, max_h=target_h)
+        mask_rgb = (
+            self._canvas_mask_overlay_rgb
+            if (
+                getattr(self, "_canvas_mask_overlay_rgb", None) is not None
+                and self.is_fullfield_mode()
+                and not getattr(self, "_canvas_shows_field_overlay", False)
+            )
+            else None
+        )
+        if mask_rgb is not None:
+            mh, mw = mask_rgb.shape[:2]
+            new_scale = min(1.0, target_w / max(mw, 1), target_h / max(mh, 1))
+            if new_scale < 1.0:
+                disp_w = max(1, int(mw * new_scale))
+                disp_h = max(1, int(mh * new_scale))
+                new_disp = cv2.resize(mask_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+            else:
+                new_disp = mask_rgb.copy()
+                new_scale = 1.0
+        else:
+            new_disp, new_scale = get_display_image(self.current_fullres_img8, max_w=target_w, max_h=target_h)
 
         old_h, old_w = (self.display_img.shape[:2] if self.display_img is not None else (0, 0))
         if self.display_img is None or abs(new_disp.shape[0] - old_h) > 2 or abs(new_disp.shape[1] - old_w) > 2:
@@ -6066,11 +6515,13 @@ class MultiROIGUI:
 
     def zoom_image(self, factor):
         """按倍率手动缩放（支持工具栏 +/- 按钮）。"""
-        if self.current_fullres_img8 is None:
+        if self.current_fullres_img8 is None or getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False):
             return
 
+        h, w = self.current_fullres_img8.shape[:2]
+        min_zoom, max_zoom = self._zoom_bounds(w, h)
         self.auto_fit_enabled = False
-        new_factor = max(0.1, min(8.0, self.zoom_factor * factor))
+        new_factor = max(min_zoom, min(max_zoom, self.zoom_factor * factor))
         self.zoom_factor = new_factor
 
         self._apply_manual_zoom()
@@ -6081,25 +6532,26 @@ class MultiROIGUI:
             return
 
         h, w = self.current_fullres_img8.shape[:2]
-        target_w = int(w * self.zoom_factor)
-        target_h = int(h * self.zoom_factor)
+        min_zoom, max_zoom = self._zoom_bounds(w, h)
+        self.zoom_factor = max(min_zoom, min(max_zoom, float(self.zoom_factor)))
+        target_w = max(1, int(round(w * self.zoom_factor)))
+        target_h = max(1, int(round(h * self.zoom_factor)))
 
-        if target_w < 50 or target_h < 50:
-            target_w, target_h = 50, 50
-
-        disp = cv2.resize(self.current_fullres_img8, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(disp, cv2.COLOR_GRAY2RGB)
+        source_rgb = self._canvas_source_rgb()
+        interp = cv2.INTER_AREA if self.zoom_factor <= 1.0 else cv2.INTER_LINEAR
+        rgb = cv2.resize(source_rgb, (target_w, target_h), interpolation=interp)
         self._canvas_shows_field_overlay = False
 
         self.display_img = rgb
-        self.display_scale = self.zoom_factor
+        self.display_scale = target_w / max(w, 1)
+        self.zoom_factor = self.display_scale
         self.show_image()
         self._update_preview_scale_label()
         self._update_zoom_label()
 
     def fit_image_to_view(self):
         """强制将当前图像适应当前图像区大小，并恢复自动适应模式。"""
-        if self.current_fullres_img8 is None:
+        if self.current_fullres_img8 is None or getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False):
             return
         self.auto_fit_enabled = True
         self._canvas_shows_field_overlay = False
@@ -6110,15 +6562,14 @@ class MultiROIGUI:
 
     def show_image_1to1(self):
         """以 1:1 原始像素比例显示，并进入手动缩放模式。"""
-        if self.current_fullres_img8 is None:
+        if self.current_fullres_img8 is None or getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False):
             return
         self.auto_fit_enabled = False
         self.zoom_factor = 1.0
 
-        h, w = self.current_fullres_img8.shape[:2]
-        rgb = cv2.cvtColor(self.current_fullres_img8, cv2.COLOR_GRAY2RGB)
+        source_rgb = self._canvas_source_rgb()
         self._canvas_shows_field_overlay = False
-        self.display_img = rgb
+        self.display_img = source_rgb.copy()
         self.display_scale = 1.0
         self.show_image()
         self._update_preview_scale_label()
@@ -6135,12 +6586,14 @@ class MultiROIGUI:
     def _update_image_toolbar_state(self):
         """根据是否有图像 + 是否正在处理，控制工具栏按钮状态。"""
         has_image = self.current_fullres_img8 is not None
-        can_use = has_image and not getattr(self, "is_processing", False)
+        with self._state_lock_ctx():
+            busy = bool(getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False))
+        can_use = has_image and not busy
         for attr in ("btn_zoom_in", "btn_zoom_out", "btn_fit", "btn_1to1"):
             if hasattr(self, attr):
                 try:
                     getattr(self, attr).config(state=tk.NORMAL if can_use else tk.DISABLED)
-                except Exception:
+                except tk.TclError:
                     pass
 
     def update_workflow_action_states(self):
@@ -6288,7 +6741,12 @@ class MultiROIGUI:
 
     def _on_mouse_wheel(self, event):
         """支持鼠标滚轮缩放，围绕鼠标指针位置进行（专业图像工具标准行为）。"""
-        if self.current_fullres_img8 is None:
+        if (
+            self.current_fullres_img8 is None
+            or self.display_img is None
+            or getattr(self, "is_processing", False)
+            or getattr(self, "_completion_pending", False)
+        ):
             return
 
         # 确定缩放方向（跨平台）
@@ -6299,54 +6757,48 @@ class MultiROIGUI:
         else:
             return
 
-        self.auto_fit_enabled = False
-
         # 计算鼠标在当前显示图上的位置。canvasx/canvasy 会考虑当前滚动偏移。
         view_x, view_y = event.x, event.y
         cx = self.canvas.canvasx(event.x)
         cy = self.canvas.canvasy(event.y)
 
-        # 当前显示尺寸
-        if self.display_img is None:
-            return
-        disp_h, disp_w = self.display_img.shape[:2]
-
         # 鼠标在原始图像坐标中的位置（使用当前 display_scale）
-        inv_scale = 1.0 / self.display_scale
+        inv_scale = 1.0 / max(float(self.display_scale), 1e-9)
         img_x = cx * inv_scale
         img_y = cy * inv_scale
 
-        # 应用新的缩放因子
-        new_zoom = max(0.05, min(10.0, self.zoom_factor * factor))
-        self.zoom_factor = new_zoom
-
-        # 重新计算目标显示尺寸
+        # 先计算并校验目标缩放与尺寸，避免提前改写 zoom_factor 造成失步
         orig_h, orig_w = self.current_fullres_img8.shape[:2]
-        new_disp_w = int(orig_w * self.zoom_factor)
-        new_disp_h = int(orig_h * self.zoom_factor)
-
-        if new_disp_w < 30 or new_disp_h < 30:
+        min_zoom, max_zoom = self._zoom_bounds(orig_w, orig_h)
+        new_zoom = max(min_zoom, min(max_zoom, self.zoom_factor * factor))
+        new_disp_w = max(1, int(round(orig_w * new_zoom)))
+        new_disp_h = max(1, int(round(orig_h * new_zoom)))
+        if new_disp_w < 30 and new_disp_h < 30:
             return
 
-        disp = cv2.resize(self.current_fullres_img8, (new_disp_w, new_disp_h), interpolation=cv2.INTER_AREA)
-        self.display_img = cv2.cvtColor(disp, cv2.COLOR_GRAY2RGB)
-        self.display_scale = self.zoom_factor
+        self.auto_fit_enabled = False
+        source_rgb = self._canvas_source_rgb()
+        interp = cv2.INTER_AREA if new_zoom <= 1.0 else cv2.INTER_LINEAR
+        self.display_img = cv2.resize(source_rgb, (new_disp_w, new_disp_h), interpolation=interp)
+        self.display_scale = new_disp_w / max(orig_w, 1)
+        self.zoom_factor = self.display_scale
         self._canvas_shows_field_overlay = False
 
         self.show_image()
         self._update_preview_scale_label()
         self._update_zoom_label()
 
-        # 尝试保持鼠标指向的原始位置在缩放后仍大致在鼠标附近（简单版本）
-        # 计算新位置
-        new_cx = img_x * self.zoom_factor
-        new_cy = img_y * self.zoom_factor
-
-        # 将画布滚动到使 (new_cx, new_cy) 接近原鼠标位置
+        # 尝试保持鼠标指向的原始位置在缩放后仍大致在鼠标附近，兼容居中 letterbox 偏移
+        new_cx = img_x * self.display_scale
+        new_cy = img_y * self.display_scale
         try:
-            self.canvas.xview_moveto(max(0, min(1, (new_cx - view_x) / new_disp_w)))
-            self.canvas.yview_moveto(max(0, min(1, (new_cy - view_y) / new_disp_h)))
-        except Exception:
+            pad_x = max(0, (self.canvas.winfo_width() - new_disp_w) // 2)
+            pad_y = max(0, (self.canvas.winfo_height() - new_disp_h) // 2)
+            total_w = new_disp_w + 2 * pad_x
+            total_h = new_disp_h + 2 * pad_y
+            self.canvas.xview_moveto(max(0.0, min(1.0, (new_cx - view_x + pad_x) / total_w)))
+            self.canvas.yview_moveto(max(0.0, min(1.0, (new_cy - view_y + pad_y) / total_h)))
+        except (tk.TclError, ZeroDivisionError):
             pass
 
     def set_roi_mode(self, idx):
@@ -6389,17 +6841,25 @@ class MultiROIGUI:
         if self.is_fullfield_mode():
             self.field_roi = None
             self.field_roi_reference_frame_1based = None
+            self.dic_mask_exclusions = []
+            self._drawing_mask_exclusion = False
+            had_mask_preview = getattr(self, "_canvas_mask_overlay_rgb", None) is not None
+            self._canvas_mask_overlay_rgb = None
+            if had_mask_preview:
+                self._restore_sequence_preview()
+            else:
+                self.show_image()
         else:
             self.roi1 = None
             self.roi2 = None
             self.roi1_reference_frame_1based = None
             self.roi2_reference_frame_1based = None
-        self.show_image()
+            self.show_image()
         self.log("已清除当前 ROI。")
         self.update_workflow_action_states()
 
     def on_mouse_down(self, event):
-        if self.first_img8 is None:
+        if self.preview_img8 is None or self.display_img is None:
             return
         if getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False):
             return
@@ -6471,11 +6931,17 @@ class MultiROIGUI:
         if self.is_fullfield_mode():
             self.field_roi = rect
             self.dic_mask_exclusions = []
+            self._drawing_mask_exclusion = False
+            had_mask_preview = getattr(self, "_canvas_mask_overlay_rgb", None) is not None
+            self._canvas_mask_overlay_rgb = None
             self.field_roi_reference_frame_1based = reference_frame_1based
             self.log(f"全场 ROI = {rect}")
             self.log_roi_texture("全场 ROI", rect)
             self.status_var.set("全场 ROI 已设置。可开始 2D DIC 分析。")
-            self.show_image()
+            if had_mask_preview:
+                self._restore_sequence_preview()
+            else:
+                self.show_image()
             self.update_workflow_action_states()
             return
 
@@ -6722,10 +7188,16 @@ class MultiROIGUI:
             messagebox.showwarning("未选择组", "请先在列表中选择一组。")
             return
 
+        edited_name = self.group_name_var.get().strip()
+        target_name = edited_name if edited_name else self.roi_groups[selected_iid]["name"]
         try:
-            new_group = self.make_group_from_current(self.roi_groups[selected_iid]["name"])
+            new_group = self.make_group_from_current(target_name)
         except Exception as exc:
             messagebox.showerror("无法更新 ROI 组", str(exc))
+            return
+
+        if any(i != selected_iid and g["name"] == new_group["name"] for i, g in enumerate(self.roi_groups)):
+            messagebox.showerror("组名重复", f"已经存在组名：{new_group['name']}")
             return
 
         warnings = self.check_group_warnings(new_group)
@@ -6735,6 +7207,7 @@ class MultiROIGUI:
                 return
 
         self.roi_groups[selected_iid] = new_group
+        self.group_name_var.set(new_group["name"])
         self.refresh_group_tree()
         self.log_group_info("已更新", new_group)
         self.show_image()
@@ -6807,7 +7280,16 @@ class MultiROIGUI:
         self.group_tree.selection_set(iid)
         self.update_workflow_action_states()
 
+        previous_menu = getattr(self, "_group_context_menu", None)
+        if previous_menu is not None:
+            try:
+                previous_menu.destroy()
+            except tk.TclError:
+                pass
+            self._group_context_menu = None
+
         menu = tk.Menu(self.group_tree, tearoff=0)
+        self._group_context_menu = menu
         menu.add_command(label="载入选中组", command=self.load_selected_group, state=self.load_group_button.cget("state"))
         menu.add_command(label="更新选中组", command=self.update_selected_group, state=self.update_group_button.cget("state"))
         menu.add_separator()
@@ -6816,11 +7298,24 @@ class MultiROIGUI:
         self.add_tooltip(menu, lambda _event: actions[menu.index("active")]._tooltip.resolve_text()
                          if menu.index("active") in actions else "")
         menu.bind("<<MenuSelect>>", menu._tooltip.schedule, add="+")
-        menu.bind("<Unmap>", lambda _event: self.root.after_idle(menu.destroy), add="+")
+
+        def _cleanup_menu(_event=None, target=menu):
+            if getattr(self, "_group_context_menu", None) is target:
+                self._group_context_menu = None
+            try:
+                if target.winfo_exists():
+                    target.destroy()
+            except tk.TclError:
+                pass
+
+        menu.bind("<Unmap>", lambda _event: self.root.after_idle(_cleanup_menu), add="+")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
-            menu.grab_release()
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
 
     def refresh_group_tree(self):
         self.group_tree.delete(*self.group_tree.get_children())
@@ -6856,16 +7351,13 @@ class MultiROIGUI:
         )
 
     def log_roi_texture(self, name, rect):
-        if self.first_img8 is None or rect is None:
+        img8 = self.preview_img8
+        if img8 is None or rect is None:
             return
 
-        metrics = roi_texture_metrics(self.first_img8, rect)
-        ok = texture_is_ok(
-            metrics,
-            self.min_texture_std.get(),
-            self.min_texture_contrast.get(),
-            self.max_saturated_frac.get(),
-        )
+        metrics = roi_texture_metrics(img8, rect)
+        min_std, min_contrast, max_sat = self._safe_texture_thresholds()
+        ok = texture_is_ok(metrics, min_std, min_contrast, max_sat)
 
         quality = "良好" if ok else "偏弱，建议增大 ROI 或选择更独特散斑"
         msg = (
@@ -6875,24 +7367,29 @@ class MultiROIGUI:
         )
         self.log(msg)
 
-    def _core_texture_metrics_and_code(self, rect):
-        """Run the shared texture contract for a GUI preflight ROI."""
-        if self.first_img8 is None or rect is None:
+    def _core_texture_metrics_and_code(self, rect, image=None):
+        """Run the shared texture contract for a GUI preflight ROI on the true reference frame."""
+        if image is None:
+            _ref_raw, image = self._get_reference_frame_images()
+            if image is None and not self.image_paths:
+                image = self.preview_img8
+        if image is None or rect is None:
             return None, "INVALID_TEXTURE"
-        metrics = roi_texture_metrics(self.first_img8, rect)
+        metrics = roi_texture_metrics(image, rect)
+        min_std, min_contrast, max_sat = self._safe_texture_thresholds()
         code = texture_failure_code(
             metrics,
-            self.min_texture_std.get(),
-            self.min_texture_contrast.get(),
-            self.max_saturated_frac.get(),
+            min_std,
+            min_contrast,
+            max_sat,
             _core.DEFAULT_TEXTURE_MIN_STRUCTURE_RATIO,
         )
         return metrics, code
 
-    def _raise_on_ambiguous_texture(self, rois):
+    def _raise_on_ambiguous_texture(self, rois, image=None):
         """Block a scientific run for an ambiguous near-1D texture only."""
         for label, rect in rois:
-            _metrics, code = self._core_texture_metrics_and_code(rect)
+            _metrics, code = self._core_texture_metrics_and_code(rect, image=image)
             if code == "AMBIGUOUS_TEXTURE":
                 raise RuntimeError(f"AMBIGUOUS_TEXTURE：{label} 的二维纹理不可辨识，请更换或增大 ROI。")
 
@@ -6905,16 +7402,6 @@ class MultiROIGUI:
             return self.validate_fullfield_before_processing()
         if not self.roi_groups:
             raise RuntimeError("请先至少添加一组 ROI。")
-        self._raise_on_ambiguous_texture(
-            [
-                (f"{group['name']} ROI1", group.get("roi1"))
-                for group in self.roi_groups
-            ]
-            + [
-                (f"{group['name']} ROI2", group.get("roi2"))
-                for group in self.roi_groups
-            ]
-        )
         if not self.output_folder.get().strip():
             raise RuntimeError("请设置输出文件夹。")
         output_path = Path(self.output_folder.get().strip())
@@ -6940,12 +7427,50 @@ class MultiROIGUI:
         if end_idx <= start_idx:
             raise RuntimeError("分析范围至少应包含两帧。")
 
+        expected_ref = start_idx + 1
+        missing_ref = []
+        mismatched_ref = []
+        invalid_l0 = []
+        for group in self.roi_groups:
+            gname = str(group.get("name", "未命名"))
+            ref = group.get("reference_frame_1based")
+            if ref is None:
+                missing_ref.append(gname)
+            else:
+                try:
+                    ref_int = int(ref)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RuntimeError(f"ROI 组 {gname} 的参考帧记录必须是整数。") from exc
+                if ref_int != expected_ref:
+                    mismatched_ref.append(f"{gname}(第 {ref_int} 帧)")
+            try:
+                l0_val = float(group.get("L0", np.nan))
+            except (TypeError, ValueError):
+                l0_val = float("nan")
+            if not math.isfinite(l0_val) or l0_val <= 0:
+                invalid_l0.append(gname)
+
+        if missing_ref:
+            raise RuntimeError(
+                f"ROI 组 {', '.join(missing_ref)} 缺少参考帧记录，请在当前起始/参考帧（第 {expected_ref} 帧）重画并更新。"
+            )
+        if mismatched_ref:
+            raise RuntimeError(
+                f"ROI 组 {', '.join(mismatched_ref)} 与当前起始/参考帧（第 {expected_ref} 帧）不一致，请载入后重画或恢复参考帧。"
+            )
+        if invalid_l0:
+            raise RuntimeError(
+                f"ROI 组 {', '.join(invalid_l0)} 的初始标距 L0 无效（必须为大于 0 的有限数值），请重新绘制并更新。"
+            )
+
         search_radius = self.get_int_setting(self.search_radius, "搜索半径")
         overlay_every = self.get_int_setting(self.overlay_every, "overlay 保存间隔")
         hard_corr = self.get_float_setting(self.hard_corr, "硬相关阈值")
         soft_corr = self.get_float_setting(self.soft_corr, "软相关下限")
         template_alpha = self.get_float_setting(self.template_alpha, "模板跟随系数")
         fb_tolerance = self.get_float_setting(self.fb_tolerance_px, "FB 容差")
+        min_texture_std = self.get_float_setting(self.min_texture_std, "最小灰度标准差")
+        min_texture_contrast = self.get_float_setting(self.min_texture_contrast, "最小 P95-P5 对比度")
         max_saturated_frac = self.get_float_setting(self.max_saturated_frac, "最大近黑/近白比例")
 
         if search_radius <= 0:
@@ -6960,8 +7485,12 @@ class MultiROIGUI:
             raise RuntimeError("软相关下限不能高于硬相关阈值。")
         if not (0 <= template_alpha <= 1):
             raise RuntimeError("模板跟随系数应在 0 到 1 之间。")
-        if fb_tolerance <= 0:
-            raise RuntimeError("FB 容差必须 > 0。")
+        if not math.isfinite(fb_tolerance) or fb_tolerance <= 0:
+            raise RuntimeError("FB 容差必须是大于 0 的有限数字。")
+        if min_texture_std < 0:
+            raise RuntimeError("最小灰度标准差不能为负。")
+        if min_texture_contrast < 0:
+            raise RuntimeError("最小 P95-P5 对比度不能为负。")
         if not (0 <= max_saturated_frac <= 1):
             raise RuntimeError("最大近黑/近白比例应在 0 到 1 之间。")
 
@@ -6970,16 +7499,35 @@ class MultiROIGUI:
                 jump = float(self.max_frame_strain_jump.get().strip())
             except ValueError:
                 raise RuntimeError("单帧应变突变上限必须是数字，或者留空禁用。")
-            if jump <= 0:
-                raise RuntimeError("单帧应变突变上限必须 > 0，或者留空禁用。")
+            if not math.isfinite(jump) or jump <= 0:
+                raise RuntimeError("单帧应变突变上限必须是大于 0 的有限数字，或者留空禁用。")
 
         if self.pixel_size_mm.get().strip():
             try:
                 pix = float(self.pixel_size_mm.get().strip())
             except ValueError:
                 raise RuntimeError("像素尺寸必须是数字，或者留空。")
-            if pix <= 0:
-                raise RuntimeError("像素尺寸必须 > 0，或者留空。")
+            if not math.isfinite(pix) or pix <= 0:
+                raise RuntimeError("像素尺寸必须是大于 0 的有限数字，或者留空。")
+
+        _ref_raw, ref_img8 = self._get_reference_frame_images(start_idx)
+        if ref_img8 is None:
+            raise RuntimeError("无法读取当前起始/参考帧图像。")
+        for group in self.roi_groups:
+            for label, rect in (("ROI1", group.get("roi1")), ("ROI2", group.get("roi2"))):
+                if rect is None or not rect_is_inside_image(rect, ref_img8.shape):
+                    raise RuntimeError(f"ROI 组 {group.get('name', '未命名')} 的 {label} 超出参考图像范围。")
+        self._raise_on_ambiguous_texture(
+            [
+                (f"{group['name']} ROI1", group.get("roi1"))
+                for group in self.roi_groups
+            ]
+            + [
+                (f"{group['name']} ROI2", group.get("roi2"))
+                for group in self.roi_groups
+            ],
+            image=ref_img8,
+        )
 
         poisson_enabled = validate_poisson_role_groups(self.roi_groups)
         if poisson_enabled:
@@ -7010,7 +7558,8 @@ class MultiROIGUI:
 
     def validate_fullfield_before_processing(self):
         start_idx, end_idx = self.get_analysis_indices()
-        if self.first_img8 is None:
+        ref_raw, ref_img8 = self._get_reference_frame_images(start_idx)
+        if ref_raw is None or ref_img8 is None:
             raise RuntimeError("请先加载参考图像。")
         snapshot = {
             "output_dir": self.output_folder.get().strip(),
@@ -7020,9 +7569,10 @@ class MultiROIGUI:
             "reference_frame_1based": start_idx + 1,
             "field_roi": self.field_roi,
             "field_roi_reference_frame_1based": self.field_roi_reference_frame_1based,
-            "min_texture_std": self.get_float_setting(self.min_texture_std, "最小纹理标准差"),
-            "min_texture_contrast": self.get_float_setting(self.min_texture_contrast, "最小纹理对比度"),
-            "max_saturated_frac": self.get_float_setting(self.max_saturated_frac, "最大近黑/近白比例"),
+            "normalization": compute_reference_normalization(ref_raw),
+            "min_texture_std": 8.0,
+            "min_texture_contrast": 25.0,
+            "max_saturated_frac": 0.20,
             "dic_subset_size": self.get_int_setting(self.dic_subset_size, "子集尺寸"),
             "dic_step": self.get_int_setting(self.dic_step, "步长"),
             "dic_solver": str(self.dic_solver.get()),
@@ -7037,8 +7587,9 @@ class MultiROIGUI:
             "reject_nonconverged": bool(self.dic_reject_nonconverged.get()),
             "outlier_threshold_px": self.get_float_setting(self.dic_outlier_threshold, "异常位移阈值"),
             "mask": self.dic_mask_settings(),
+            "display": self.dic_display_options(),
         }
-        return validate_fullfield_snapshot(snapshot)
+        return validate_fullfield_snapshot(snapshot, check_sequence_dimensions=False)
 
     def build_processing_settings(self):
         start_idx, end_idx = self.get_analysis_indices()
@@ -7058,6 +7609,9 @@ class MultiROIGUI:
             fb_tolerance = 12.0
             pixel_size_mm = None
             overlay_every = 5
+            min_texture_std = 8.0
+            min_texture_contrast = 25.0
+            max_saturated_frac = 0.20
         else:
             max_frame_jump = None
             if self.max_frame_strain_jump.get().strip():
@@ -7075,6 +7629,9 @@ class MultiROIGUI:
             enable_fb_check = bool(self.enable_fb_check.get())
             fb_tolerance = self.get_float_setting(self.fb_tolerance_px, "FB 容差")
             overlay_every = self.get_int_setting(self.overlay_every, "overlay 保存间隔")
+            min_texture_std = self.get_float_setting(self.min_texture_std, "最小灰度标准差")
+            min_texture_contrast = self.get_float_setting(self.min_texture_contrast, "最小 P95-P5 对比度")
+            max_saturated_frac = self.get_float_setting(self.max_saturated_frac, "最大近黑/近白比例")
 
         if is_ff:
             export_origin_txt = False
@@ -7100,11 +7657,10 @@ class MultiROIGUI:
             tracking_preset = self.tracking_preset.get()
 
         field_roi = tuple(self.field_roi) if self.field_roi is not None else None
-        reference_normalization = None
-        if self.first_raw is not None:
-            reference_raw = self.first_raw if start_idx == 0 else read_gray_image(self.image_paths[start_idx])
-            reference_normalization = compute_reference_normalization(reference_raw)
-        input_identities = ordered_input_manifest(self.image_paths)
+        reference_raw, _reference_img8 = self._get_reference_frame_images(start_idx)
+        reference_normalization = (
+            compute_reference_normalization(reference_raw) if reference_raw is not None else None
+        )
         return {
             "output_dir": Path(self.output_folder.get().strip()),
             "image_paths": list(self.image_paths),
@@ -7134,16 +7690,15 @@ class MultiROIGUI:
             "export_parameters": export_parameters,
             "image_folder": self.image_folder.get(),
             "tracking_preset": tracking_preset,
-            "min_texture_std": float(self.min_texture_std.get()),
-            "min_texture_contrast": float(self.min_texture_contrast.get()),
-            "max_saturated_frac": float(self.max_saturated_frac.get()),
+            "min_texture_std": min_texture_std,
+            "min_texture_contrast": min_texture_contrast,
+            "max_saturated_frac": max_saturated_frac,
             "analysis_mode": str(self.analysis_mode.get()),
             "field_roi": field_roi,
             "field_roi_reference_frame_1based": self.field_roi_reference_frame_1based,
             "reference_frame_1based": start_idx + 1,
             "reference_filename": Path(self.image_paths[start_idx]).name,
             "image_sequence_fingerprint": image_sequence_fingerprint(self.image_paths),
-            "input_identities": input_identities,
             "normalization": reference_normalization,
             "dic_subset_size": int(self.dic_subset_size.get()) if is_ff else 21,
             "dic_step": int(self.dic_step.get()) if is_ff else 5,
@@ -7169,8 +7724,9 @@ class MultiROIGUI:
             original_callback = callback
 
             def guarded_callback():
-                if self._active_run_token != run_token:
-                    return
+                with self._state_lock_ctx():
+                    if self._active_run_token != run_token:
+                        return
                 original_callback()
 
             callback = guarded_callback
@@ -7178,43 +7734,165 @@ class MultiROIGUI:
         return True
 
     def start_ui_queue_polling(self):
+        if getattr(self, "_closing", False):
+            return
         try:
-            self.root.after(50, self.drain_ui_queue)
+            if not self.root.winfo_exists():
+                return
+            self._ui_poll_after_id = self.root.after(50, self.drain_ui_queue)
         except (RuntimeError, tk.TclError):
-            pass
+            self._ui_poll_after_id = None
 
     def drain_ui_queue(self):
-        while True:
-            try:
-                callback = self.ui_queue.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                callback()
-            except Exception:
-                traceback.print_exc()
-        self.start_ui_queue_polling()
+        self._ui_poll_after_id = None
+        if getattr(self, "_closing", False):
+            return
+        try:
+            while True:
+                try:
+                    callback = self.ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if getattr(self, "_closing", False):
+                    break
+                try:
+                    callback()
+                except Exception:
+                    if sys.stderr is not None:
+                        traceback.print_exc()
+        finally:
+            if not getattr(self, "_closing", False):
+                self.start_ui_queue_polling()
 
     # ---------- 批量处理 ----------
 
     def _finalize_processing_state(self, run_token):
         """Release the completion gate only after all queued run callbacks drain."""
-        if run_token is not None and self._active_run_token != run_token:
-            return
-        self._completion_pending = False
+        with self._state_lock_ctx():
+            if run_token is not None and self._active_run_token != run_token:
+                return
+            self._completion_pending = False
         self.update_workflow_action_states()
 
+    def _mirror_failed_fullfield_runs(self, output_root, pre_existing_names, *, specific_failed_dir=None):
+        """Safely mirror newly created failed runs into ``output_root/dic/_failed_runs``."""
+        output_root = Path(output_root)
+        failed_root = output_root / "_failed_runs"
+        dic_root = output_root / "dic"
+        legacy_failed_root = dic_root / "_failed_runs"
+
+        def assert_safe(path, *, allow_missing_leaf):
+            _core._assert_no_reparse_components(path, allow_missing_leaf=allow_missing_leaf)
+
+        def assert_contained(path, root, *, code):
+            _core._assert_contained_path(path, root, code=code)
+
+        try:
+            assert_safe(output_root, allow_missing_leaf=False)
+            assert_safe(failed_root, allow_missing_leaf=True)
+            assert_contained(failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+            if not failed_root.exists() or not failed_root.is_dir():
+                return
+            assert_safe(dic_root, allow_missing_leaf=True)
+            assert_contained(dic_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+            assert_safe(legacy_failed_root, allow_missing_leaf=True)
+            assert_contained(legacy_failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+
+            with _core._operation_os_lock(output_root):
+                with _core._transaction_lock(output_root):
+                    assert_safe(output_root, allow_missing_leaf=False)
+                    assert_safe(failed_root, allow_missing_leaf=False)
+                    assert_contained(failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                    assert_safe(dic_root, allow_missing_leaf=True)
+                    assert_contained(dic_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                    assert_safe(legacy_failed_root, allow_missing_leaf=True)
+                    assert_contained(legacy_failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                    if dic_root.exists() and not dic_root.is_dir():
+                        raise RuntimeError(f"失败归档镜像失败：{dic_root} 不是文件夹。")
+                    if legacy_failed_root.exists() and not legacy_failed_root.is_dir():
+                        raise RuntimeError(f"失败归档镜像失败：{legacy_failed_root} 不是文件夹。")
+
+                    candidates = []
+                    seen_names = set()
+                    if specific_failed_dir is not None:
+                        spec = Path(specific_failed_dir)
+                        if spec.parent == failed_root and spec.exists():
+                            candidates.append(spec)
+                            seen_names.add(spec.name)
+                    for path in sorted(failed_root.iterdir(), key=lambda item: item.name):
+                        if path.name in pre_existing_names or path.name in seen_names:
+                            continue
+                        candidates.append(path)
+                        seen_names.add(path.name)
+
+                    for failed_dir in candidates:
+                        assert_safe(failed_dir, allow_missing_leaf=False)
+                        assert_contained(failed_dir, failed_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                        if not failed_dir.is_dir():
+                            continue
+                        # Verify the entire tree contains no symlinks/reparse points before writing.
+                        files_to_copy = []
+                        dirs_to_create = []
+                        for dirpath, dirnames, filenames in os.walk(failed_dir, followlinks=False):
+                            current = Path(dirpath)
+                            assert_safe(current, allow_missing_leaf=False)
+                            assert_contained(current, failed_dir, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                            for dirname in dirnames:
+                                sub = current / dirname
+                                assert_safe(sub, allow_missing_leaf=False)
+                                assert_contained(sub, failed_dir, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                                dirs_to_create.append(sub.relative_to(failed_dir))
+                            for filename in filenames:
+                                src_file = current / filename
+                                assert_safe(src_file, allow_missing_leaf=False)
+                                assert_contained(src_file, failed_dir, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                                if src_file.is_file():
+                                    files_to_copy.append((src_file, src_file.relative_to(failed_dir)))
+
+                        target = legacy_failed_root / failed_dir.name
+                        assert_safe(target, allow_missing_leaf=True)
+                        assert_contained(target, legacy_failed_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                        if target.exists() or target.is_symlink():
+                            continue
+                        legacy_failed_root.mkdir(parents=True, exist_ok=True)
+                        assert_safe(legacy_failed_root, allow_missing_leaf=False)
+                        assert_contained(legacy_failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                        target.mkdir()
+                        for rel_dir in dirs_to_create:
+                            dst_dir = target / rel_dir
+                            assert_contained(dst_dir, target, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                            dst_dir.mkdir(parents=True, exist_ok=True)
+                        for src_file, rel_file in files_to_copy:
+                            dst_file = target / rel_file
+                            assert_contained(dst_file, target, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                            shutil.copy2(src_file, dst_file)
+        except Exception as mirror_exc:
+            if hasattr(self, "post_to_ui") and hasattr(self, "log"):
+                self.post_to_ui(lambda m=f"全场 DIC 失败归档镜像已跳过：{mirror_exc}": self.log(m))
+
     def start_processing(self):
-        if self.control_notebook.select() == str(self.agent_page):
-            self.agent_page.run_project()
-            return
+        if hasattr(self, "control_notebook"):
+            selected_tab = self.control_notebook.select()
+            if hasattr(self, "agent_page") and selected_tab == str(self.agent_page):
+                self.agent_page.run_project()
+                return
+            if hasattr(self, "campaign_page") and selected_tab == str(self.campaign_page):
+                if hasattr(self, "status_var"):
+                    self.status_var.set("当前位于“批次项目”页，请使用本页内的批次运行按钮。")
+                return
         if getattr(getattr(self, "agent_page", None), "_busy", False):
             messagebox.showinfo("正在处理", "自动分析任务仍在运行，请等待完成后再启动手动分析。")
             return
-        if self.is_processing:
+        if getattr(getattr(self, "campaign_page", None), "_busy", False):
+            messagebox.showinfo("正在处理", "批次项目任务仍在运行，请等待完成后再启动手动分析。")
+            return
+        with self._state_lock_ctx():
+            processing = bool(self.is_processing)
+            pending = bool(self._completion_pending)
+        if processing:
             messagebox.showinfo("正在处理", "程序正在处理，请等待当前任务完成。")
             return
-        if self._completion_pending:
+        if pending:
             messagebox.showinfo("正在收尾", "上一轮分析正在收尾，请等待完成后再开始。")
             return
 
@@ -7225,12 +7903,13 @@ class MultiROIGUI:
             messagebox.showerror("参数错误", str(exc))
             return
 
-        self._run_generation += 1
-        run_token = self._run_generation
-        settings["_run_token"] = run_token
-        self._active_run_token = run_token
-        self._completion_pending = False
-        self.is_processing = True
+        with self._state_lock_ctx():
+            self._run_generation += 1
+            run_token = self._run_generation
+            settings["_run_token"] = run_token
+            self._active_run_token = run_token
+            self._completion_pending = False
+            self.is_processing = True
         self._update_progress(0)
         if settings.get("analysis_mode") == ANALYSIS_MODE_FULLFIELD:
             self.status_var.set("正在分析：全场 2D DIC。")
@@ -7243,6 +7922,8 @@ class MultiROIGUI:
         self.update_workflow_action_states()
 
         thread = threading.Thread(target=worker, args=(settings,), daemon=True)
+        with self._state_lock_ctx():
+            self._worker_thread = thread
         thread.start()
 
     def process_fullfield_thread(self, settings):
@@ -7253,13 +7934,20 @@ class MultiROIGUI:
         except Exception as exc:
             message = str(exc)
             details = traceback.format_exc()
-            self.post_to_ui(lambda m=message: messagebox.showerror("处理失败", m))
-            self.post_to_ui(lambda: self.status_var.set("分析失败，详情见“质量与日志”。"))
-            self.post_to_ui(lambda e=exc, d=details: self.log_user_error("全场 DIC", e, d))
+
+            def _report_failure(m=message, e=exc, d=details):
+                self.status_var.set("分析失败，详情见“质量与日志”。")
+                self.log_user_error("全场 DIC", e, d)
+                messagebox.showerror("处理失败", m)
+
+            self.post_to_ui(_report_failure)
         finally:
-            if run_token is not None:
-                self._completion_pending = True
-            self.is_processing = False
+            with self._state_lock_ctx():
+                if run_token is not None:
+                    self._completion_pending = True
+                self.is_processing = False
+                if getattr(self, "_worker_thread", None) is threading.current_thread():
+                    self._worker_thread = None
             if run_token is not None:
                 self.post_to_ui(lambda token=run_token: self._finalize_processing_state(token))
             else:
@@ -7290,6 +7978,12 @@ class MultiROIGUI:
                 "dic_search_radius",
                 "dic_zncc_min",
             )
+            output_root = Path(settings["output_dir"])
+            legacy_manifest = output_root / "run_manifest.json"
+            needs_dim_check = (
+                (not legacy_manifest.exists() and os.path.lexists(output_root / "dic"))
+                or (validate_image_sequence_dimensions is not _core.validate_image_sequence_dimensions)
+            )
             if (
                 threading.current_thread() is threading.main_thread()
                 and not all(key in settings for key in snapshot_keys)
@@ -7300,7 +7994,7 @@ class MultiROIGUI:
                 # worker-thread invocation takes the pure path above.
                 self.validate_fullfield_before_processing()
             else:
-                validate_fullfield_snapshot(settings)
+                validate_fullfield_snapshot(settings, check_sequence_dimensions=needs_dim_check)
             engine_settings = dict(settings)
             # ``__file__`` may point into a PyInstaller archive.  Resolve the
             # real auditable copies under ``_MEIPASS/sources`` instead of
@@ -7314,8 +8008,6 @@ class MultiROIGUI:
             # transactional engine starts; every v0.2 run is governed solely
             # by the manifest ledger.  Similar user names (for example
             # ``frame_0002_u.txt``) are not selected by this allowlist.
-            output_root = Path(settings["output_dir"])
-            legacy_manifest = output_root / "run_manifest.json"
             if not legacy_manifest.exists():
                 # The pure snapshot preflight above is complete before any
                 # legacy output is migrated.  The new core then owns all
@@ -7326,6 +8018,17 @@ class MultiROIGUI:
             # callers remain fail-closed on this contract; this flag is scoped
             # to the adapter and is recorded in the run configuration.
             engine_settings["_allow_low_texture_preflight"] = True
+
+            pre_existing_failed = set()
+            failed_root = output_root / "_failed_runs"
+            try:
+                _core._assert_no_reparse_components(output_root, allow_missing_leaf=True)
+                _core._assert_no_reparse_components(failed_root, allow_missing_leaf=True)
+                _core._assert_contained_path(failed_root, output_root, code="FAILED_MIRROR_OUTSIDE_ROOT")
+                if failed_root.exists() and failed_root.is_dir():
+                    pre_existing_failed = {p.name for p in failed_root.iterdir()}
+            except Exception:
+                pre_existing_failed = set()
 
             def progress(event):
                 if isinstance(event, dict):
@@ -7343,21 +8046,16 @@ class MultiROIGUI:
             try:
                 result = _core.run_fullfield_sequence(engine_settings, progress_callback=progress)
             except Exception:
-                # Keep the pre-v0.2 GUI's discoverable failure location while
-                # retaining the canonical root evidence written by the core.
-                failed_root = output_root / "_failed_runs"
-                legacy_failed_root = output_root / "dic" / "_failed_runs"
-                if failed_root.is_dir():
-                    legacy_failed_root.mkdir(parents=True, exist_ok=True)
-                    for failed_dir in sorted((path for path in failed_root.iterdir() if path.is_dir()), key=lambda path: path.name):
-                        target = legacy_failed_root / failed_dir.name
-                        if not target.exists():
-                            try:
-                                shutil.copytree(failed_dir, target)
-                            except OSError:
-                                pass
+                self._mirror_failed_fullfield_runs(output_root, pre_existing_failed)
                 raise
             if not result.get("scientific_ok", False):
+                manifest_path = result.get("manifest_path")
+                specific_dir = Path(manifest_path).parent if manifest_path else None
+                self._mirror_failed_fullfield_runs(
+                    output_root,
+                    pre_existing_failed,
+                    specific_failed_dir=specific_dir,
+                )
                 raise RuntimeError("全场 DIC 科学有效性门未通过（无有效应变/有限应变）：" + ", ".join(result.get("errors", [])))
             last_field = result.get("last_field")
             if last_field is None:
@@ -7374,19 +8072,22 @@ class MultiROIGUI:
                 self.dic_last_filename = last_field.get("frame_filename")
                 self.dic_last_reference_frame_1based = result.get("manifest", {}).get("reference_frame_1based", settings.get("reference_frame_1based", settings.get("start_idx", 0) + 1))
                 self.dic_last_reference_filename = result.get("manifest", {}).get("reference_filename")
-                self.show_field_viewer(
-                    last_field,
-                    image=self.dic_last_image,
-                    frame_1based=self.dic_last_frame_1based,
-                    filename=self.dic_last_filename,
-                    reference_frame_1based=self.dic_last_reference_frame_1based,
-                    reference_filename=self.dic_last_reference_filename,
-                )
                 self._update_progress(100)
                 self.status_var.set(f"处理完成，全场 DIC：{valid_count}/{total_count} 帧科学有效。")
                 if hasattr(self, "qc_overview_var"):
                     self.qc_overview_var.set(self.format_fullfield_qc_overview(frames))
                 self.log(f"全场 DIC manifest 已验证：{result['manifest_path']}")
+                try:
+                    self.show_field_viewer(
+                        last_field,
+                        image=self.dic_last_image,
+                        frame_1based=self.dic_last_frame_1based,
+                        filename=self.dic_last_filename,
+                        reference_frame_1based=self.dic_last_reference_frame_1based,
+                        reference_filename=self.dic_last_reference_filename,
+                    )
+                except Exception as viewer_exc:
+                    self.log(f"全场结果预览窗口初始化失败（不影响已验证文件）：{viewer_exc}")
                 self.show_completion_and_open_output_folder(
                     f"全场 2D DIC 完成：{valid_count}/{total_count} 个变形帧有效。结果已写入 {settings['output_dir']}",
                     settings["output_dir"],
@@ -7573,13 +8274,20 @@ class MultiROIGUI:
         except Exception as exc:
             message = str(exc)
             details = traceback.format_exc()
-            self.post_to_ui(lambda m=message: messagebox.showerror("处理失败", m))
-            self.post_to_ui(lambda: self.status_var.set("分析失败，详情见“质量与日志”。"))
-            self.post_to_ui(lambda e=exc, d=details: self.log_user_error("批量处理", e, d))
+
+            def _report_failure(m=message, e=exc, d=details):
+                self.status_var.set("分析失败，详情见“质量与日志”。")
+                self.log_user_error("批量处理", e, d)
+                messagebox.showerror("处理失败", m)
+
+            self.post_to_ui(_report_failure)
         finally:
-            if run_token is not None:
-                self._completion_pending = True
-            self.is_processing = False
+            with self._state_lock_ctx():
+                if run_token is not None:
+                    self._completion_pending = True
+                self.is_processing = False
+                if getattr(self, "_worker_thread", None) is threading.current_thread():
+                    self._worker_thread = None
             if run_token is not None:
                 self.post_to_ui(lambda token=run_token: self._finalize_processing_state(token))
             else:
@@ -7632,7 +8340,10 @@ class MultiROIGUI:
             image_paths = settings.get("image_paths", [])
             start_idx = int(settings.get("start_idx", 0))
             end_idx = int(settings.get("end_idx", len(image_paths) - 1))
-            validate_image_sequence_dimensions(image_paths[start_idx:end_idx + 1])
+            # Core validates sequence dimensions before staging; only run the
+            # module-level hook directly when a caller/test replaced it.
+            if validate_image_sequence_dimensions is not _core.validate_image_sequence_dimensions:
+                validate_image_sequence_dimensions(image_paths[start_idx:end_idx + 1])
             engine_settings = dict(settings)
             # Use the same source resolver as the full-field adapter; this is
             # required for frozen GUI runs where both module ``__file__``
@@ -7676,16 +8387,20 @@ class MultiROIGUI:
             )
             if settings.get("export_origin_txt") and (output_dir / "core" / "strain_mean_groups.txt").is_file():
                 done_msg += "\n平均应变文件: core\\strain_mean_groups.txt\n平均应变列也已写入: core\\strain_all_groups.txt"
-            self.post_to_ui(lambda: self._update_progress(100))
-            self.post_to_ui(lambda: self.status_var.set(f"处理完成，QC 状态：{qc_level}"))
-            self.post_to_ui(lambda s=summary: self.update_qc_overview(s))
-            self.post_to_ui(lambda m=done_msg + "\n" + path_log: self.log(m))
-            self.post_to_ui(lambda m=done_msg: self.show_completion_and_open_output_folder(m, output_dir))
-            try:
+
+            def _finish_extensometer():
+                self._update_progress(100)
+                self.status_var.set(f"处理完成，QC 状态：{qc_level}")
+                self.update_qc_overview(summary)
+                self.log(done_msg + "\n" + path_log)
                 if not df.empty and settings.get("roi_groups"):
-                    self.post_to_ui(lambda: self.show_results_viewer(df, settings["roi_groups"]))
-            except Exception:
-                self.post_to_ui(lambda: self.log("结果预览窗口初始化失败（不影响已验证文件）"))
+                    try:
+                        self.show_results_viewer(df, settings["roi_groups"])
+                    except Exception as viewer_exc:
+                        self.log(f"结果预览窗口初始化失败（不影响已验证文件）：{viewer_exc}")
+                self.show_completion_and_open_output_folder(done_msg, output_dir)
+
+            self.post_to_ui(_finish_extensometer)
             return result
 
         start_idx = settings["start_idx"]
@@ -7962,7 +8677,7 @@ class MultiROIGUI:
             param_dir = optional_dir / "parameters"
             param_dir.mkdir(parents=True, exist_ok=True)
             params_path = param_dir / "tracking_parameters.txt"
-            with open(params_path, "w", encoding="utf-8") as f:
+            with open(params_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("DIC Virtual Extensometer GUI v7 Multi-ROI Range Preview Parameters\n")
                 f.write("----------------------------------------------------\n")
                 f.write(f"image_folder = {settings['image_folder']}\n")
@@ -7995,7 +8710,7 @@ class MultiROIGUI:
             written_paths.append(params_path)
 
             acceptance_path = param_dir / "acceptance_summary.txt"
-            with open(acceptance_path, "w", encoding="utf-8") as f:
+            with open(acceptance_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("Acceptance summary by group\n")
                 f.write("---------------------------\n")
                 for gname, sub in df.groupby("group"):
@@ -8031,19 +8746,19 @@ class MultiROIGUI:
             f"{mean_export_note}"
         )
 
-        self.post_to_ui(lambda: self._update_progress(100))
-        self.post_to_ui(lambda: self.status_var.set(f"处理完成，QC 状态：{qc_level}"))
-        self.post_to_ui(lambda s=summary: self.update_qc_overview(s))
-        self.post_to_ui(lambda: self.log(done_msg + "\n" + path_log))
-        self.post_to_ui(lambda: self.show_completion_and_open_output_folder(done_msg, output_dir))
-
-        # === Tier 0: populate in-app viewer with final results ===
-        try:
+        def _finish_legacy_extensometer():
+            self._update_progress(100)
+            self.status_var.set(f"处理完成，QC 状态：{qc_level}")
+            self.update_qc_overview(summary)
+            self.log(done_msg + "\n" + path_log)
             if df is not None and not df.empty and roi_groups:
-                self.post_to_ui(lambda: self.show_results_viewer(df, roi_groups))
-        except Exception:
-            # Viewer failure must never break the main success path
-            self.post_to_ui(lambda: self.log("结果预览窗口初始化失败（不影响已导出文件）"))
+                try:
+                    self.show_results_viewer(df, roi_groups)
+                except Exception as viewer_exc:
+                    self.log(f"结果预览窗口初始化失败（不影响已导出文件）：{viewer_exc}")
+            self.show_completion_and_open_output_folder(done_msg, output_dir)
+
+        self.post_to_ui(_finish_legacy_extensometer)
 
     # ==========================
     # Tier 0: In-app interactive results viewer
@@ -8069,6 +8784,7 @@ class MultiROIGUI:
         previous_reference_frame = self.dic_last_reference_frame_1based
         previous_reference_filename = self.dic_last_reference_filename
         self.clear_viewer(keep_placeholder=False)
+        self._canvas_mask_overlay_rgb = None
         self.viewer_frame.grid()
         self.viewer_content_frame.grid()
         self.dic_last_field = field
@@ -8093,15 +8809,14 @@ class MultiROIGUI:
             if reference_filename is not None
             else provenance.get("reference_filename", field.get("reference_filename", previous_reference_filename))
         )
-        options = field.get("display_options") or {}
-        if options:
-            self.dic_view_background.set({"none": "无底图", "reference": "参考图", "deformed": "变形图"}.get(options.get("background", "none"), "无底图"))
-            self.dic_color_mode.set({"range": "数据范围", "symmetric": "零点对称", "manual": "手动范围"}.get(options.get("color_mode", "range"), "数据范围"))
-            self.dic_display_style.set("测量点" if options.get("style") == "points" else "连续云图")
-            self.dic_percent.set(bool(options.get("percent", False)))
-            self.dic_colormap.set(options.get("cmap", "RdBu_r"))
-            self.dic_color_min.set(str(options.get("vmin", "")))
-            self.dic_color_max.set(str(options.get("vmax", "")))
+        options = dict(field.get("display_options") or {})
+        self.dic_view_background.set({"none": "无底图", "reference": "参考图", "deformed": "变形图"}.get(options.get("background", "none"), "无底图"))
+        self.dic_color_mode.set({"range": "数据范围", "symmetric": "零点对称", "manual": "手动范围"}.get(options.get("color_mode", "range"), "数据范围"))
+        self.dic_display_style.set("测量点" if options.get("style") == "points" else "连续云图")
+        self.dic_percent.set(bool(options.get("percent", False)))
+        self.dic_colormap.set(options.get("cmap", "RdBu_r"))
+        self.dic_color_min.set("" if options.get("vmin") is None else str(options.get("vmin")))
+        self.dic_color_max.set("" if options.get("vmax") is None else str(options.get("vmax")))
         if "deformed_image" not in field and self.dic_last_image is not None:
             field["deformed_image"] = self.dic_last_image
         self._viewer_kind = "fullfield"
@@ -8132,6 +8847,31 @@ class MultiROIGUI:
         ref_text = f"参考帧 {ref_frame}" if ref_frame is not None else "参考帧未知"
         self.field_viewer_context_var.set(f"{frame_text}：{filename}；{ref_text}：{ref_filename}")
 
+    def _resolved_field_display_options(self, component):
+        """Return one consistent display-options dict shared by plot, colorbar, and overlay."""
+        stored = dict((self.dic_last_field or {}).get("display_options") or {})
+        default_cmap = "viridis" if component == "zncc" else "RdBu_r"
+        raw_cmap = stored.get("cmap") or default_cmap
+        if component == "zncc" and raw_cmap == "RdBu_r":
+            raw_cmap = "viridis"
+        if raw_cmap not in matplotlib.colormaps:
+            raw_cmap = default_cmap
+        options = {
+            "style": stored.get("style", "contour"),
+            "background": stored.get("background", "none"),
+            "color_mode": stored.get("color_mode", "range"),
+            "percent": bool(stored.get("percent", False)),
+            "cmap": raw_cmap,
+            "alpha": float(stored.get("alpha", 0.65)),
+        }
+        if "vmin" in stored:
+            options["vmin"] = stored["vmin"]
+        if "vmax" in stored:
+            options["vmax"] = stored["vmax"]
+        if "coordinate_frame" in stored:
+            options["coordinate_frame"] = stored["coordinate_frame"]
+        return options
+
     def _update_field_viewer_overlay(self):
         if self.dic_last_field is None or self.dic_last_image is None:
             return
@@ -8140,11 +8880,14 @@ class MultiROIGUI:
             if component not in DIC_FIELD_COMPONENTS:
                 component = "u"
                 self.dic_field_component.set(component)
+            display_options = self._resolved_field_display_options(component)
+            overlay_options = {**display_options, "coordinate_frame": "deformed", "background": "none"}
             overlay = overlay_dic_field_on_image(
                 self.dic_last_image,
                 self.dic_last_field,
                 component=component,
-                options={"coordinate_frame": "deformed", "background": "none"},
+                cmap=display_options["cmap"],
+                options=overlay_options,
             )
             self.auto_fit_enabled = False
             self.display_img = overlay
@@ -8167,11 +8910,17 @@ class MultiROIGUI:
         component = str(self.dic_field_component.get() or "u")
         if component not in DIC_FIELD_COMPONENTS:
             component = "u"
-        cmap = matplotlib.colormaps["viridis" if component == "zncc" else self.dic_colormap.get()].copy()
+        display_options = self._resolved_field_display_options(component)
+        cmap = matplotlib.colormaps[display_options["cmap"]].copy()
         cmap.set_bad(self.panel_bg)
-        mesh = render_dic_field_on_axes(ax, self.dic_last_field, component, cmap=cmap)
-        values = np.asarray(self.dic_last_field[component], dtype=float)
-        unit = "px" if component in ("u", "v") else ("%" if self.dic_percent.get() and component != "zncc" else "1")
+        mesh = render_dic_field_on_axes(
+            ax,
+            self.dic_last_field,
+            component,
+            cmap=cmap,
+            options=display_options,
+        )
+        unit = "px" if component in ("u", "v") else ("%" if display_options["percent"] and component != "zncc" else "1")
         # Keep the equal-aspect specimen centered and its colorbar adjacent,
         # including very tall ROIs in a wide independently resized window.
         cax = make_axes_locatable(ax).append_axes("right", size=0.18, pad=0.24)
@@ -8369,13 +9118,22 @@ class MultiROIGUI:
         self.log("已应用「全量复核导出」预设（注意文件会较多）")
 
     def _detect_poisson_capable(self, groups, df):
-        roles = {normalize_roi_role(g.get("role", "none")) for g in groups}
-        has_axial = "axial" in roles
-        has_trans = "transverse" in roles
-        if not (has_axial and has_trans):
+        if not groups or df is None or df.empty:
             return False
-        # 再检查数据里是否有对应的列（兼容旧结果）
-        return "AxialEngineeringStrain" in df.columns or "PoissonRatio" in df.columns
+        try:
+            if not validate_poisson_role_groups(groups):
+                return False
+        except RuntimeError:
+            return False
+        if "AxialEngineeringStrain" in df.columns or "PoissonRatio" in df.columns:
+            return True
+        if "group" not in df.columns or "engineering_strain" not in df.columns:
+            return False
+        axial_groups, transverse_groups = get_poisson_role_groups(groups)
+        present = set(df["group"].dropna().astype(str))
+        has_axial_rows = any(str(g.get("name", "")) in present for g in axial_groups)
+        has_trans_rows = any(str(g.get("name", "")) in present for g in transverse_groups)
+        return has_axial_rows and has_trans_rows
 
     def _rebuild_viewer_plot(self):
         if getattr(self, "_viewer_kind", "extensometer") == "fullfield":
@@ -8390,14 +9148,29 @@ class MultiROIGUI:
         ax = fig.add_subplot(111)
         colors = ["#56b4e9", "#e69f00", "#63d2ab", "#df9bd0", "#cbd5e1"] if self.dark_mode.get() else PLOT_COLOR_CYCLE
         if self._viewer_mode == "poisson" and self._has_poisson:
-            table = build_poisson_ratio_table(df, groups)
-            frame = table["Frame"].astype(float)
-            ratio = table["PoissonRatio"].astype(float)
-            ax.plot(frame, ratio, color=colors[2], linewidth=1.7, label="泊松比")
-            invalid = ~np.isfinite(ratio)
-            if invalid.any():
-                ax.scatter(frame[invalid], np.full(int(invalid.sum()), 0.04), transform=ax.get_xaxis_transform(),
-                           marker="x", color=self.warning_color, s=24, label="无效帧 (NaN)")
+            try:
+                if "PoissonRatio" in df.columns and "group" not in df.columns:
+                    frame_col = "Frame" if "Frame" in df.columns else _frame_column(df)
+                    table = pd.DataFrame(
+                        {
+                            "Frame": pd.to_numeric(df[frame_col], errors="coerce"),
+                            "PoissonRatio": pd.to_numeric(df["PoissonRatio"], errors="coerce"),
+                        }
+                    )
+                else:
+                    validate_poisson_role_groups(groups)
+                    table = build_poisson_ratio_table(df, groups)
+            except RuntimeError as exc:
+                ax.text(0.5, 0.5, f"无法计算泊松比：{exc}", ha="center", va="center", transform=ax.transAxes)
+                table = None
+            if table is not None and not table.empty:
+                frame = table["Frame"].astype(float)
+                ratio = table["PoissonRatio"].astype(float)
+                ax.plot(frame, ratio, color=colors[2], linewidth=1.7, label="泊松比")
+                invalid = ~np.isfinite(ratio)
+                if invalid.any():
+                    ax.scatter(frame[invalid], np.full(int(invalid.sum()), 0.04), transform=ax.get_xaxis_transform(),
+                               marker="x", color=self.warning_color, s=24, label="无效帧 (NaN)")
             ax.set_ylabel("泊松比 (无量纲)")
             ax.set_title("泊松比")
         else:
@@ -8618,6 +9391,7 @@ class MultiROIGUI:
             command=switch_mode,
             state=tk.NORMAL if self._has_poisson else tk.DISABLED
         )
+        self.viewer_poisson_rb = poisson_rb
         poisson_rb.grid(row=0, column=2, sticky="w", padx=4)
         self.add_tooltip(poisson_rb, lambda _event: (
             "点击显示横向收缩与纵向伸长的比值，称为泊松比。没有有效结果的位置会留空。"
@@ -8656,7 +9430,7 @@ class MultiROIGUI:
         if hasattr(self, "_viewer_controls") and self._viewer_controls:
             try:
                 self._viewer_controls.destroy()
-            except Exception:
+            except tk.TclError:
                 pass
             self._viewer_controls = None
 
@@ -8670,6 +9444,7 @@ class MultiROIGUI:
         self.dic_last_filename = None
         self.dic_last_reference_frame_1based = None
         self.dic_last_reference_filename = None
+        self._canvas_mask_overlay_rgb = None
         if hasattr(self, "field_viewer_context_var"):
             self.field_viewer_context_var.set("")
         self._viewer_kind = "extensometer"
@@ -8681,7 +9456,7 @@ class MultiROIGUI:
                 self.viewer_frame.grid()
                 self.viewer_content_frame.grid_remove()
                 self.viewer_placeholder.grid()
-            except Exception:
+            except tk.TclError:
                 pass
             self.viewer_export_btn.config(state=tk.DISABLED)
             self.viewer_clear_btn.config(state=tk.DISABLED)
@@ -8770,6 +9545,7 @@ write_all_groups_origin_txt = _core.write_all_groups_origin_txt
 write_mean_groups_origin_txt = _core.write_mean_groups_origin_txt
 write_poisson_ratio_txt = _core.write_poisson_ratio_txt
 build_origin_project_tables = _core.build_origin_project_tables
+write_origin_opju_project = _core.write_origin_opju_project
 build_qc_summary = _core.build_qc_summary
 write_qc_summary = _core.write_qc_summary
 plot_engineering_strain = _core.plot_engineering_strain

@@ -819,3 +819,311 @@ def test_subplot_dialog_sliders_and_reset_have_contextual_help(workbench):
     app.clear_viewer()
     app.root.update()
     assert canvas._tooltip.text == "" and canvas._tooltip not in app.tooltips
+
+
+def test_poisson_viewer_enabled_for_real_tracking_df_and_guards_mixed_modes(workbench):
+    app = workbench
+    groups = [
+        {"name": "axial", "role": "axial", "actual_mode": "x"},
+        {"name": "transverse", "role": "transverse", "actual_mode": "y"},
+    ]
+    df = pd.DataFrame([
+        {"group": g["name"], "frame_global_1based": frame, "engineering_strain": strain}
+        for g, strains in zip(groups, ([0.0, np.nan, 0.1], [0.0, np.nan, -0.03]))
+        for frame, strain in enumerate(strains, 1)
+    ])
+    app.show_results_viewer(df, groups)
+    assert app._has_poisson is True
+    assert not app.viewer_poisson_rb.instate(["disabled"])
+    app.viewer_poisson_rb.invoke()
+    app.root.update()
+    ax = app.viewer_figure.axes[0]
+    assert app._viewer_mode == "poisson"
+    assert ax.get_title() == "泊松比"
+    ydata = ax.lines[0].get_ydata()
+    assert np.isnan(ydata[0]) and np.isnan(ydata[1])
+    assert ydata[2] == pytest.approx(0.3)
+
+    mixed_groups = [
+        {"name": "A1", "role": "axial", "actual_mode": "x"},
+        {"name": "A2", "role": "axial", "actual_mode": "y"},
+        {"name": "T1", "role": "transverse", "actual_mode": "y"},
+    ]
+    mixed_df = pd.DataFrame([
+        {"group": g["name"], "frame_global_1based": 1, "engineering_strain": 0.01}
+        for g in mixed_groups
+    ])
+    app.show_results_viewer(mixed_df, mixed_groups)
+    assert app._has_poisson is False
+    assert app.viewer_poisson_rb.instate(["disabled"])
+    app._viewer_mode = "poisson"
+    app._has_poisson = True
+    app._rebuild_viewer_plot()
+    assert any("无法计算泊松比" in text.get_text() for text in app.viewer_figure.axes[0].texts)
+
+
+def test_preview_frame_does_not_corrupt_reference_normalization_or_preflight(workbench, tmp_path, monkeypatch):
+    app = workbench
+    image_dir = tmp_path / "images_ref_vs_preview"
+    image_dir.mkdir()
+    ref_speckle = gui.generate_synthetic_speckle(160, 200, seed=55)
+    frame2 = gui.warp_image_translation(ref_speckle, 0.5, 0.0)
+    dark_flat = np.full((160, 200), 10, dtype=np.uint8)
+    for idx, arr in enumerate((ref_speckle, frame2, dark_flat), start=1):
+        gui.write_image_checked(image_dir / f"frame_{idx:03d}.png", np.clip(arr, 0, 255).astype(np.uint8))
+
+    app.image_folder.set(str(image_dir))
+    app.output_folder.set(str(tmp_path / "out_ref_vs_preview"))
+    app.load_images_button.invoke()
+    app.root.update()
+    draw_roi(app, (30, 60, 31, 31))
+    draw_roi(app, (120, 60, 31, 31))
+    app.add_group_button.invoke()
+
+    # Step preview to the flat/dark last frame while reference remains frame 1.
+    app.load_preview_frame(2)
+    app.root.update()
+    assert app.current_preview_index == 2
+    assert int(np.max(app.preview_img8)) == 0 or np.allclose(app.preview_raw, 10)
+    assert not np.array_equal(app.reference_raw, app.preview_raw)
+
+    items = app.build_preflight_items()
+    assert not any(item["level"] == "block" for item in items), items
+
+    # Ensure build_processing_settings neither hashes the whole folder synchronously
+    # nor uses the preview frame for reference normalization.
+    monkeypatch.setattr(
+        gui,
+        "ordered_input_manifest",
+        lambda *_args, **_kwargs: pytest.fail("must not hash whole folder on UI thread"),
+    )
+    app.validate_before_processing()
+    settings = app.build_processing_settings()
+    assert "input_identities" not in settings
+    expected_norm = core.compute_reference_normalization(core.read_gray_image(image_dir / "frame_001.png"))
+    assert settings["normalization"] == expected_norm
+
+
+def test_validation_blocks_stale_ref_invalid_l0_nan_and_campaign_tab(workbench, tmp_path):
+    app = workbench
+    load_sequence(app, tmp_path)
+    draw_roi(app, (30, 60, 31, 31))
+    draw_roi(app, (120, 60, 31, 31))
+    app.add_group_button.invoke()
+
+    # Changing start_frame_1based without redrawing must block validate_before_processing (Ctrl+Enter path).
+    app.start_frame_1based.set(2)
+    with pytest.raises(RuntimeError, match="起始/参考帧"):
+        app.validate_before_processing()
+
+    # Invalid L0 (<= 0 or NaN) must be hard-blocked.
+    app.start_frame_1based.set(1)
+    orig_l0 = app.roi_groups[0]["L0"]
+    for bad_l0 in (0.0, -5.0, float("nan")):
+        app.roi_groups[0]["L0"] = bad_l0
+        with pytest.raises(RuntimeError, match="L0"):
+            app.validate_before_processing()
+    app.roi_groups[0]["L0"] = orig_l0
+
+    # NaN / inf rejected on numeric inputs.
+    for var, bad_val, pattern in (
+        (app.fb_tolerance_px, "nan", "有限"),
+        (app.fb_tolerance_px, "inf", "有限"),
+        (app.max_frame_strain_jump, "nan", "有限"),
+        (app.max_frame_strain_jump, "inf", "有限"),
+        (app.pixel_size_mm, "nan", "有限"),
+        (app.min_texture_std, "nan", "有限"),
+        (app.min_texture_contrast, "inf", "有限"),
+    ):
+        old_val = var.get()
+        var.set(bad_val)
+        with pytest.raises(RuntimeError, match=pattern):
+            app.validate_before_processing()
+        var.set(old_val)
+
+    # Campaign tab hides single-sequence project/run frames and ignores Ctrl+Enter without error dialog.
+    app.control_notebook.select(app.campaign_page)
+    app.root.update()
+    assert app.project_frame.grid_info() == {}
+    assert app.run_frame.grid_info() == {}
+    app._test_dialogs.clear()
+    app.start_processing()
+    assert not app.is_processing
+    assert not app._test_dialogs
+
+    # Returning to settings tab while campaign_page is busy blocks manual run cleanly.
+    app.control_notebook.select(app.settings_page)
+    app.root.update()
+    assert app.project_frame.grid_info()
+    app.campaign_page._busy = True
+    try:
+        app.start_processing()
+        assert not app.is_processing
+        assert app._test_dialogs and "批次项目" in app._test_dialogs[-1][1]
+    finally:
+        app.campaign_page._busy = False
+
+
+def test_fullfield_viewer_unit_sync_and_hidden_1d_texture_and_ui_decode_deferral(workbench, tmp_path, monkeypatch):
+    app = workbench
+    load_sequence(app, tmp_path)
+    app.mode_fullfield_radio.invoke()
+    draw_roi(app, (25, 25, 140, 110))
+
+    # Corrupt hidden 1D texture variables — must not poison fullfield validation or settings.
+    app.min_texture_std.set("bad-std")
+    app.min_texture_contrast.set("nan")
+    app.max_saturated_frac.set("bad-sat")
+    monkeypatch.setattr(
+        gui,
+        "validate_image_sequence_dimensions",
+        lambda *_args, **_kwargs: pytest.fail("UI thread validation must not decode full sequence"),
+    )
+    app.validate_fullfield_before_processing()
+    settings = app.build_processing_settings()
+    assert settings["min_texture_std"] == 8.0
+    assert settings["min_texture_contrast"] == 25.0
+    assert settings["max_saturated_frac"] == 0.20
+
+    # Viewer unit/colormap must stay synchronized with applied display_options, not unapplied Tk vars.
+    X, Y = np.meshgrid(np.arange(6) * 10 + 10, np.arange(5) * 10 + 10)
+    vals = np.linspace(0.001, 0.01, X.size).reshape(X.shape)
+    field = {
+        "X": X, "Y": Y, "Exx": vals.copy(), "Eyy": vals.copy(),
+        "u": np.zeros(X.shape), "v": np.zeros(X.shape), "zncc": np.ones(X.shape),
+        "valid": np.ones(X.shape, dtype=bool), "strain_valid": np.ones(X.shape, dtype=bool),
+        "display_options": {"percent": False, "color_mode": "range", "cmap": "RdBu_r", "background": "none"},
+    }
+    app.show_field_viewer(field, component="Exx", image=np.full((80, 100), 120, np.uint8))
+    app.root.update()
+    assert app.viewer_figure.axes[1].get_ylabel() == "Exx (1)"
+    assert app.viewer_figure.axes[0].collections[0].get_clim()[1] == pytest.approx(0.01, rel=1e-2)
+
+    # Toggle percent and colormap without clicking Apply, then change component.
+    app.dic_percent.set(True)
+    app.dic_colormap.set("turbo")
+    app.dic_field_component.set("Eyy")
+    app._on_field_component_change()
+    app.root.update()
+    assert app.viewer_figure.axes[1].get_ylabel() == "Eyy (1)"
+    assert app.viewer_figure.axes[0].collections[0].get_clim()[1] == pytest.approx(0.01, rel=1e-2)
+    assert app._resolved_field_display_options("Eyy")["cmap"] == "RdBu_r"
+
+    # Clicking Apply updates both scaling and colorbar unit consistently.
+    app.apply_dic_display_options()
+    app.root.update()
+    assert app.viewer_figure.axes[1].get_ylabel() == "Eyy (%)"
+    assert app.viewer_figure.axes[0].collections[0].get_clim()[1] == pytest.approx(1.0, rel=1e-2)
+
+
+def test_mode_switch_mask_preview_zoom_aspect_and_group_rename(workbench, tmp_path, monkeypatch):
+    app = workbench
+    load_sequence(app, tmp_path)
+
+    # Group rename via update_selected_group respects group_name_var.
+    draw_roi(app, (30, 60, 31, 31))
+    draw_roi(app, (120, 60, 31, 31))
+    app.add_group_button.invoke()
+    app.group_tree.selection_set("0")
+    app.load_selected_group()
+    app.group_name_var.set("SpecimenA")
+    app.update_selected_group()
+    assert app.roi_groups[0]["name"] == "SpecimenA"
+
+    # Literal \n bug fixed in clear_groups_if_start_changes prompt.
+    prompts = []
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda title, msg: prompts.append(msg) or False)
+    assert app.clear_groups_if_start_changes(2) is False
+    assert prompts and "\\n" not in prompts[-1] and "\n\n" in prompts[-1]
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *_args, **_kwargs: True)
+
+    # Mask preview survives fit/zoom without clobbering reference frame.
+    ref_raw_before = app.reference_raw.copy()
+    app.mode_fullfield_radio.invoke()
+    draw_roi(app, (25, 25, 140, 110))
+    app.draw_dic_exclusion()
+    assert app._drawing_mask_exclusion is True
+    draw_roi(app, (60, 50, 20, 20))
+    assert len(app.dic_mask_exclusions) == 1
+    assert not np.array_equal(app.display_img[:, :, 0], app.display_img[:, :, 1])
+    app.fit_image_to_view()
+    assert not np.array_equal(app.display_img[:, :, 0], app.display_img[:, :, 1])
+    app.zoom_image(1.5)
+    assert not np.array_equal(app.display_img[:, :, 0], app.display_img[:, :, 1])
+    np.testing.assert_array_equal(app.reference_raw, ref_raw_before)
+
+    # Switching mode clears _drawing_mask_exclusion and stale canvas items.
+    app.draw_dic_exclusion()
+    assert app._drawing_mask_exclusion is True
+    app.mode_extensometer_radio.invoke()
+    app.root.update()
+    assert app._drawing_mask_exclusion is False
+
+    # Back to fullfield: clear_current_rois clears dic_mask_exclusions too.
+    app.mode_fullfield_radio.invoke()
+    app.clear_current_rois()
+    assert app.field_roi is None
+    assert app.dic_mask_exclusions == []
+    assert app._drawing_mask_exclusion is False
+
+    # Non-square manual zoom preserves aspect ratio instead of squashing to 50x50.
+    app.current_fullres_img8 = np.full((40, 200), 120, dtype=np.uint8)
+    app.zoom_factor = 0.05
+    app._apply_manual_zoom()
+    dh, dw = app.display_img.shape[:2]
+    assert abs((dw / dh) - (200 / 40)) < 0.5
+
+
+def test_extensometer_viewer_ordering_and_aliases_and_tooltip_cleanup(workbench, tmp_path, monkeypatch):
+    app = workbench
+    assert gui.write_origin_opju_project is core.write_origin_opju_project
+
+    # Viewer runs BEFORE completion dialog, and viewer exceptions are caught cleanly.
+    order = []
+    monkeypatch.setattr(app, "post_to_ui", lambda cb: cb())
+    monkeypatch.setattr(
+        app,
+        "show_results_viewer",
+        lambda *_args, **_kwargs: (order.append("viewer"), (_ for _ in ()).throw(RuntimeError("viewer boom"))),
+    )
+    monkeypatch.setattr(
+        app,
+        "show_completion_and_open_output_folder",
+        lambda *_args, **_kwargs: order.append("completion"),
+    )
+    ext_df = pd.DataFrame({"group": ["G01"], "frame_global_1based": [1], "engineering_strain": [0.0]})
+    ext_summary = {"overall": {"qc_level": "Good", "rejected_frames": 0, "adaptive_accepted_frames": 0}, "groups": {}}
+    monkeypatch.setattr(
+        gui._core,
+        "run_extensometer_sequence",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "scientific_ok": True,
+            "manifest_path": str(tmp_path / "out" / "run_manifest.json"),
+            "outputs": [],
+            "dataframe": ext_df,
+            "summary": ext_summary,
+        },
+    )
+    app.process_images({
+        "image_paths": ["f1.png"],
+        "start_idx": 0,
+        "end_idx": 0,
+        "output_dir": tmp_path / "out",
+        "roi_groups": [{"name": "G01"}],
+        "export_origin_txt": False,
+    })
+    assert order == ["viewer", "completion"]
+    assert "viewer boom" in app.log_text.get("1.0", tk.END)
+
+    # ChoiceToolTip.dispose cleans up its Tcl commands without failing widget destroy.
+    box = ttk.Combobox(app.main_frame, values=("A", "B"), state="readonly")
+    box.grid(row=4, column=0)
+    app.add_tooltip(box, "temp", choices={"A": "opt A", "B": "opt B"})
+    tip = box._tooltip
+    cmds = (tip.motion_command, tip.selection_command, tip.hide_command)
+    assert all(cmds)
+    box.destroy()
+    app.root.update()
+    assert tip.motion_command is None and tip.selection_command is None and tip.hide_command is None
+
