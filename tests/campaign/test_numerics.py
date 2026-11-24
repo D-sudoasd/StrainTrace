@@ -234,3 +234,23 @@ def test_numerics_policy_flat_columns_mask_fingerprint_and_texture_preflight(tmp
     with pytest.raises(CampaignError) as exc:
         numerics.analyze(acquisition, tmp_path)
     assert exc.value.code in {"LOW_TEXTURE", "SATURATED_TEXTURE", "AMBIGUOUS_TEXTURE"}
+
+
+def test_code_fingerprints_cover_all_campaign_modules_including_time_io(tmp_path):
+    from straintrace_campaign import storage, workflow
+
+    fingerprints = numerics._code_fingerprints()
+    campaign_root = Path(storage.__file__).resolve().parent
+    actual_modules = sorted(
+        f"straintrace_campaign/{path.relative_to(campaign_root).as_posix()}"
+        for path in campaign_root.rglob("*.py")
+    )
+    for rel in actual_modules:
+        assert rel in fingerprints, f"missing module fingerprint: {rel}"
+        assert len(fingerprints[rel]) == 64
+    assert "straintrace_campaign/_time_io.py" in fingerprints
+    assert "straintrace_campaign/__main__.py" in fingerprints
+    assert "ezdic_core.py" in fingerprints
+
+    acquisition, _ref, _paths = _campaign(tmp_path)
+    assert numerics._roi_tracking_geometry(acquisition) == workflow._roi_tracking_geometry(acquisition)

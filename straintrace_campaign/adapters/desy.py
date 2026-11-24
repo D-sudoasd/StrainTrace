@@ -9,14 +9,19 @@ explicit counter mapping or a unique colocated FIO file supports the join.
 from __future__ import annotations
 
 import csv
-import datetime as dt
 import io
-import math
 import os
 import re
 from pathlib import Path
 from typing import Any
 
+from .._time_io import (
+    classify_time_value as parse_time_value,
+    finite_number as _number,
+    resolve_force_unit,
+    sniff_csv_delimiter,
+    strict_integer as _integer,
+)
 from .generic import _is_excluded, _parse_cell, discover as generic_discover, read_explicit_frame_mapping
 
 
@@ -25,75 +30,6 @@ _FIO_SCAN = re.compile(r"(?:^|[/\\])eh3scan_(\d+)\.fio$", re.IGNORECASE)
 _FIO_FOLDER = re.compile(r"^fio[_-]?(\d+)$", re.IGNORECASE)
 _FIO_TOKEN = re.compile(r"<no-data>|None|[^\s]+", re.IGNORECASE)
 _MISSING = {"", "nan", "none", "na", "n/a", "null", "<no-data>"}
-_ABSOLUTE_EPOCH_MIN = 1_000_000_000.0
-
-
-def _number(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _integer(value: Any) -> int | None:
-    number = _number(value)
-    if number is None:
-        return None
-    rounded = round(number)
-    return int(rounded) if abs(number - rounded) <= 1e-8 else None
-
-
-def parse_time_value(value: Any) -> dict[str, Any]:
-    """Classify a timestamp without turning a relative clock into Unix time."""
-    number = _number(value)
-    if number is not None:
-        if number >= _ABSOLUTE_EPOCH_MIN:
-            return {
-                "timestamp_unix_s": number,
-                "time_s": None,
-                "timestamp_status": "RECORDED_ABSOLUTE_EPOCH",
-                "timestamp_timezone": "UTC_EPOCH",
-            }
-        return {
-            "timestamp_unix_s": None,
-            "time_s": number,
-            "timestamp_status": "RECORDED_RELATIVE_CLOCK",
-            "timestamp_timezone": None,
-        }
-    text = "" if value is None else str(value).strip()
-    if not text or text.casefold() in _MISSING:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "MISSING_TIMESTAMP",
-            "timestamp_timezone": None,
-        }
-    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    try:
-        parsed = dt.datetime.fromisoformat(candidate)
-    except ValueError:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "UNPARSEABLE_TIMESTAMP",
-            "timestamp_timezone": None,
-            "timestamp_raw": text,
-        }
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return {
-            "timestamp_unix_s": None,
-            "time_s": None,
-            "timestamp_status": "NAIVE_DATETIME_TIMEZONE_UNKNOWN",
-            "timestamp_timezone": None,
-            "timestamp_raw": text,
-        }
-    return {
-        "timestamp_unix_s": parsed.timestamp(),
-        "time_s": None,
-        "timestamp_status": "RECORDED_ABSOLUTE_TIMEZONE_AWARE",
-        "timestamp_timezone": str(parsed.tzinfo),
-    }
 
 
 def parse_fio_text(text: str, source_path: str = "<memory>") -> dict[str, Any]:
@@ -201,11 +137,7 @@ def parse_load_table_text(
     """
     content = str(text)
     if delimiter is None:
-        try:
-            dialect = csv.Sniffer().sniff(content[:8192], delimiters=",;\t")
-            delimiter = dialect.delimiter
-        except csv.Error:
-            delimiter = ","
+        delimiter = sniff_csv_delimiter(content[:8192])
     reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=delimiter)
     headers = reader.fieldnames or []
     issues: list[dict[str, Any]] = []
@@ -217,16 +149,7 @@ def parse_load_table_text(
     for source_row, raw in enumerate(reader, start=2):
         time_info = parse_time_value(raw.get(time_column)) if time_column in headers else parse_time_value(None)
         raw_force = _number(raw.get(force_column)) if force_column in headers else None
-        unit_text = force_unit
-        if not unit_text:
-            for key in ("force_unit", "load_unit", "unit"):
-                if raw.get(key):
-                    unit_text = str(raw[key]).strip()
-                    break
-        if not unit_text and force_column == "force_N":
-            unit_text = "N"
-        normalized_unit = (unit_text or "").casefold().replace(" ", "")
-        scale = {"n": 1.0, "newton": 1.0, "newtons": 1.0, "kn": 1000.0, "kilonewton": 1000.0, "kilonewtons": 1000.0}.get(normalized_unit)
+        unit_text, scale = resolve_force_unit(raw, force_column, force_unit)
         if raw_force is None:
             force_n = None
             force_status = "MISSING_OR_INVALID_FORCE"

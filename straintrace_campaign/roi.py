@@ -5,8 +5,6 @@ run: approval binds every rectangle and endpoint to the exact reference bytes.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import os
 import re
@@ -19,7 +17,13 @@ import numpy as np
 from scipy import ndimage
 
 import ezdic_core as core
-from .storage import atomic_write_bytes, proposal_hash as _shared_proposal_hash
+from .storage import (
+    atomic_write_bytes,
+    canonical_json_sha256 as _canonical_hash,
+    json_safe,
+    proposal_hash as _shared_proposal_hash,
+    sha256_file as _sha256_file,
+)
 
 _PROPOSAL_VERSION = "campaign_roi_v1"
 _GEOMETRY_KEYS = ("reference_frame", "reference_path", "reference_sha256", "image_shape", "free_region", "field_roi", "exclusions", "groups")
@@ -37,37 +41,7 @@ _TEXTURE_THRESHOLDS = {
 
 def _strict_json(value: Any) -> Any:
     """Convert NumPy values and reject non-finite proposal data."""
-    if isinstance(value, Mapping):
-        return {str(key): _strict_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_strict_json(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _strict_json(value.tolist())
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating, float)):
-        number = float(value)
-        if not math.isfinite(number):
-            return None
-        return number
-    if isinstance(value, (np.bool_, bool)):
-        return bool(value)
-    if value is None or isinstance(value, (str, int)):
-        return value
-    return str(value)
-
-
-def _canonical_hash(value: Any) -> str:
-    payload = json.dumps(_strict_json(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return json_safe(value, coerce_unknown=True)
 
 
 def _frame_records(acquisition: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -208,11 +208,28 @@ def test_storage_finalize_normalizes_slashes_and_reusable_verifies_all_artifacts
     assert not storage.stage_record_reusable(tmp_path, copy.deepcopy(record), "c" * 64)
 
 
+def test_artifact_path_normalizes_backslashes_before_path_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    real_path = storage.Path
+
+    def spy_path(value: object) -> Path:
+        if isinstance(value, str) and value.startswith("versions"):
+            seen.append(value)
+        return real_path(value)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(storage, "Path", spy_path)
+    resolved = storage.artifact_path(tmp_path, "versions\\v001\\catalog.json")
+    assert seen == ["versions/v001/catalog.json"]
+    assert resolved == (tmp_path / "versions" / "v001" / "catalog.json").resolve()
+
+
 def test_headless_package_import_does_not_pull_gui_or_vision_deps() -> None:
     script = (
         "import json, sys; "
         "import straintrace_campaign; "
-        "blocked = [m for m in ('cv2', 'pandas', 'tkinter', 'PIL', 'ezdic_core') if m in sys.modules]; "
+        "import straintrace_campaign._time_io; "
+        "import straintrace_campaign.delivery; "
+        "blocked = [m for m in ('cv2', 'numpy', 'pandas', 'tkinter', 'PIL', 'ezdic_core') if m in sys.modules]; "
         "print(json.dumps(blocked))"
     )
     proc = subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)

@@ -104,3 +104,17 @@ def test_cli_subcommands_verify_project_json_and_blocked_run_dict(tmp_path: Path
     blocked_out = json.loads(capsys.readouterr().out)
     assert blocked_code == cli.EXIT_GATE
     assert blocked_out["result"]["status"] == "BLOCKED"
+
+
+def test_python_m_straintrace_campaign_help_succeeds():
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "straintrace_campaign", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "straintrace campaign" in proc.stdout or "usage:" in proc.stdout.lower()

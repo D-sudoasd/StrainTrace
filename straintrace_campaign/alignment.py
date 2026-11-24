@@ -6,202 +6,54 @@ only when a mapping is explicit; force and strain are never extrapolated.
 
 from __future__ import annotations
 
-import bisect
-import csv
-import datetime as dt
-import hashlib
-import json
 import math
 import os
 import re
 import statistics
-import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ._time_io import (
+    bracket_time as _bracket,
+    clock_pair_compatible as _clock_pair_compatible,
+    finite_number as _number,
+    parse_bool as _bool,
+    parse_row_time as _parse_time,
+    read_load_table,
+    strict_integer as _integer,
+    window_mean_support as _window_mean,
+)
 from .models import CampaignError
 from .storage import (
     artifact_path,
+    canonical_json_sha256,
     fingerprint_data,
+    read_jsonl,
     relative_artifact,
+    resolve_source_file,
     sha256_file,
     stage_output_dir,
     write_jsonl_atomic,
 )
 
 
-_ABSOLUTE_EPOCH_MIN = 1_000_000_000.0
-_EXACT_TIME_TOL_S = 2e-6
-_TRUE = {"true", "1", "yes", "y"}
-_FALSE = {"false", "0", "no", "n"}
 _INVALID_STATUS_WORDS = ("FAIL", "REJECT", "INVALID", "QC_FAILED", "INSUFFICIENT")
 _GAUGE_RE = re.compile(r"^(G\d{2})_engineering_strain$")
-
-
-def _number(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if math.isfinite(result) else None
-
-
-def _integer(value: Any) -> int | None:
-    result = _number(value)
-    if result is None:
-        return None
-    rounded = round(result)
-    if abs(result - rounded) > 1e-8:
-        return None
-    return int(rounded)
-
-
-def _bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    text = str(value).strip().casefold()
-    if text in _TRUE:
-        return True
-    if text in _FALSE:
-        return False
-    return default
-
-
-_DERIVED_TIME_STATUS_WORDS = ("ESTIMAT", "RECONSTRUCT", "INFER", "PROTOCOL", "ADOPTED")
-
-
-def _parse_time(field: str, row: Mapping[str, Any]) -> tuple[float | None, str, str | None, str | None]:
-    """Return (value, domain, clock_id, reason) for the selected time field."""
-    if field not in row or row.get(field) is None or str(row.get(field)).strip() == "":
-        if field == "timestamp_unix_s" and row.get("estimated_timestamp_unix_s") not in (None, ""):
-            return None, "missing", None, "RECORDED_TIMESTAMP_MISSING_ESTIMATE_SEPARATE"
-        return None, "missing", None, "TIME_VALUE_MISSING"
-    status = str(row.get("timestamp_status") or row.get("time_status") or "").upper()
-    if not field.startswith("estimated_") and any(word in status for word in _DERIVED_TIME_STATUS_WORDS):
-        return None, "missing", None, "TIME_FIELD_MARKED_DERIVED"
-
-    raw = row.get(field)
-    number = _number(raw)
-    clock_id = row.get("clock_id") or row.get("timestamp_clock_id") or row.get("time_clock_id")
-    clock_id = str(clock_id).strip() if clock_id not in (None, "") else None
-    if clock_id == "":
-        clock_id = None
-    if number is not None:
-        if field.endswith("unix_s"):
-            if number < _ABSOLUTE_EPOCH_MIN:
-                return None, "missing", clock_id, "UNIX_FIELD_VALUE_OUTSIDE_EPOCH_RANGE"
-            return number, "unix_epoch_estimated" if field.startswith("estimated_") else "unix_epoch_recorded", clock_id, None
-        if field == "time_s" or field.endswith("_time_s"):
-            if not clock_id:
-                return None, "relative", None, "RELATIVE_CLOCK_ID_REQUIRED"
-            return number, "relative", clock_id, None
-        if number >= _ABSOLUTE_EPOCH_MIN:
-            return number, "unix_epoch_estimated" if field.startswith("estimated_") else "unix_epoch_recorded", clock_id, None
-        if not clock_id:
-            return None, "relative", None, "RELATIVE_CLOCK_ID_REQUIRED"
-        return number, "relative", clock_id, None
-
-    text = str(raw).strip()
-    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    try:
-        parsed = dt.datetime.fromisoformat(candidate)
-    except ValueError:
-        return None, "missing", clock_id, "TIME_VALUE_UNPARSEABLE"
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None, "missing", clock_id, "NAIVE_DATETIME_TIMEZONE_UNKNOWN"
-    domain = "unix_epoch_estimated" if field.startswith("estimated_") else "unix_epoch_recorded"
-    return parsed.timestamp(), domain, clock_id, None
-
-
-def _clock_pair_compatible(
-    left: tuple[float | None, str, str | None, str | None],
-    right: tuple[float | None, str, str | None, str | None],
-    *,
-    allow_explicit_estimated_pair: bool = False,
-) -> tuple[bool, str]:
-    if left[0] is None or right[0] is None:
-        return False, left[3] or right[3] or "TIME_VALUE_MISSING"
-    left_domain, right_domain = left[1], right[1]
-    if left_domain == right_domain and left_domain in {"unix_epoch_recorded", "unix_epoch_estimated"}:
-        return True, ""
-    if {left_domain, right_domain} == {"unix_epoch_recorded", "unix_epoch_estimated"}:
-        if allow_explicit_estimated_pair:
-            return True, ""
-        return False, "RECORDED_ESTIMATED_CLOCK_MISMATCH"
-    if left_domain == right_domain == "relative":
-        if left[2] and left[2] == right[2]:
-            return True, ""
-        return False, "RELATIVE_CLOCK_DOMAIN_MISMATCH"
-    return False, "TIME_CLOCK_DOMAIN_MISMATCH"
 
 
 def _read_load(
     path: Path, time_column: str, force_column: str, force_unit: str | None
 ) -> tuple[list[dict[str, Any]], list[float], list[float | None], list[bool], list[str], list[str | None], list[str]]:
-    if not path.is_file():
-        raise CampaignError("LOAD_SOURCE_NOT_FOUND", f"load source does not exist: {path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as stream:
-        sample = stream.read(8192)
-        stream.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-            delimiter = dialect.delimiter
-        except csv.Error:
-            delimiter = ","
-        reader = csv.DictReader(stream, delimiter=delimiter)
-        headers = reader.fieldnames or []
-        if time_column not in headers:
-            raise CampaignError("LOAD_TIME_COLUMN_MISSING", f"load source has no {time_column!r} column")
-        if force_column not in headers:
-            raise CampaignError("LOAD_FORCE_COLUMN_MISSING", f"load source has no {force_column!r} column")
-        rows = [dict(raw) for raw in reader]
-    parsed_times: list[float] = []
-    time_domains: list[str] = []
-    clock_ids: list[str | None] = []
-    forces: list[float | None] = []
-    valid: list[bool] = []
-    force_reasons: list[str] = []
-    for i, raw in enumerate(rows):
-        time_value, domain, clock_id, time_error = _parse_time(time_column, raw)
-        if time_value is None:
-            raise CampaignError("LOAD_TIME_AXIS_INVALID", f"load row {i + 2} has invalid time: {time_error}")
-        parsed_times.append(time_value)
-        time_domains.append(domain)
-        clock_ids.append(clock_id)
-
-        raw_force = _number(raw.get(force_column))
-        unit = force_unit
-        if not unit:
-            for unit_key in ("force_unit", "load_unit", "unit"):
-                candidate_unit = raw.get(unit_key)
-                if candidate_unit is not None and str(candidate_unit).strip():
-                    unit = str(candidate_unit).strip()
-                    break
-        if not unit and force_column == "force_N":
-            unit = "N"
-        unit_norm = str(unit or "").strip().casefold().replace(" ", "")
-        scale = {
-            "n": 1.0, "newton": 1.0, "newtons": 1.0,
-            "kn": 1000.0, "kilonewton": 1000.0, "kilonewtons": 1000.0,
-        }.get(unit_norm)
-        if raw_force is None or scale is None:
-            forces.append(None)
-            valid.append(False)
-            force_reasons.append("UNKNOWN_FORCE_UNIT" if raw_force is not None and scale is None else "INVALID_FORCE_VALUE")
-        else:
-            forces.append(raw_force * scale)
-            row_valid = raw.get("is_force_valid")
-            valid.append(True if row_valid in (None, "") else _bool(row_valid))
-            force_reasons.append("VALID_FORCE_N" if valid[-1] else "SOURCE_MARKED_FORCE_INVALID")
-    if not rows:
-        raise CampaignError("LOAD_SOURCE_EMPTY", f"load source has no data rows: {path}")
-    if any(b <= a for a, b in zip(parsed_times, parsed_times[1:])):
-        raise CampaignError("LOAD_TIME_AXIS_NOT_STRICTLY_INCREASING", "load timestamps must be unique and increasing in source-row order")
-    return rows, parsed_times, forces, valid, time_domains, clock_ids, force_reasons
+    table = read_load_table(path, time_column, force_column, force_unit)
+    return (
+        table["rows"],
+        table["times"],
+        table["forces"],
+        table["valid"],
+        table["time_domains"],
+        table["clock_ids"],
+        table["force_reasons"],
+    )
 
 
 def _axis_times(
@@ -228,8 +80,6 @@ def _source_rows(acquisition: Mapping[str, Any], project_root: Path) -> list[dic
     if not rows_path:
         return []
     try:
-        from .storage import read_jsonl
-
         return read_jsonl(artifact_path(project_root, str(rows_path)))
     except CampaignError:
         raise
@@ -298,100 +148,6 @@ def _quality_eligible(row: Mapping[str, Any]) -> bool:
     engineering, _ = _aggregate_strain(row)
     gauges = _gauge_values(row)
     return engineering is not None or sum(value is not None for value in gauges.values()) >= 3
-
-
-def _bracket(times: Sequence[float], q: float, max_gap_s: float, valid: Sequence[bool]) -> dict[str, Any]:
-    if not times:
-        return {"status": "NO_TIME_SUPPORT", "indices": [], "weights": []}
-    low, high = 0, len(times)
-    while low < high:
-        middle = (low + high) // 2
-        if times[middle] < q:
-            low = middle + 1
-        else:
-            high = middle
-    candidates = [index for index in (low - 1, low) if 0 <= index < len(times)]
-    exact = next((index for index in candidates if abs(times[index] - q) <= _EXACT_TIME_TOL_S), None)
-    if exact is not None:
-        if not valid[exact]:
-            return {"status": "INVALID_EXACT_SAMPLE", "indices": [exact], "weights": [1.0]}
-        return {"status": "EXACT_TIME_SAMPLE", "indices": [exact], "weights": [1.0]}
-    if low == 0 or low == len(times):
-        return {"status": "OUTSIDE_TIME_RANGE", "indices": [], "weights": []}
-    left, right = low - 1, low
-    delta = times[right] - times[left]
-    if delta <= 0:
-        return {"status": "NONMONOTONIC_TIME_AXIS", "indices": [left, right], "weights": []}
-    if not valid[left] or not valid[right]:
-        return {"status": "INVALID_BRACKET", "indices": [left, right], "weights": []}
-    if delta > max_gap_s + _EXACT_TIME_TOL_S:
-        return {"status": "LONG_TIME_GAP", "indices": [left, right], "weights": []}
-    alpha = (q - times[left]) / delta
-    return {
-        "status": "LINEAR_TIME_INTERPOLATION",
-        "indices": [left, right],
-        "weights": [1 - alpha, alpha],
-        "alpha": alpha,
-    }
-
-
-def _window_mean(
-    times: Sequence[float],
-    values: Sequence[float | None],
-    valid: Sequence[bool],
-    start: float | None,
-    end: float | None,
-    max_gap_s: float,
-) -> dict[str, Any]:
-    if start is None or end is None:
-        return {"status": "EXPOSURE_WINDOW_MISSING", "value": None, "indices": [], "weights": []}
-    if end <= start:
-        return {"status": "INVALID_EXPOSURE_WINDOW", "value": None, "indices": [], "weights": []}
-    if not times or start < times[0] - _EXACT_TIME_TOL_S or end > times[-1] + _EXACT_TIME_TOL_S:
-        return {"status": "OUTSIDE_TIME_RANGE", "value": None, "indices": [], "weights": []}
-
-    if len(times) == 1:
-        if not valid[0] or values[0] is None:
-            return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [0], "weights": []}
-        return {"status": "EXPOSURE_WINDOW_MEAN", "value": float(values[0]), "indices": [0], "weights": [1.0]}
-
-    eff_start = max(float(start), float(times[0]))
-    eff_end = min(float(end), float(times[-1]))
-    if eff_end <= eff_start:
-        # Both endpoints lie within _EXACT_TIME_TOL_S of a single boundary sample.
-        boundary = 0 if eff_start <= times[0] else len(times) - 1
-        if not valid[boundary] or values[boundary] is None:
-            return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [boundary], "weights": []}
-        return {"status": "EXPOSURE_WINDOW_MEAN", "value": float(values[boundary]), "indices": [boundary], "weights": [1.0]}
-
-    coefficients: dict[int, float] = {}
-    idx = max(0, min(len(times) - 2, bisect.bisect_right(times, eff_start) - 1))
-    while idx < len(times) - 1:
-        left, right = idx, idx + 1
-        seg_a = max(eff_start, float(times[left]))
-        seg_b = min(eff_end, float(times[right]))
-        if seg_b > seg_a:
-            delta = float(times[right]) - float(times[left])
-            if delta <= 0:
-                return {"status": "NONMONOTONIC_TIME_AXIS", "value": None, "indices": [left, right], "weights": []}
-            if delta > max_gap_s + _EXACT_TIME_TOL_S:
-                return {"status": "LONG_TIME_GAP", "value": None, "indices": [left, right], "weights": []}
-            if not valid[left] or not valid[right] or values[left] is None or values[right] is None:
-                return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [left, right], "weights": []}
-            r0 = max(0.0, min(1.0, (seg_a - float(times[left])) / delta))
-            r1 = max(0.0, min(1.0, (seg_b - float(times[left])) / delta))
-            segment_length = seg_b - seg_a
-            coefficients[left] = coefficients.get(left, 0.0) + 0.5 * segment_length * ((1.0 - r0) + (1.0 - r1))
-            coefficients[right] = coefficients.get(right, 0.0) + 0.5 * segment_length * (r0 + r1)
-        if float(times[right]) >= eff_end:
-            break
-        idx += 1
-
-    duration = eff_end - eff_start
-    indices = sorted(coefficients)
-    weights = [coefficients[index] / duration for index in indices]
-    value = sum(float(values[index]) * weight for index, weight in zip(indices, weights) if values[index] is not None)
-    return {"status": "EXPOSURE_WINDOW_MEAN", "value": value, "indices": indices, "weights": weights}
 
 
 def _confirmed_area(acquisition: Mapping[str, Any]) -> tuple[float | None, float | None, str | None, str]:
@@ -698,23 +454,15 @@ def _dic_rows_for_axis(
     return output
 
 
-def _alignment_code_sha256() -> str | None:
-    frozen = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
-    candidates: list[Path] = []
-    if frozen:
-        meipass = getattr(sys, "_MEIPASS", None)
-        exe_dir = Path(sys.executable).resolve().parent
-        for base in ([Path(meipass) / "sources"] if meipass else []) + [exe_dir / "_internal" / "sources", exe_dir / "sources"]:
-            candidates.append(base / "straintrace_campaign" / "alignment.py")
-    else:
-        candidates.append(Path(__file__).resolve())
-    for candidate in candidates:
-        try:
-            if candidate.is_file() and candidate.suffix.lower() == ".py":
-                return sha256_file(candidate)
-        except OSError:
-            continue
-    return None
+def _alignment_code_sha256() -> dict[str, str]:
+    return {
+        "straintrace_campaign/alignment.py": sha256_file(
+            resolve_source_file("straintrace_campaign/alignment.py", module_file=__file__)
+        ),
+        "straintrace_campaign/_time_io.py": sha256_file(
+            resolve_source_file("straintrace_campaign/_time_io.py")
+        ),
+    }
 
 
 def _axis_digest(
@@ -732,15 +480,7 @@ def _axis_digest(
         exposure_start_column, exposure_end_column,
     )
     unique_keys = tuple(dict.fromkeys(keys))
-    return hashlib.sha256(
-        json.dumps(
-            [{key: row.get(key) for key in unique_keys} for row in axis_rows],
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    return canonical_json_sha256([{key: row.get(key) for key in unique_keys} for row in axis_rows])
 
 
 def fingerprint(

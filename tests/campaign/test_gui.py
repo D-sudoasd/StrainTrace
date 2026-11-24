@@ -523,3 +523,29 @@ def test_gui_16bit_tiff_preview_loads_and_caches(campaign_case, tmp_path):
     assert img1.mode == "RGB" and img2.mode == "RGB"
     assert after_first == before + 1
     assert len(page._preview_image_cache) == after_first
+
+
+def test_gui_alignment_preview_delegates_to_workflow_and_supports_image_only_batches(campaign_case, tmp_path):
+    _root, page, wf, _tmp = campaign_case
+    load = tmp_path / "semi_load.csv"
+    load.write_text(
+        "timestamp_unix_s;force_N\n1700000099;10\n1700000101;30\n1700000103;50\n",
+        encoding="utf-8",
+    )
+    page._load_column_choices(str(load))
+    assert list(page.time_column_box.cget("values")) == ["timestamp_unix_s", "force_N"]
+
+    # Image-only generic batch (no measurement_frames) previews cleanly through workflow.preview_alignment.
+    acq = page._selected_acquisition()
+    acq["measurement_frames"] = []
+    for index, frame in enumerate(acq["image_frames"]):
+        frame["timestamp_unix_s"] = 1_700_000_100.0 + index
+    page.load_path_var.set(str(load))
+    page.time_column_var.set("timestamp_unix_s")
+    page.force_column_var.set("force_N")
+    page.measurement_time_field_var.set("timestamp_unix_s")
+    page.max_gap_var.set("2.5")
+    page.preview_alignment()
+    assert str(page.align_button["state"]) == tk.NORMAL
+    assert "3 / 3" in page.status_var.get()
+    assert not any(call[0] == "align" for call in wf.calls)

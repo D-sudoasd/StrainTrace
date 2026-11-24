@@ -8,13 +8,24 @@ import importlib
 import io
 import math
 import os
-import sys
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ._time_io import (
+    bracket_time,
+    clock_pair_compatible,
+    finite_number,
+    parse_row_time,
+    read_csv_header,
+    read_load_table,
+    strict_integer,
+    window_mean_support,
+)
 from .models import CampaignError, is_absolute_path, validate_acquisition, validate_project, validate_relative_path
+from . import storage
 from .storage import (
     acquire_project_lock,
     artifact_path,
@@ -22,15 +33,19 @@ from .storage import (
     atomic_write_json,
     finalize_stage_record,
     fingerprint_data,
+    module_code_sha256 as _module_code_sha256,
     project_dir as _project_dir,
     proposal_hash,
     read_jsonl,
     relative_artifact,
+    roi_tracking_geometry as _shared_roi_tracking_geometry,
     sha256_file,
     stage_output_dir,
     stage_record_reusable,
     strict_json_load,
 )
+
+sys = storage.sys
 
 
 _ACQUISITION_NAMESPACE = uuid.UUID("82b93936-c077-4f93-aeb7-2c34fbd42550")
@@ -422,8 +437,6 @@ def import_keystone(path: str | os.PathLike[str], source: str | os.PathLike[str]
                 item for item in project["acquisitions"]
                 if item.get("metadata", {}).get("keystone_import", {}).get("source_version_id") == version_id
             ])
-        import shutil
-
         delivery = _module("delivery")
         try:
             staged_import_dir = artifact_path(root, f"imports/keystone/{version_id}")
@@ -443,15 +456,9 @@ def import_keystone(path: str | os.PathLike[str], source: str | os.PathLike[str]
                     raw_acq.setdefault("metadata", {}).setdefault("keystone_import", {})["dimension_source_fields"] = extra_dims
                     raw_acq["dimensions"] = {k: v for k, v in raw_acq["dimensions"].items() if k in {"area_mm2", "width_mm", "thickness_mm", "status", "source"}}
                 acq = validate_acquisition(raw_acq)
-                imported_digest = fingerprint_data("keystone_acquisition", acq)
                 # Imported acquisition IDs are source identities and are never replaced.
                 if acq["acquisition_id"] in known_by_id:
-                    old = known_by_id[acq["acquisition_id"]]
-                    previous_digest = old.get("metadata", {}).get("imported_keystone_digest")
-                    if previous_digest == imported_digest:
-                        continue
                     raise CampaignError("IMPORTED_IDENTITY_CONFLICT", f"imported acquisition {acq['acquisition_id']} conflicts with the project")
-                acq.setdefault("metadata", {})["imported_keystone_digest"] = imported_digest
                 if acq["result"] is not None:
                     record = dict(acq["result"])
                     if record.get("status") != "IMPORTED_ACCEPTED":
@@ -839,96 +846,14 @@ def _expected_analysis_fingerprint(numerics: Any, acq: Mapping[str, Any]) -> str
     })
 
 
-def _module_code_sha256(module: Any) -> str:
-    module_name = getattr(module, "__name__", None)
-    if not isinstance(module_name, str) or not module_name:
-        spec = getattr(module, "__spec__", None)
-        module_name = getattr(spec, "name", None)
-    if not isinstance(module_name, str) or not module_name:
-        for attr in ("fingerprint", "analyze", "align"):
-            function = getattr(module, attr, None)
-            function_module = getattr(function, "__module__", None)
-            if isinstance(function_module, str) and function_module:
-                module_name = function_module
-                break
-
-    relative_source = Path(*module_name.split(".")).with_suffix(".py") if isinstance(module_name, str) and module_name else None
-    executable_dir = Path(sys.executable).resolve().parent
-    frozen = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
-    candidate_paths: list[Path] = []
-    if frozen and relative_source is not None:
-        bundle_roots = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            bundle_roots.append(Path(meipass) / "sources")
-        bundle_roots.extend((executable_dir / "_internal" / "sources", executable_dir / "sources"))
-        candidate_paths.extend(base / relative_source for base in bundle_roots)
-
-    if not frozen:
-        # Editable installs and synthetic tests can identify the defining
-        # module through __file__ or a callable's source location.
-        source = getattr(module, "__file__", None)
-        if isinstance(source, str) and Path(source).suffix.lower() == ".py":
-            candidate_paths.append(Path(source))
-        if relative_source is not None:
-            candidate_paths.append(Path(__file__).resolve().parent.parent / relative_source)
-        for attr in ("fingerprint", "analyze", "align"):
-            function = getattr(module, attr, None)
-            code = getattr(function, "__code__", None)
-            filename = getattr(code, "co_filename", None)
-            if isinstance(filename, str) and Path(filename).suffix.lower() == ".py":
-                candidate_paths.append(Path(filename))
-
-    seen: set[str] = set()
-    for candidate in candidate_paths:
-        try:
-            canonical = candidate.resolve()
-            key = str(canonical).casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            if canonical.is_file():
-                return sha256_file(canonical)
-        except (OSError, TypeError, ValueError):
-            continue
-    raise CampaignError(
-        "CAMPAIGN_CODE_FINGERPRINT_UNAVAILABLE",
-        f"cannot resolve an auditable source copy for campaign module {getattr(module, '__name__', type(module).__name__)}",
-    )
-
-
 def _roi_tracking_geometry(acq: Mapping[str, Any]) -> dict[str, Any] | None:
-    return _roi_tracking_geometry_for(acq, acq.get("roi"))
+    return _shared_roi_tracking_geometry(acq)
 
 
 def _roi_tracking_geometry_for(
     acq: Mapping[str, Any], proposal: Mapping[str, Any] | None
 ) -> dict[str, Any] | None:
-    if not isinstance(proposal, Mapping):
-        return None
-    reference = _reference_frame(acq, proposal)
-    groups = proposal.get("groups", [])
-    normalized_groups = []
-    if isinstance(groups, list):
-        for group in groups:
-            if isinstance(group, Mapping):
-                normalized_groups.append({
-                    key: _clone(group[key])
-                    for key in ("name", "roi1", "roi2", "actual_mode", "selected_mode", "role")
-                    if key in group
-                })
-            else:
-                normalized_groups.append(_clone(group))
-    return {
-        "reference_frame": proposal.get("reference_frame"),
-        "reference_native_dic_frame": reference.get("native_frame"),
-        "reference_sha256": proposal.get("reference_sha256"),
-        "image_shape": proposal.get("image_shape"),
-        "free_region": proposal.get("free_region"),
-        "field_roi": proposal.get("field_roi"),
-        "exclusions": proposal.get("exclusions", []),
-        "groups": normalized_groups,
-    }
+    return _shared_roi_tracking_geometry(acq, proposal)
 
 
 def _roi_reference_fingerprint(acq: Mapping[str, Any], proposal: Mapping[str, Any] | None) -> str | None:
@@ -1413,6 +1338,219 @@ def run(
         result = _run_one(root, project, acq, progress=progress, cancel=cancel)
         # _run_one writes on new output; a cache hit still needs no project edit.
         return result
+
+
+def read_load_columns(load_path: str | os.PathLike[str]) -> list[str]:
+    """Read header column names from a load CSV/TSV file without mutating state."""
+    return read_csv_header(load_path)
+
+
+def _preview_axis_rows(
+    acq: Mapping[str, Any], root: Path | None
+) -> tuple[list[dict[str, Any]], str]:
+    measurement = acq.get("measurement_frames") or []
+    if measurement:
+        return [dict(row) for row in measurement], "explicit_measurement_frames"
+    result = acq.get("result")
+    if root is not None and isinstance(result, Mapping) and result.get("rows_path"):
+        try:
+            target = artifact_path(root, str(result["rows_path"]))
+            if target.is_file():
+                source_rows = read_jsonl(target)
+                if source_rows:
+                    by_native: dict[int, list[Mapping[str, Any]]] = {}
+                    for image in acq.get("image_frames") or []:
+                        native = strict_integer(image.get("native_frame"))
+                        if native is not None:
+                            by_native.setdefault(native, []).append(image)
+                    time_fields = (
+                        "timestamp_unix_s", "estimated_timestamp_unix_s", "time_s", "clock_id",
+                        "timestamp_source", "timestamp_status", "exposure_start_unix_s", "exposure_end_unix_s",
+                    )
+                    hydrated: list[dict[str, Any]] = []
+                    for source in source_rows:
+                        row = dict(source)
+                        native = strict_integer(row.get("native_dic_frame", row.get("native_frame", row.get("frame"))))
+                        candidates = by_native.get(native, []) if native is not None else []
+                        if len(candidates) == 1:
+                            for field in time_fields:
+                                if row.get(field) is None and candidates[0].get(field) is not None:
+                                    row[field] = candidates[0][field]
+                        hydrated.append(row)
+                    return hydrated, "dic_result_rows"
+        except (CampaignError, OSError):
+            pass
+    images = acq.get("image_frames") or []
+    if images:
+        return [dict(image) for image in images], "image_frames"
+    return [], "empty"
+
+
+def preview_alignment(
+    path: str | os.PathLike[str] | Mapping[str, Any],
+    acquisition_id: str | None = None,
+    load_path: str | os.PathLike[str] | None = None,
+    *,
+    project_dir: str | os.PathLike[str] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Read-only alignment preview sharing the exact time/clock rules as ``align``.
+
+    Accepts either ``(project_dir, acquisition_id, load_path, ...)`` or an
+    in-memory acquisition mapping ``(acquisition, load_path=..., project_dir=...)``.
+    Never acquires a writer lock or mutates project state.
+    """
+    if isinstance(path, Mapping):
+        acq = path
+        root = _project_dir(project_dir) if project_dir is not None else None
+        raw_load = load_path if load_path is not None else acquisition_id
+    else:
+        root = _project_dir(path)
+        project = _read_project(root)
+        if not acquisition_id:
+            raise CampaignError("ACQUISITION_NOT_FOUND", "acquisition_id is required for alignment preview")
+        acq = _find_acquisition(project, acquisition_id)
+        raw_load = load_path
+    if raw_load is None:
+        raise CampaignError("LOAD_SOURCE_NOT_FOUND", "load_path is required")
+    options = _normalize_alignment_options(kwargs)
+    mode_norm = options["mode"]
+    if mode_norm not in {"instantaneous", "window_mean"}:
+        raise CampaignError("ALIGNMENT_MODE_UNSUPPORTED", "mode must be instantaneous or window_mean")
+    gap = finite_number(options["max_gap_s"])
+    if gap is None or gap <= 0:
+        raise CampaignError("ALIGNMENT_MAX_GAP_INVALID", "max_gap_s must be a positive finite number")
+    time_field = options["measurement_time_field"]
+    load_time_column = options["load_time_column"]
+    force_column = options["force_column"]
+    force_unit = options["force_unit"]
+    exp_start_col = options["exposure_start_column"]
+    exp_end_col = options["exposure_end_column"]
+
+    load_table = read_load_table(raw_load, load_time_column, force_column, force_unit)
+    load_times = load_table["times"]
+    load_forces = load_table["forces"]
+    load_valid = load_table["valid"]
+    load_domains = load_table["time_domains"]
+    load_clocks = load_table["clock_ids"]
+    load_force_reasons = load_table["force_reasons"]
+    unique_load_clocks = sorted(
+        set(zip(load_domains, load_clocks)),
+        key=lambda item: (item[0], "" if item[1] is None else item[1]),
+    )
+    explicit_estimated_pair = time_field.startswith("estimated_") != load_time_column.startswith("estimated_")
+    axis_rows, axis_kind = _preview_axis_rows(acq, root)
+
+    preview_rows: list[dict[str, Any]] = []
+    alignable_count = 0
+    for item in axis_rows:
+        frame = item.get("frame")
+        query, domain, clock_id, time_error = parse_row_time(time_field, item)
+        if query is None:
+            preview_rows.append({
+                "frame": frame,
+                "query_time": None,
+                "left_time": None,
+                "right_time": None,
+                "alignable": False,
+                "status": time_error or "TIME_VALUE_MISSING",
+                "invalid_source_row": None,
+            })
+            continue
+        sample = (query, domain, clock_id, time_error)
+        clock_checks = [
+            clock_pair_compatible(
+                sample,
+                (0.0, ld_domain, ld_clock, None),
+                allow_explicit_estimated_pair=explicit_estimated_pair,
+            )
+            for ld_domain, ld_clock in unique_load_clocks
+        ]
+        if not (clock_checks and all(ok for ok, _ in clock_checks)):
+            clock_status = (
+                "MIXED_LOAD_CLOCK_DOMAINS"
+                if any(ok for ok, _ in clock_checks)
+                else (clock_checks[0][1] if clock_checks else "NO_TIME_SUPPORT")
+            )
+            preview_rows.append({
+                "frame": frame,
+                "query_time": query,
+                "left_time": None,
+                "right_time": None,
+                "alignable": False,
+                "status": clock_status,
+                "invalid_source_row": None,
+            })
+            continue
+
+        if mode_norm == "window_mean":
+            start_info = parse_row_time(exp_start_col, item)
+            end_info = parse_row_time(exp_end_col, item)
+            start_ok, start_reason = clock_pair_compatible(
+                start_info,
+                sample,
+                allow_explicit_estimated_pair=exp_start_col.startswith("estimated_") != time_field.startswith("estimated_"),
+            )
+            end_ok, end_reason = clock_pair_compatible(
+                end_info,
+                sample,
+                allow_explicit_estimated_pair=exp_end_col.startswith("estimated_") != time_field.startswith("estimated_"),
+            )
+            if not start_ok or not end_ok:
+                preview_rows.append({
+                    "frame": frame,
+                    "query_time": query,
+                    "left_time": None,
+                    "right_time": None,
+                    "alignable": False,
+                    "status": start_reason if not start_ok else end_reason,
+                    "invalid_source_row": None,
+                })
+                continue
+            support = window_mean_support(load_times, load_forces, load_valid, start_info[0], end_info[0], gap)
+            indices = support.get("indices", [])
+            status = support["status"]
+            alignable = status == "EXPOSURE_WINDOW_MEAN"
+        else:
+            support = bracket_time(load_times, float(query), gap, load_valid)
+            indices = support.get("indices", [])
+            status = support["status"]
+            if status == "INVALID_EXACT_SAMPLE" and indices:
+                reason = load_force_reasons[indices[0]]
+                if reason == "UNKNOWN_FORCE_UNIT":
+                    status = reason
+            alignable = status in {"EXACT_TIME_SAMPLE", "LINEAR_TIME_INTERPOLATION"}
+
+        invalid_source_row: int | None = None
+        if not alignable and indices:
+            bad_index = next((idx for idx in indices if not load_valid[idx]), None)
+            if bad_index is not None:
+                invalid_source_row = bad_index + 2
+        if alignable:
+            alignable_count += 1
+        preview_rows.append({
+            "frame": frame,
+            "query_time": query,
+            "left_time": load_times[indices[0]] if alignable and indices else None,
+            "right_time": load_times[indices[-1]] if alignable and indices else None,
+            "alignable": alignable,
+            "status": status,
+            "invalid_source_row": invalid_source_row,
+        })
+
+    return {
+        "acquisition_id": acq.get("acquisition_id"),
+        "axis_kind": axis_kind,
+        "mode": mode_norm,
+        "max_gap_s": gap,
+        "measurement_time_field": time_field,
+        "load_time_column": load_time_column,
+        "force_column": force_column,
+        "load_row_count": len(load_table["rows"]),
+        "alignable_count": alignable_count,
+        "frame_count": len(preview_rows),
+        "rows": preview_rows,
+    }
 
 
 def align(

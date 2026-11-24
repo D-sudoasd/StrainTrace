@@ -8,7 +8,6 @@ import math
 import os
 import re
 import shutil
-import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -29,24 +28,7 @@ _MAX_FB_TOLERANCE_PX = 12.0
 
 def _as_json(value: Any) -> Any:
     """Convert core diagnostics to strict JSON values; NaN/Inf become null."""
-    if isinstance(value, Mapping):
-        return {str(key): _as_json(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_as_json(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _as_json(value.tolist())
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if isinstance(value, (float, np.floating)):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, os.PathLike):
-        return str(value)
-    return str(value)
+    return storage.json_safe(value, coerce_unknown=True)
 
 
 def _cancelled(cancel: Any) -> bool:
@@ -70,29 +52,11 @@ def _notify(progress, fraction: float, **details) -> None:
 
 def _source_file(module_file: str | None, relative_to_bundle: str) -> Path:
     """Resolve executable Python source in editable installs and frozen bundles."""
-    candidates: list[Path] = []
-    frozen = bool(getattr(sys, "frozen", False))
-    if module_file and not frozen:
-        source_path = Path(module_file).resolve()
-        if source_path.suffix.casefold() == ".py":
-            candidates.append(source_path)
-        else:
-            candidates.append(source_path.with_suffix(".py"))
-    bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root:
-        candidates.append(Path(bundle_root) / "sources" / relative_to_bundle)
-    if getattr(sys, "executable", None):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / "_internal" / "sources" / relative_to_bundle)
-        candidates.append(exe_dir / "sources" / relative_to_bundle)
-    if module_file and frozen:
-        source_path = Path(module_file).resolve()
-        if source_path.suffix.casefold() == ".py":
-            candidates.append(source_path)
-    for candidate in candidates:
-        if candidate.is_file() and candidate.suffix.casefold() == ".py":
-            return candidate.resolve()
-    raise CampaignError("ENGINE_SOURCE_UNAVAILABLE", f"cannot fingerprint executable source: {relative_to_bundle}")
+    return storage.resolve_source_file(
+        relative_to_bundle,
+        module_file=module_file,
+        error_code="ENGINE_SOURCE_UNAVAILABLE",
+    )
 
 
 def _ordered_frames(acquisition: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -120,14 +84,9 @@ def _ordered_frames(acquisition: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _code_fingerprints() -> dict[str, str]:
-    campaign_code = _source_file(__file__, "straintrace_campaign/numerics.py")
-    roi_code = _source_file(roi_module.__file__, "straintrace_campaign/roi.py")
+    fingerprints = storage.campaign_code_fingerprints()
     engine_code = _source_file(getattr(core, "__file__", None), "ezdic_core.py")
-    fingerprints = {
-        "straintrace_campaign/numerics.py": storage.sha256_file(campaign_code),
-        "straintrace_campaign/roi.py": storage.sha256_file(roi_code),
-        "ezdic_core.py": storage.sha256_file(engine_code),
-    }
+    fingerprints["ezdic_core.py"] = storage.sha256_file(engine_code)
     try:
         import ezdic_cli
 
@@ -139,47 +98,8 @@ def _code_fingerprints() -> dict[str, str]:
 
 
 def _roi_tracking_geometry(acquisition: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return only the reviewed geometry that changes numerical tracking.
-
-    Reviewer identity, approval time, proposal diagnostics, and preview paths
-    describe the review workflow, not the numerical inputs. Keeping this subset
-    aligned with ``workflow._roi_tracking_geometry`` avoids needless analysis
-    cache invalidation while approval is still validated before every run.
-    """
-    proposal = acquisition.get("roi")
-    if not isinstance(proposal, Mapping):
-        return None
-    frames = acquisition.get("image_frames")
-    reference_id = proposal.get("reference_frame")
-    reference_matches = [
-        item for item in frames or []
-        if isinstance(item, Mapping) and item.get("frame") == reference_id
-    ]
-    if len(reference_matches) != 1:
-        raise CampaignError("ROI_REFERENCE_FRAME_INVALID", f"reference frame {reference_id!r} is absent or ambiguous")
-    reference = reference_matches[0]
-    raw_groups = proposal.get("groups", [])
-    groups = []
-    if isinstance(raw_groups, list):
-        for group in raw_groups:
-            if isinstance(group, Mapping):
-                groups.append({
-                    key: _as_json(group[key])
-                    for key in ("name", "roi1", "roi2", "actual_mode", "selected_mode", "role")
-                    if key in group
-                })
-            else:
-                groups.append(_as_json(group))
-    return {
-        "reference_frame": proposal.get("reference_frame"),
-        "reference_native_dic_frame": reference.get("native_frame"),
-        "reference_sha256": proposal.get("reference_sha256"),
-        "image_shape": _as_json(proposal.get("image_shape")),
-        "free_region": _as_json(proposal.get("free_region")),
-        "field_roi": _as_json(proposal.get("field_roi")),
-        "exclusions": _as_json(proposal.get("exclusions", [])),
-        "groups": groups,
-    }
+    """Delegate tracking-geometry extraction to the shared storage contract."""
+    return storage.roi_tracking_geometry(acquisition)
 
 
 def _external_mask_fingerprint(

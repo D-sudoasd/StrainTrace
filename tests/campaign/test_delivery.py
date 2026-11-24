@@ -448,3 +448,36 @@ def test_export_rejects_invalid_timeout_and_has_dic_tracks_reanalysis(tmp_path: 
         "metadata": {"keystone_import": {"dic_present": False}},
     }
     assert delivery._has_dic(reanalyzed, [{"frame": 1, "engineering_strain": 0.01}]) is True
+
+
+@pytest.mark.parametrize("bad_path", ["", ".", "./sub", "sub/.", "sub//file.json", "/abs/path", "../escape", "sub/trailing/"])
+def test_relative_file_rejects_dot_empty_and_escape_segments(tmp_path: Path, bad_path: str) -> None:
+    with pytest.raises(ValueError, match="Unsafe relative artifact path"):
+        delivery._relative_file(tmp_path, bad_path)
+
+
+def test_relative_file_normalizes_windows_separators_and_io_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolved = delivery._relative_file(tmp_path, "versions\\v001\\catalog.json")
+    assert resolved == (tmp_path / "versions" / "v001" / "catalog.json").resolve()
+
+    # Missing/unreadable files raise FileNotFoundError/OSError, not ValueError.
+    with pytest.raises(FileNotFoundError):
+        delivery._read_json(tmp_path / "missing.json")
+    with pytest.raises(FileNotFoundError):
+        delivery._read_jsonl(tmp_path / "missing.jsonl")
+
+    # Malformed or non-finite JSON still raises ValueError.
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text('{"x": NaN}\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        delivery._read_json(bad_json)
+
+    # _write_json converts atomic storage write failures into OSError (matching _write_atomic).
+    from straintrace_campaign.models import CampaignError
+
+    def fail_write(*_args: object, **_kwargs: object) -> Path:
+        raise CampaignError("PROJECT_WRITE_ERROR", "simulated disk full")
+
+    monkeypatch.setattr(delivery, "_storage_atomic_write_bytes", fail_write)
+    with pytest.raises(OSError, match="simulated disk full"):
+        delivery._write_json(tmp_path / "out.json", {"ok": True})

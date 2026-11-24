@@ -695,3 +695,41 @@ def test_workflow_align_normalizes_options_and_defaults_load_time_column(tmp_pat
     workflow.align(project, acq["acquisition_id"], load, measurement_time_field="time_s", load_time_column="time_s")
     assert len(seen_kwargs) == 1
     assert seen_kwargs[0]["load_time_column"] == "time_s"
+
+
+def test_workflow_preview_alignment_is_read_only_and_supports_image_only_and_window_mode(tmp_path: Path, monkeypatch):
+    project, source, image = _new_project(tmp_path)
+    frame = _frame(image)
+    frame.update({
+        "timestamp_unix_s": 1_700_000_001.0,
+        "exposure_start_unix_s": 1_700_000_000.5,
+        "exposure_end_unix_s": 1_700_000_001.5,
+    })
+    discovered = _discovered(image)
+    discovered["image_frames"] = [frame]
+    discovered["measurement_frames"] = []
+    adapter = SimpleNamespace(discover=lambda *a, **k: [discovered])
+    monkeypatch.setattr(workflow, "_module", lambda name: {"adapters": adapter}[name])
+    acq = workflow.scan(project, "raw")[0]
+    project_bytes_before = (project / "project.json").read_bytes()
+
+    load = source / "load.csv"
+    load.write_text(
+        "timestamp_unix_s;force_N\n1700000000;100\n1700000002;300\n",
+        encoding="utf-8",
+    )
+    assert workflow.read_load_columns(load) == ["timestamp_unix_s", "force_N"]
+
+    instant = workflow.preview_alignment(project, acq["acquisition_id"], load, max_gap_s=2.5)
+    assert instant["axis_kind"] == "image_frames"
+    assert instant["alignable_count"] == 1
+    assert instant["rows"][0]["status"] == "LINEAR_TIME_INTERPOLATION"
+
+    window = workflow.preview_alignment(
+        project, acq["acquisition_id"], load, mode="exposure_mean", max_gap_s=2.5
+    )
+    assert window["mode"] == "window_mean"
+    assert window["alignable_count"] == 1
+    assert window["rows"][0]["status"] == "EXPOSURE_WINDOW_MEAN"
+    assert (project / "project.json").read_bytes() == project_bytes_before
+    assert not (project / ".campaign.lock").exists()

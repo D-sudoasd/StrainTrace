@@ -7,9 +7,6 @@ established single-sequence GUI remains importable in headless environments.
 
 from __future__ import annotations
 
-import bisect
-import csv
-import datetime as dt
 import importlib
 import json
 import math
@@ -1202,20 +1199,16 @@ class CampaignPage(ttk.Frame):
         self.load_path_var.set(path)
         self._load_column_choices(path)
 
-    @staticmethod
-    def _sniff_delimiter(sample: str) -> str:
-        try:
-            return csv.Sniffer().sniff(sample, delimiters=",\t;").delimiter
-        except csv.Error:
-            return ","
+    def _workflow_helper(self, name):
+        wf = self._get_workflow()
+        fn = getattr(wf, name, None)
+        if callable(fn):
+            return fn
+        return getattr(importlib.import_module("straintrace_campaign.workflow"), name)
 
     def _load_column_choices(self, path):
         try:
-            with open(path, "r", encoding="utf-8-sig", newline="") as stream:
-                sample = stream.read(8192)
-                stream.seek(0)
-                delimiter = self._sniff_delimiter(sample)
-                header = next(csv.reader(stream, delimiter=delimiter))
+            header = self._workflow_helper("read_load_columns")(path)
             self.time_column_box.configure(values=header)
             self.force_column_box.configure(values=header)
             descriptions = {name: f"读取载荷文件中的“{name}”列；请核对列含义、单位和时钟来源。"
@@ -1231,156 +1224,82 @@ class CampaignPage(ttk.Frame):
         except Exception as exc:
             messagebox.showwarning("载荷文件读取失败", str(exc))
 
-    def _load_force_rows(self):
-        path = Path(self.load_path_var.get()).expanduser()
-        if not path.is_file():
-            raise ValueError("请先选择可读取的载荷文件。")
-        with path.open("r", encoding="utf-8-sig", newline="") as stream:
-            sample = stream.read(8192)
-            stream.seek(0)
-            delimiter = self._sniff_delimiter(sample)
-            reader = csv.DictReader(stream, delimiter=delimiter)
-            rows = list(reader)
-        tc, fc = self.time_column_var.get(), self.force_column_var.get()
-        if not tc or not fc or tc not in (reader.fieldnames or []) or fc not in (reader.fieldnames or []):
-            raise ValueError("请选择存在的时间列和载荷列。")
-        parsed_rows = []
-        for row_index, row in enumerate(rows):
-            time_value, domain, clock_id, time_error = self._parse_preview_time(row, tc)
-            force = self._finite_number(row.get(fc))
-            force_valid = force is not None
-            source_valid = row.get("is_force_valid")
-            if source_valid not in (None, ""):
-                force_valid = force_valid and str(source_valid).strip().casefold() not in {"false", "0", "no", "n"}
-            parsed_rows.append({"time": time_value, "time_domain": domain, "clock_id": clock_id,
-                                "time_error": time_error, "force": force, "force_valid": force_valid,
-                                "source_row": row_index + 2})
-        if not parsed_rows:
-            raise ValueError("载荷文件没有记录行。")
-        for index, row in enumerate(parsed_rows):
-            if row["time"] is None:
-                raise ValueError(f"载荷第 {row['source_row']} 行时间无效：{row['time_error']}")
-            if index and row["time"] <= parsed_rows[index - 1]["time"]:
-                raise ValueError(f"载荷时间必须按源文件顺序严格递增；第 {row['source_row']} 行不满足。")
-        return parsed_rows
-
     @staticmethod
-    def _parse_preview_time(row, field):
-        raw = row.get(field)
-        is_estimated_field = str(field).startswith("estimated_")
-        if raw is None or str(raw).strip() == "":
-            if field == "timestamp_unix_s" and row.get("estimated_timestamp_unix_s") not in (None, ""):
-                return None, "missing", None, "该行只有推算时间，不能填入绝对时间列"
-            return None, "missing", None, "时间值缺失"
-        status = str(row.get("timestamp_status") or row.get("time_status") or "").upper()
-        if not is_estimated_field and any(word in status for word in
-                                          ("ESTIMAT", "RECONSTRUCT", "INFER", "PROTOCOL", "ADOPTED")):
-            return None, "missing", None, "该时间列标记为推算值"
-        raw_clock = row.get("clock_id") or row.get("timestamp_clock_id") or row.get("time_clock_id")
-        clock_id = str(raw_clock) if raw_clock not in (None, "") else None
-        number = CampaignPage._finite_number(raw)
-        if number is not None:
-            if field.endswith("unix_s"):
-                if number < 1_000_000_000:
-                    return None, "missing", clock_id, "Unix 时间小于有效 epoch 范围"
-                domain = "unix_epoch_estimated" if is_estimated_field else "unix_epoch_recorded"
-            elif field == "time_s" or field.endswith("_time_s"):
-                domain = "relative"
-            elif number >= 1_000_000_000:
-                domain = "unix_epoch_estimated" if is_estimated_field else "unix_epoch_recorded"
-            else:
-                domain = "relative"
-            if domain == "relative" and not clock_id:
-                return None, domain, None, "相对时间缺少 clock_id"
-            return number, domain, clock_id, None
-        text = str(raw).strip()
-        candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-        try:
-            parsed = dt.datetime.fromisoformat(candidate)
-        except ValueError:
-            return None, "missing", clock_id, "时间格式无法解析"
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            return None, "missing", clock_id, "日期时间缺少明确时区"
-        iso_domain = "unix_epoch_estimated" if is_estimated_field else "unix_epoch_recorded"
-        return parsed.timestamp(), iso_domain, clock_id, None
-
-    @staticmethod
-    def _clock_compatibility(axis_domain, axis_clock_id, load_row, *, allow_explicit_estimated_pair=False):
-        load_domain = load_row.get("time_domain")
-        load_clock = load_row.get("clock_id")
-        if axis_domain == load_domain and axis_domain in {"unix_epoch_recorded", "unix_epoch_estimated"}:
-            return None
-        if allow_explicit_estimated_pair and {axis_domain, load_domain} == {"unix_epoch_recorded", "unix_epoch_estimated"}:
-            return None
-        if axis_domain == load_domain == "relative":
-            if axis_clock_id and axis_clock_id == load_clock:
-                return None
+    def _format_preview_status(row_info, *, mode="instantaneous"):
+        if row_info.get("alignable"):
+            return "可对齐"
+        status = str(row_info.get("status") or "")
+        is_window = mode in {"window_mean", "exposure_mean", "exposure_window_mean", "window"}
+        src_row = row_info.get("invalid_source_row")
+        if status in {"OUTSIDE_TIME_RANGE", "NO_TIME_SUPPORT"}:
+            return "曝光窗超出载荷时间范围" if is_window else "超出载荷时间范围"
+        if status == "LONG_TIME_GAP":
+            return "曝光窗内载荷间隔超限" if is_window else "间隔超限"
+        if status in {
+            "INVALID_EXACT_SAMPLE", "INVALID_BRACKET", "INVALID_LOAD_BRACKET",
+            "UNKNOWN_FORCE_UNIT", "INVALID_FORCE_VALUE", "SOURCE_MARKED_FORCE_INVALID",
+        }:
+            prefix = "曝光窗内载荷支撑点无效" if is_window else "载荷支撑点无效"
+            return f"{prefix}（第 {src_row} 行）" if src_row is not None else prefix
+        if status in {"RELATIVE_CLOCK_DOMAIN_MISMATCH", "RELATIVE_CLOCK_ID_REQUIRED"}:
             return "相对时钟 ID 缺失或不一致"
-        return "测量与载荷时钟域不一致"
+        if status in {"RECORDED_ESTIMATED_CLOCK_MISMATCH", "TIME_CLOCK_DOMAIN_MISMATCH", "MIXED_LOAD_CLOCK_DOMAINS"}:
+            return "测量与载荷时钟域不一致"
+        if status == "RECORDED_TIMESTAMP_MISSING_ESTIMATE_SEPARATE":
+            return "该行只有推算时间，不能填入绝对时间列"
+        if status == "TIME_FIELD_MARKED_DERIVED":
+            return "该时间列标记为推算值"
+        if status == "EXPOSURE_WINDOW_MISSING":
+            return "缺少曝光窗"
+        if status == "INVALID_EXPOSURE_WINDOW":
+            return "曝光窗无效"
+        if status == "TIME_VALUE_MISSING":
+            return "时间值缺失"
+        return status or "缺少可信时间"
 
-    @staticmethod
-    def _preview_bracket(query, load_rows):
-        times = [row["time"] for row in load_rows]
-        right = bisect.bisect_left(times, query)
-        if right < len(times) and abs(times[right] - query) <= 2e-6:
-            return right, right
-        if right > 0 and abs(times[right - 1] - query) <= 2e-6:
-            return right - 1, right - 1
-        if right == 0 or right == len(times):
-            return None
-        return right - 1, right
+    @classmethod
+    def _preview_tuples(cls, preview):
+        mode = preview.get("mode", "instantaneous")
+        tuples = []
+        for item in preview.get("rows", []):
+            query = item.get("query_time")
+            left = item.get("left_time")
+            right = item.get("right_time")
+            tuples.append((
+                item.get("frame"),
+                f"{query:.6g}" if query is not None else "",
+                f"{left:.6g}" if left is not None else "",
+                f"{right:.6g}" if right is not None else "",
+                cls._format_preview_status(item, mode=mode),
+            ))
+        return tuples
 
-    def _instantaneous_preview_status(self, query, axis_domain, axis_clock_id, load_rows, max_gap, *, allow_explicit_estimated_pair=False):
-        bracket = self._preview_bracket(query, load_rows)
-        if bracket is None:
-            return None, "超出载荷时间范围"
-        left, right = bracket
-        if left != right and load_rows[right]["time"] - load_rows[left]["time"] > max_gap:
-            return bracket, "间隔超限"
-        for index in set(bracket):
-            row = load_rows[index]
-            if not row["force_valid"]:
-                return bracket, f"载荷支撑点无效（第 {row['source_row']} 行）"
-            incompatible = self._clock_compatibility(
-                axis_domain, axis_clock_id, row,
-                allow_explicit_estimated_pair=allow_explicit_estimated_pair,
-            )
-            if incompatible:
-                return bracket, incompatible
-        return bracket, "可对齐"
+    def _run_alignment_preview(self, acq, max_gap):
+        preview_fn = self._workflow_helper("preview_alignment")
+        return preview_fn(
+            acq,
+            load_path=self.load_path_var.get(),
+            project_dir=self.project_dir,
+            mode=self.alignment_mode_var.get(),
+            max_gap_s=max_gap,
+            measurement_time_field=self.measurement_time_field_var.get(),
+            load_time_column=self.time_column_var.get(),
+            force_column=self.force_column_var.get(),
+        )
 
-    def _window_preview_status(self, start, end, axis_domain, axis_clock_id, load_rows, max_gap, *, allow_explicit_estimated_pair=False):
-        times = [row["time"] for row in load_rows]
-        if start < times[0] or end > times[-1]:
-            return None, "曝光窗超出载荷时间范围"
-        knots = [start] + [value for value in times if start < value < end] + [end]
-        used = set()
-        for first, second in zip(knots, knots[1:]):
-            if second <= first:
-                continue
-            mid = (first + second) / 2.0
-            idx = bisect.bisect_right(times, mid) - 1
-            if idx < 0:
-                idx = 0
-            if idx >= len(times) - 1:
-                idx = len(times) - 2
-            left, right = (idx, idx) if len(times) == 1 else (idx, idx + 1)
-            if left != right and load_rows[right]["time"] - load_rows[left]["time"] > max_gap:
-                return (left, right), "曝光窗内载荷间隔超限"
-            used.update((left, right))
-        if not used:
-            return None, "曝光窗无效"
-        for index in used:
-            row = load_rows[index]
-            if not row["force_valid"]:
-                return (min(used), max(used)), f"曝光窗内载荷支撑点无效（第 {row['source_row']} 行）"
-            incompatible = self._clock_compatibility(
-                axis_domain, axis_clock_id, row,
-                allow_explicit_estimated_pair=allow_explicit_estimated_pair,
-            )
-            if incompatible:
-                return (min(used), max(used)), incompatible
-        return (min(used), max(used)), "可对齐"
+    def _load_force_rows(self):
+        # Thin read-only compatibility adapter backed by workflow.preview_alignment.
+        load_path = Path(self.load_path_var.get()).expanduser()
+        if not load_path.is_file():
+            raise ValueError("请先选择可读取的载荷文件。")
+        preview = self._run_alignment_preview({"acquisition_id": "preview", "measurement_frames": [], "image_frames": []}, 2.5)
+        return [{"source_row": i + 2} for i in range(int(preview["load_row_count"]))]
+
+    def _preview_alignment_rows(self, acq, load_rows, max_gap):
+        if not load_rows:
+            raise ValueError("载荷文件没有可用的有限时间—载荷记录。")
+        preview = self._run_alignment_preview(acq, max_gap)
+        return self._preview_tuples(preview)
 
     def preview_alignment(self):
         acq = self._selected_acquisition()
@@ -1391,79 +1310,22 @@ class CampaignPage(ttk.Frame):
             max_gap = float(self.max_gap_var.get())
             if not math.isfinite(max_gap) or max_gap <= 0:
                 raise ValueError("最大插值间隔必须为正数。")
-            load_rows = self._load_force_rows()
-            rows = self._preview_alignment_rows(acq, load_rows, max_gap)
-        except (OSError, csv.Error, ValueError) as exc:
+            preview = self._run_alignment_preview(acq, max_gap)
+            rows = self._preview_tuples(preview)
+        except Exception as exc:
             messagebox.showwarning("无法预览对齐", str(exc))
             return
         time_field = self.measurement_time_field_var.get()
         lines = ["预览只读载荷文件与项目时间轴；此时尚未调用 align，也未写入项目。",
-                 f"DIC 时间来源={time_field}；方式={self.alignment_mode_var.get()}，最大间隔={max_gap:g} s，载荷行={len(load_rows)}",
+                 f"DIC 时间来源={time_field}；方式={self.alignment_mode_var.get()}，最大间隔={max_gap:g} s，载荷行={preview['load_row_count']}",
                  "frame\t源时间(s)\t左支撑(s)\t右支撑(s)\t状态"]
         lines.extend("\t".join(str(value) for value in row) for row in rows[:60])
         if len(rows) > 60:
             lines.append(f"… 另有 {len(rows) - 60} 帧未显示")
         self._set_text(self.alignment_preview, "\n".join(lines))
         self._alignment_preview_key = self._alignment_key(acq)
-        self.align_button.configure(state=tk.NORMAL if rows and any(r[-1] == "可对齐" for r in rows) else tk.DISABLED)
-        self._set_status(f"只读预览完成：{sum(r[-1] == '可对齐' for r in rows)} / {len(rows)} 帧处于有效时间支持内")
-
-    def _preview_alignment_rows(self, acq, load_rows, max_gap):
-        if not load_rows:
-            raise ValueError("载荷文件没有可用的有限时间—载荷记录。")
-        measurement = acq.get("measurement_frames") or acq.get("image_frames") or []
-        result = []
-        mode = self.alignment_mode_var.get()
-        time_field = self.measurement_time_field_var.get()
-        load_time_col = self.time_column_var.get()
-        allow_explicit_estimated_pair = time_field.startswith("estimated_") != load_time_col.startswith("estimated_")
-        for item in measurement:
-            frame = item.get("frame")
-            t, domain, clock_id, time_error = self._parse_preview_time(item, time_field)
-            if t is None:
-                result.append((frame, "", "", "", time_error or "缺少可信时间"))
-                continue
-            if mode == "exposure_mean":
-                start, start_domain, start_clock, start_error = self._parse_preview_time(item, "exposure_start_unix_s")
-                end, end_domain, end_clock, end_error = self._parse_preview_time(item, "exposure_end_unix_s")
-                if start is None or end is None:
-                    error = start_error or end_error
-                    result.append((frame, f"{t:.6g}", "", "", error or "缺少曝光窗"))
-                    continue
-                if start_domain.startswith("unix_epoch") != domain.startswith("unix_epoch") or end_domain != start_domain:
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗与DIC时间域不一致"))
-                    continue
-                if domain == "relative" and (start_clock != clock_id or end_clock != clock_id):
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗相对时钟 ID 不一致"))
-                    continue
-                if end <= start:
-                    result.append((frame, f"{t:.6g}", "", "", "曝光窗无效"))
-                    continue
-                bracket, state = self._window_preview_status(
-                    start, end, domain, clock_id, load_rows, max_gap,
-                    allow_explicit_estimated_pair=allow_explicit_estimated_pair,
-                )
-                if state != "可对齐":
-                    result.append((frame, f"{t:.6g}", "", "", state))
-                    continue
-                left, right = bracket
-                result.append((frame, f"{t:.6g}", f"{load_rows[left]['time']:.6g}",
-                               f"{load_rows[right]['time']:.6g}", "可对齐"))
-                continue
-            bracket, state = self._instantaneous_preview_status(
-                t, domain, clock_id, load_rows, max_gap,
-                allow_explicit_estimated_pair=allow_explicit_estimated_pair,
-            )
-            if bracket is None:
-                result.append((frame, f"{t:.6g}", "", "", state))
-                continue
-            left, right = bracket
-            if state != "可对齐":
-                result.append((frame, f"{t:.6g}", "", "", state))
-                continue
-            result.append((frame, f"{t:.6g}", f"{load_rows[left]['time']:.6g}",
-                           f"{load_rows[right]['time']:.6g}", state))
-        return result
+        self.align_button.configure(state=tk.NORMAL if preview["alignable_count"] > 0 else tk.DISABLED)
+        self._set_status(f"只读预览完成：{preview['alignable_count']} / {len(rows)} 帧处于有效时间支持内")
 
     def align(self):
         acq = self._selected_acquisition()

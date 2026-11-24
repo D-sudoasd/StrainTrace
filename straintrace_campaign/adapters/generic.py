@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import csv
 import fnmatch
-import hashlib
 import math
 import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
+
+from ..storage import sha256_file as _sha256
 
 
 DEFAULT_IMAGE_PATTERNS = ("**/*.tif", "**/*.tiff", "**/*.png", "**/*.jpg", "**/*.jpeg")
@@ -71,14 +72,6 @@ def _counter(path: Path, expression: re.Pattern[str]) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _range_list(frames: list[int]) -> list[list[int]]:

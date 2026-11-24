@@ -27,6 +27,17 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from .models import CampaignError
+from .storage import (
+    artifact_path as _storage_artifact_path,
+    atomic_write_bytes as _storage_atomic_write_bytes,
+    canonical_json_bytes as _storage_json_bytes,
+    json_safe as _storage_json_safe,
+    read_jsonl as _storage_read_jsonl,
+    sha256_file as _storage_sha256_file,
+    strict_json_loads as _storage_strict_json_loads,
+)
+
 
 _PACKAGE_SCHEMA = "straintrace-campaign-package-1"
 _CURRENT_SCHEMA = "straintrace-campaign-current-1"
@@ -39,86 +50,59 @@ _CURRENT = "CURRENT.json"
 _CONFIRMED_DIMENSION_STATUSES = {"confirmed", "verified_recorded_dimensions", "verified_recorded_area"}
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert common numeric scalars to strict JSON values; NaN means missing."""
+    return _storage_json_safe(value, coerce_unknown=False)
+
+
 def _json_bytes(value: Any, *, indent: int | None = 2) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=indent) + "\n").encode("utf-8")
+    try:
+        return _storage_json_bytes(value, pretty=indent is not None)
+    except CampaignError as exc:
+        raise ValueError(exc.message) from exc
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_json_bytes(_json_safe(value)))
-
-
-def _json_safe(value: Any) -> Any:
-    """Convert common numeric scalars to strict JSON values; NaN means missing."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    # Accept NumPy scalar values without importing NumPy in the headless module.
-    item = getattr(value, "item", None)
-    if callable(item):
-        return _json_safe(item())
-    if hasattr(value, "isoformat") and callable(value.isoformat):
-        return value.isoformat()
-    raise TypeError(f"Value is not JSON serializable: {type(value).__name__}")
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"Non-finite JSON number is forbidden: {value}")
+    _write_atomic(path, _json_bytes(_json_safe(value)))
 
 
 def _read_json(path: Path) -> Any:
-    value = json.loads(path.read_text(encoding="utf-8-sig"), parse_constant=_reject_json_constant)
-    _assert_finite(value, str(path))
-    return value
+    raw = Path(path).read_text(encoding="utf-8-sig")
+    try:
+        return _storage_strict_json_loads(raw)
+    except CampaignError as exc:
+        raise ValueError(exc.message) from exc
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            row = json.loads(line, parse_constant=_reject_json_constant)
-            if not isinstance(row, dict):
-                raise ValueError(f"{path}:{line_number}: expected a JSON object")
-            _assert_finite(row, f"{path}:{line_number}")
-            rows.append(row)
-    return rows
-
-
-def _assert_finite(value: Any, where: str) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{where}: non-finite numeric value")
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _assert_finite(item, f"{where}.{key}")
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for index, item in enumerate(value):
-            _assert_finite(item, f"{where}[{index}]")
+    try:
+        return _storage_read_jsonl(path)
+    except CampaignError as exc:
+        if isinstance(exc.__cause__, OSError):
+            raise exc.__cause__ from exc
+        raise ValueError(exc.message) from exc
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    try:
+        return _storage_sha256_file(path)
+    except CampaignError as exc:
+        raise OSError(exc.message) from exc
 
 
 def _relative_file(root: Path, value: str | os.PathLike[str]) -> Path:
     """Resolve an artifact path and reject absolute paths and traversal."""
-    raw = str(value).replace("\\", "/")
-    rel = PurePosixPath(raw)
-    if rel.is_absolute() or not rel.parts or any(part in ("", ".", "..") for part in rel.parts):
+    raw = str(value)
+    normalized = raw.replace("\\", "/")
+    segments = normalized.split("/")
+    if not raw or any(part in ("", ".", "..") for part in segments):
         raise ValueError(f"Unsafe relative artifact path: {value!r}")
-    target = root.joinpath(*rel.parts).resolve()
-    if not target.is_relative_to(root.resolve()):
-        raise ValueError(f"Artifact escapes its root: {value!r}")
+    try:
+        target = _storage_artifact_path(root, normalized)
+    except CampaignError as exc:
+        raise ValueError(f"Unsafe relative artifact path: {value!r}") from exc
+    if target == root.expanduser().resolve():
+        raise ValueError(f"Unsafe relative artifact path: {value!r}")
     return target
 
 
@@ -1313,17 +1297,10 @@ def _verify_frame_csv(path: Path, rows: list[dict[str, Any]], errors: list[str],
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temp.open("xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        if temp.exists():
-            temp.unlink()
+        _storage_atomic_write_bytes(path, data)
+    except CampaignError as exc:
+        raise OSError(exc.message) from exc
 
 
 def _atomic_current(root: Path, version_id: str, version_rel: str, version: Path) -> dict[str, Any]:
@@ -1370,7 +1347,7 @@ def _run_io_worker(operation: str, arguments: list[str], timeout_s: float) -> di
     if result.returncode != 0:
         raise RuntimeError(f"{operation} worker failed ({result.returncode}): {result.stderr[-2000:]}")
     try:
-        response = json.loads(result.stdout, parse_constant=_reject_json_constant)
+        response = _storage_strict_json_loads(result.stdout)
     except Exception as exc:
         raise RuntimeError(f"{operation} worker returned invalid receipt: {result.stdout[-1000:]!r}") from exc
     if not isinstance(response, dict) or response.get("ok") is not True:

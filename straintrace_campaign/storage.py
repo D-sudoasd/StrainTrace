@@ -4,14 +4,61 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
 from .models import CampaignError, validate_json_value, validate_relative_path, validate_stage_record
+
+
+CAMPAIGN_SOURCE_FILES: tuple[str, ...] = (
+    "straintrace_campaign/__init__.py",
+    "straintrace_campaign/__main__.py",
+    "straintrace_campaign/_time_io.py",
+    "straintrace_campaign/adapters/__init__.py",
+    "straintrace_campaign/adapters/desy.py",
+    "straintrace_campaign/adapters/generic.py",
+    "straintrace_campaign/alignment.py",
+    "straintrace_campaign/cli.py",
+    "straintrace_campaign/delivery.py",
+    "straintrace_campaign/gui.py",
+    "straintrace_campaign/models.py",
+    "straintrace_campaign/numerics.py",
+    "straintrace_campaign/roi.py",
+    "straintrace_campaign/storage.py",
+    "straintrace_campaign/workflow.py",
+)
+
+
+def json_safe(value: Any, *, coerce_unknown: bool = False) -> Any:
+    """Convert numeric/NumPy/path scalars to strict JSON values without importing NumPy."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {str(key): json_safe(item, coerce_unknown=coerce_unknown) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item, coerce_unknown=coerce_unknown) for item in value]
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return json_safe(tolist(), coerce_unknown=coerce_unknown)
+    item_fn = getattr(value, "item", None)
+    if callable(item_fn):
+        return json_safe(item_fn(), coerce_unknown=coerce_unknown)
+    if isinstance(value, os.PathLike):
+        return str(value)
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    if coerce_unknown:
+        return str(value)
+    raise TypeError(f"Value is not JSON serializable: {type(value).__name__}")
 
 
 def _json_bytes(value: Any, *, pretty: bool = False) -> bytes:
@@ -30,20 +77,51 @@ def _json_bytes(value: Any, *, pretty: bool = False) -> bytes:
     return (text + "\n").encode("utf-8")
 
 
-def strict_json_load(path: str | os.PathLike[str]) -> Any:
-    """Load JSON while rejecting non-standard NaN/Infinity constants."""
+def canonical_json_bytes(value: Any, *, pretty: bool = False) -> bytes:
+    """Serialize a strict JSON value using canonical sorted-key formatting."""
+    return _json_bytes(value, pretty=pretty)
+
+
+def canonical_json_sha256(value: Any) -> str:
+    """Return the SHA-256 hex digest of compact canonical JSON bytes."""
+    return hashlib.sha256(
+        json.dumps(
+            json_safe(value, coerce_unknown=True),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def strict_json_loads(text: str) -> Any:
+    """Parse a JSON string while rejecting non-standard NaN/Infinity constants."""
     def reject_constant(token: str) -> None:
         raise CampaignError("PROJECT_NONFINITE_NUMBER", f"non-standard JSON constant {token}")
 
     try:
-        with Path(path).open("r", encoding="utf-8-sig") as stream:
-            value = json.load(stream, parse_constant=reject_constant)
+        value = json.loads(text, parse_constant=reject_constant)
     except CampaignError:
         raise
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CampaignError("PROJECT_READ_ERROR", f"cannot read JSON {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise CampaignError("PROJECT_READ_ERROR", f"cannot parse JSON: {exc}") from exc
     validate_json_value(value)
     return value
+
+
+def strict_json_load(path: str | os.PathLike[str]) -> Any:
+    """Load JSON while rejecting non-standard NaN/Infinity constants."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise CampaignError("PROJECT_READ_ERROR", f"cannot read JSON {path}: {exc}") from exc
+    try:
+        return strict_json_loads(raw)
+    except CampaignError as exc:
+        if exc.code == "PROJECT_READ_ERROR":
+            raise CampaignError("PROJECT_READ_ERROR", f"cannot read JSON {path}: {exc.message}") from exc
+        raise
 
 
 def _replace_with_retry(source: Path, target: Path, *, attempts: int = 6, delay_s: float = 0.02) -> None:
@@ -175,6 +253,135 @@ def proposal_hash(proposal: Mapping[str, Any]) -> str:
     return fingerprint_data("roi_proposal_v1", payload)
 
 
+def roi_tracking_geometry(
+    acquisition: Mapping[str, Any], proposal: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Return only the reviewed geometry that affects numerical tracking.
+
+    Shared by ``workflow`` and ``numerics`` so cache keys and ROI sensitivity
+    comparisons stay strictly identical across stages.
+    """
+    active = acquisition.get("roi") if proposal is None else proposal
+    if not isinstance(active, Mapping):
+        return None
+    reference_id = active.get("reference_frame")
+    if type(reference_id) is not int:
+        raise CampaignError("ROI_REFERENCE_FRAME_INVALID", "ROI proposal reference_frame must be an integer")
+    frames = acquisition.get("image_frames")
+    reference_matches = [
+        item for item in frames or []
+        if isinstance(item, Mapping) and item.get("frame") == reference_id
+    ]
+    if len(reference_matches) != 1:
+        raise CampaignError("ROI_REFERENCE_FRAME_INVALID", f"reference frame {reference_id!r} is absent or ambiguous")
+    reference = reference_matches[0]
+    raw_groups = active.get("groups", [])
+    groups: list[Any] = []
+    if isinstance(raw_groups, list):
+        for group in raw_groups:
+            if isinstance(group, Mapping):
+                groups.append({
+                    key: json_safe(group[key], coerce_unknown=True)
+                    for key in ("name", "roi1", "roi2", "actual_mode", "selected_mode", "role")
+                    if key in group
+                })
+            else:
+                groups.append(json_safe(group, coerce_unknown=True))
+    return {
+        "reference_frame": active.get("reference_frame"),
+        "reference_native_dic_frame": reference.get("native_frame"),
+        "reference_sha256": active.get("reference_sha256"),
+        "image_shape": json_safe(active.get("image_shape"), coerce_unknown=True),
+        "free_region": json_safe(active.get("free_region"), coerce_unknown=True),
+        "field_roi": json_safe(active.get("field_roi"), coerce_unknown=True),
+        "exclusions": json_safe(active.get("exclusions", []), coerce_unknown=True),
+        "groups": groups,
+    }
+
+
+def resolve_source_file(
+    relative_to_bundle: str | None = None,
+    *,
+    module: Any = None,
+    module_file: str | None = None,
+    error_code: str = "CAMPAIGN_CODE_FINGERPRINT_UNAVAILABLE",
+) -> Path:
+    """Resolve an auditable Python source file in editable installs and frozen bundles."""
+    rel_path: Path | None = Path(relative_to_bundle) if relative_to_bundle else None
+    if rel_path is None and module is not None:
+        module_name = getattr(module, "__name__", None)
+        if not isinstance(module_name, str) or not module_name:
+            spec = getattr(module, "__spec__", None)
+            module_name = getattr(spec, "name", None)
+        if not isinstance(module_name, str) or not module_name:
+            for attr in ("fingerprint", "analyze", "align"):
+                function = getattr(module, attr, None)
+                function_module = getattr(function, "__module__", None)
+                if isinstance(function_module, str) and function_module:
+                    module_name = function_module
+                    break
+        if isinstance(module_name, str) and module_name:
+            rel_path = Path(*module_name.split(".")).with_suffix(".py")
+
+    frozen = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+    candidates: list[Path] = []
+    if frozen and rel_path is not None:
+        bundle_roots: list[Path] = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bundle_roots.append(Path(meipass) / "sources")
+        if getattr(sys, "executable", None):
+            exe_dir = Path(sys.executable).resolve().parent
+            bundle_roots.extend((exe_dir / "_internal" / "sources", exe_dir / "sources"))
+        candidates.extend(base / rel_path for base in bundle_roots)
+
+    if not frozen:
+        raw_file = module_file or getattr(module, "__file__", None)
+        if isinstance(raw_file, (str, os.PathLike)):
+            source_path = Path(raw_file)
+            if source_path.suffix.casefold() == ".py":
+                candidates.append(source_path)
+            else:
+                candidates.append(source_path.with_suffix(".py"))
+        if rel_path is not None:
+            candidates.append(Path(__file__).resolve().parent.parent / rel_path)
+        if module is not None:
+            for attr in ("fingerprint", "analyze", "align"):
+                function = getattr(module, attr, None)
+                code = getattr(function, "__code__", None)
+                filename = getattr(code, "co_filename", None)
+                if isinstance(filename, str) and Path(filename).suffix.casefold() == ".py":
+                    candidates.append(Path(filename))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            canonical = candidate.resolve()
+            key = str(canonical).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            if canonical.is_file() and canonical.suffix.casefold() == ".py":
+                return canonical
+        except (OSError, TypeError, ValueError):
+            continue
+    label = relative_to_bundle or getattr(module, "__name__", type(module).__name__ if module is not None else "unknown")
+    raise CampaignError(error_code, f"cannot resolve an auditable source copy for {label}")
+
+
+def module_code_sha256(module: Any, *, relative_to_bundle: str | None = None) -> str:
+    """Return the SHA-256 digest of a module's auditable Python source file."""
+    return sha256_file(resolve_source_file(relative_to_bundle, module=module))
+
+
+def campaign_code_fingerprints() -> dict[str, str]:
+    """Hash every campaign Python module from editable or frozen bundle sources."""
+    return {
+        rel: sha256_file(resolve_source_file(rel, error_code="ENGINE_SOURCE_UNAVAILABLE"))
+        for rel in CAMPAIGN_SOURCE_FILES
+    }
+
+
 def project_dir(path: str | os.PathLike[str]) -> Path:
     """Accept a project directory or its project.json file."""
     value = Path(path).expanduser()
@@ -190,7 +397,8 @@ def project_json_path(path: str | os.PathLike[str]) -> Path:
 def artifact_path(project_root: str | os.PathLike[str], relative: str) -> Path:
     rel = validate_relative_path(relative, "artifact path")
     base = project_dir(project_root)
-    target = (base / Path(rel)).resolve()
+    normalized = rel.replace("\\", "/")
+    target = (base / Path(normalized)).resolve()
     try:
         target.relative_to(base)
     except ValueError as exc:
