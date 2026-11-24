@@ -78,13 +78,18 @@ def _finite_pair(value, name: str) -> tuple[float, float]:
 
 
 def _has_jacobian_support(field: Mapping) -> bool:
-    if "X" not in field or "Y" not in field:
+    if field.get("X") is None or field.get("Y") is None:
+        return False
+    x = np.asarray(field["X"])
+    y = np.asarray(field["Y"])
+    if x.ndim != 2 or y.ndim != 2 or x.shape != y.shape or min(x.shape) < 2:
         return False
     return (
-        all(key in field for key in ("dudx", "dudy", "dvdx", "dvdy"))
-        or "P" in field
-        or all(key in field for key in ("U", "V"))
-        or all(key in field for key in ("u", "v"))
+        all(field.get(key) is not None for key in ("dudx", "dudy", "dvdx", "dvdy"))
+        or field.get("P") is not None
+        or all(field.get(key) is not None for key in ("u_raw", "v_raw"))
+        or all(field.get(key) is not None for key in ("U", "V"))
+        or all(field.get(key) is not None for key in ("u", "v"))
     )
 
 
@@ -128,14 +133,14 @@ def jacobian_determinant(field: Mapping) -> np.ndarray:
     if X.ndim != 2 or min(X.shape) < 2:
         raise ValueError("Jacobian estimation requires a two-dimensional X/Y POI grid with at least 2 rows and columns")
     direct_keys = ("dudx", "dudy", "dvdx", "dvdy")
-    if all(key in field for key in direct_keys):
+    if all(field.get(key) is not None for key in direct_keys):
         dudx, dudy, dvdx, dvdy = (_array(field, key).astype(float, copy=False) for key in direct_keys)
         det = (1.0 + dudx) * (1.0 + dvdy) - dudy * dvdx
         valid = _array(field, "valid", required=False, dtype=bool)
         if valid is not None:
             det = np.where(valid, det, np.nan)
         return np.where(np.isfinite(det), det, np.nan)
-    if "P" in field:
+    if field.get("P") is not None:
         p = np.asarray(field["P"], dtype=float)
         if p.shape == X.shape + (6,):
             pass
@@ -151,8 +156,8 @@ def jacobian_determinant(field: Mapping) -> np.ndarray:
         return np.where(supported, det, np.nan)
     # Raw solver displacements are preferred for a foldover check when the core
     # also exposes its optional-smoothed strain input as U/V.
-    ukey = "u_raw" if "u_raw" in field else ("U" if "U" in field else "u")
-    vkey = "v_raw" if "v_raw" in field else ("V" if "V" in field else "v")
+    ukey = "u_raw" if field.get("u_raw") is not None else ("U" if field.get("U") is not None else "u")
+    vkey = "v_raw" if field.get("v_raw") is not None else ("V" if field.get("V") is not None else "v")
     U, V = _array(field, ukey), _array(field, vkey)
     valid = _array(field, "valid", required=False, dtype=bool)
     support = np.isfinite(X) & np.isfinite(Y) & np.isfinite(U) & np.isfinite(V)
@@ -647,6 +652,11 @@ def plot_field_map(
             vmin, vmax = vmin - delta, vmax + delta
     else:
         raise ValueError("field has no valid values to plot")
+    if method == "quadmesh":
+        if x.ndim != 2 or y.ndim != 2 or values.ndim != 2:
+            raise ValueError("quadmesh requires a two-dimensional original POI grid")
+        if not (np.isfinite(x).all() and np.isfinite(y).all()):
+            raise ValueError("quadmesh requires finite X and Y grid coordinates")
     if cmap is None:
         cmap = "RdBu_r" if component in _STRAIN_COMPONENTS else "viridis"
     if ax is None:
@@ -657,8 +667,6 @@ def plot_field_map(
         artist = ax.scatter(x[valid], y[valid], c=values[valid], s=14, marker="s", cmap=cmap,
                             vmin=vmin, vmax=vmax, linewidths=0, rasterized=True)
     else:
-        if x.ndim != 2 or y.ndim != 2 or values.ndim != 2:
-            raise ValueError("quadmesh requires a two-dimensional original POI grid")
         mesh_values = np.ma.array(values, mask=~valid)
         artist = ax.pcolormesh(x, y, mesh_values, shading="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
     if title:

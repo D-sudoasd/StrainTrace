@@ -53,9 +53,19 @@ def page(desktop, monkeypatch, tmp_path):
     yield result
     if result._worker is not None:
         result._worker.join(10)
+    for job in host.tk.call("after", "info"):
+        try:
+            host.after_cancel(job)
+        except tk.TclError:
+            pass
+    for value in vars(result).values():
+        if isinstance(value, tk.Variable):
+            for modes, callback in value.trace_info():
+                value.trace_remove(modes, callback)
     result.destroy()
     visual.destroy()
     host.destroy()
+    gc.collect()
     assert not errors
 
 
@@ -456,3 +466,94 @@ def test_open_project_during_manual_work_reports_actionable_error(page, tmp_path
     page.open_project(tmp_path / "project")
     assert not page._busy
     assert "手动分析仍在运行" in page.status_var.get()
+
+
+def test_gui_opens_low_texture_project_for_preview_and_roi_editing(page, tmp_path):
+    images = tmp_path / "low_texture"
+    images.mkdir()
+    blank = np.full((128, 128), 120, dtype=np.uint8)
+    for idx in (1, 2):
+        assert cv2.imwrite(str(images / f"frame_{idx:04d}.png"), blank)
+    destination = tmp_path / "low-texture-project"
+    api.init_project(destination, images, time_basis="frame_index")
+    page.open_project(destination)
+    wait(page)
+    assert page.project_dir == destination, page.status_var.get()
+    assert page._image is not None and page._image.size == (128, 128)
+    assert page._record["native_frame"] == 1
+
+
+def test_gui_clears_draft_rect_guards_gauges_button_and_casefolds_duplicates(page, tmp_path):
+    project(page, tmp_path, regions=(region("Center"),))
+    # gauges_button must be disabled when no gauges artifact exists
+    assert page.gauges_button.instate(["disabled"])
+    # Duplicate name check must be case-insensitive
+    page.new_item()
+    page.kind_var.set("统计 ROI")
+    page.name_var.set("center")
+    page.a_var.set("20,20,30,40")
+    page.apply_item()
+    assert len(page.items) == 1
+    assert "不能重复" in page.status_var.get()
+    # Drawing a non-analysis-ROI target must clear the canvas "draft" tag
+    ox, oy = page._offset
+    s = page._scale
+    page.draw_var.set("统计 ROI")
+    page._draw_start(SimpleNamespace(x=ox + 20 * s, y=oy + 20 * s))
+    page._draw_motion(SimpleNamespace(x=ox + 60 * s, y=oy + 60 * s))
+    assert page.image_canvas.find_withtag("draft")
+    page._draw_end(SimpleNamespace(x=ox + 60 * s, y=oy + 60 * s))
+    assert not page.image_canvas.find_withtag("draft")
+    # Early return (zero-area drag) also clears "draft"
+    page._draw_start(SimpleNamespace(x=ox + 20 * s, y=oy + 20 * s))
+    page._draw_motion(SimpleNamespace(x=ox + 40 * s, y=oy + 40 * s))
+    assert page.image_canvas.find_withtag("draft")
+    page._draw_end(SimpleNamespace(x=ox + 20 * s, y=oy + 20 * s))
+    assert not page.image_canvas.find_withtag("draft")
+
+
+def test_gui_rejects_empty_source_and_supports_apply_theme_with_dark_arg(page, tmp_path):
+    page.source_var.set("   ")
+    page.project_var.set(str(tmp_path / "new-proj"))
+    for action in (page.discover, page.create_project, page.auto_analyze):
+        action()
+        assert not page._busy
+        assert "请先选择实验或图像目录" in page.status_var.get()
+    # apply_theme must accept both 0-arg and dark=True/False calls
+    page.app = SimpleNamespace(card_bg="#1e293b", panel_bg="#0f172a", text_color="#f8fafc", canvas_bg="#020617")
+    page.apply_theme()
+    page.apply_theme(dark=True)
+    assert page.image_canvas.cget("background") == "#020617"
+    assert page.input_page._canvas.cget("background") == "#1e293b"
+
+
+def test_gui_destroy_cancels_running_worker_and_stops_polling(desktop, tmp_path):
+    host = tk.Toplevel(desktop)
+    host.withdraw()
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class CancellableAPI:
+        def run(self, _proj, progress):
+            started.set()
+            cancelled.wait(5)
+            return {"status": "cancelled"}
+
+        def cancel(self, _proj):
+            cancelled.set()
+            return {"cancel_requested": True}
+
+    page = AgentPage(host, api=CancellableAPI())
+    page.project_dir = tmp_path
+    page.project_var.set(str(tmp_path))
+    page.plan = {"status": "ready"}
+    page._dirty = False
+    page._editor_dirty = False
+    page._launch("运行", lambda a, emit: (a.run(tmp_path, progress=emit), None), lambda _v: None, cancellable=tmp_path)
+    assert started.wait(2)
+    page.destroy()
+    assert cancelled.is_set()
+    assert page._closed is True
+    assert page._poll_id is None
+    assert not page._worker.is_alive()
+    host.destroy()

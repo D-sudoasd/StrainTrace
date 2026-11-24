@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import inspect
 import os
+import stat
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,6 +21,26 @@ GENERATED_DIRECTORIES = {
 }
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    if hasattr(Path, "is_junction"):
+        try:
+            if path.is_junction():
+                return True
+        except OSError:
+            return False
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse_tag = getattr(info, "st_reparse_tag", 0)
+    return reparse_tag in (
+        getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+        getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
+    )
+
+
 def source_files(folder: Path):
     """Walk once, pruning outputs and directory links before descending."""
     for current, directories, names in os.walk(folder, followlinks=False):
@@ -31,18 +52,19 @@ def source_files(folder: Path):
         directories[:] = sorted(
             name for name in directories
             if name.casefold() not in GENERATED_DIRECTORIES
-            and not (current_path / name).is_symlink()
-            and not (hasattr(Path, "is_junction") and (current_path / name).is_junction())
+            and not _is_link_or_junction(current_path / name)
         )
         for name in sorted(names):
             path = current_path / name
-            if not path.is_symlink():
+            if not _is_link_or_junction(path):
                 yield path
 
 
 def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "full_field", options: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from . import api
 
+    if not isinstance(folder, (str, os.PathLike)) or not str(folder).strip():
+        raise api.AgentError("CONFIG_TYPE_ERROR", "folder must be a non-empty path string", path="$.folder")
     root = Path(folder).expanduser().resolve()
     if not root.is_dir():
         raise api.AgentError("EXPERIMENT_DIRECTORY_MISSING", f"experiment directory does not exist: {root}", path=str(root))
@@ -133,6 +155,8 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
             required.append({"field": "frame_map_csv", "reason": exc.message, "error_code": exc.code})
     elif chosen and (chosen["ambiguous_filename_count"] or chosen["duplicate_native_frame_count"]):
         required.append({"field": "frame_map_csv", "reason": "Native image identity requires an explicit unique filename/native_frame mapping.", "choices": [str(path) for path in maps]})
+    if selected.get("time_basis") is not None and selected.get("time_basis") not in {"physical_time", "frame_index"}:
+        required.append({"field": "time_basis", "reason": "time_basis must be physical_time or frame_index.", "choices": ["physical_time", "frame_index"]})
     if not explicit_times and selected.get("frame_interval_s") is None:
         if normalized in {"full_field", "virtual_gauge"} and not selected.get("loads_csv") and selected.get("time_basis", "frame_index") == "frame_index":
             selected["time_basis"] = "frame_index"
@@ -140,21 +164,55 @@ def discover_experiment(folder: str | os.PathLike[str], *, objective: str = "ful
         else:
             required.append({"field": "frame_interval_s", "reason": "Provide the recorded acquisition interval in seconds or a complete frame-map time_s column; frame index is not seconds."})
     else:
-        selected.setdefault("time_basis", "physical_time")
+        if selected.get("time_basis") == "frame_index":
+            required.append({"field": "time_basis", "reason": "frame_index conflicts with recorded frame times or frame_interval_s; use physical_time.", "choices": ["physical_time"]})
+        else:
+            selected.setdefault("time_basis", "physical_time")
+    if selected.get("time_basis") == "frame_index" and selected.get("loads_csv"):
+        required.append({"field": "time_basis", "reason": "frame_index cannot be used with loads_csv; provide physical_time.", "choices": ["physical_time"]})
     if selected.get("frame_interval_s") is not None:
         api._positive_number(selected["frame_interval_s"], "frame_interval_s")
     if normalized in {"virtual_gauge", "stress_strain"} and not selected.get("gauges"):
         required.append({"field": "gauges", "reason": "Specify measurement endpoints and loading axis; automatic geometry candidates do not establish a physical gauge."})
     if normalized == "stress_strain":
         for field in ("loads_csv", "load_time_column", "load_force_column", "load_time_offset_s", "max_gap_s", "area_mm2"):
-            if selected.get(field) is None:
+            if selected.get(field) is None or (isinstance(selected.get(field), str) and not selected[field].strip()):
                 required.append({"field": field, "reason": "Required for synchronized force / supplied cross-sectional area and DIC gauge strain."})
         if selected.get("clock_confirmed") is not True:
             required.append({"field": "clock_confirmed", "reason": "Confirm the recorded relationship between camera and load clocks."})
     elif selected.get("loads_csv"):
         for field in ("load_time_column", "load_time_offset_s", "max_gap_s"):
-            if selected.get(field) is None:
+            if selected.get(field) is None or (isinstance(selected.get(field), str) and not selected[field].strip()):
                 required.append({"field": field, "reason": "Explicit time-channel metadata is required when assigning a load table."})
+        if not selected.get("load_force_column") and not selected.get("displacement_column"):
+            required.append({"field": "load_force_column", "reason": "Configure load_force_column or displacement_column when loads_csv is provided."})
+    if selected.get("loads_csv"):
+        time_col = selected.get("load_time_column")
+        if time_col and selected.get("load_time_unit") is None and time_col not in {"time_s", "timestamp_s", "time_seconds"}:
+            required.append({"field": "load_time_unit", "reason": "Provide load_time_unit; only canonical *_s columns imply seconds.", "choices": ["s", "ms", "min", "h"]})
+        force_col = selected.get("load_force_column")
+        if force_col and selected.get("force_unit") is None and force_col not in {"force_N", "load_N", "force_kN", "load_kN"}:
+            required.append({"field": "force_unit", "reason": "Provide force_unit; only canonical *_N or *_kN columns imply units.", "choices": ["N", "kN"]})
+        if not force_col and (selected.get("area_mm2") is not None or selected.get("force_unit") is not None):
+            required.append({"field": "load_force_column", "reason": "area_mm2 and force_unit require load_force_column."})
+        disp_col = selected.get("displacement_column")
+        if disp_col:
+            if selected.get("displacement_unit") is None and disp_col not in {
+                "displacement_mm", "machine_displacement_mm", "crosshead_mm",
+                "displacement_um", "machine_displacement_um", "crosshead_um",
+            }:
+                required.append({"field": "displacement_unit", "reason": "Provide displacement_unit for non-canonical displacement columns.", "choices": ["mm", "um"]})
+            if selected.get("displacement_source") is None:
+                required.append({"field": "displacement_source", "reason": "Provide displacement_source when displacement_column is configured.", "choices": ["crosshead", "machine_extensometer", "other_machine_channel"]})
+        elif any(selected.get(k) is not None for k in ("displacement_unit", "displacement_source", "machine_gauge_length_mm")):
+            required.append({"field": "displacement_column", "reason": "Machine displacement metadata requires displacement_column."})
+    elif any(selected.get(k) is not None for k in (
+        "load_time_column", "load_force_column", "load_time_unit", "force_unit",
+        "load_time_offset_s", "max_gap_s", "area_mm2", "displacement_column",
+        "displacement_unit", "displacement_source", "machine_gauge_length_mm",
+    )):
+        if not any(item.get("field") == "loads_csv" for item in required):
+            required.append({"field": "loads_csv", "reason": "Load/displacement channel metadata requires loads_csv."})
     if loads and not selected.get("loads_csv"):
         warnings.append({"code": "UNASSIGNED_TABLES", "message": "Tables were found but no load channels, units or clock relationship were assigned."})
     return {"schema": "straintrace.experiment-discovery/v1", "folder": str(root), "objective": normalized or objective,

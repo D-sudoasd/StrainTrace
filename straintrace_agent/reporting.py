@@ -18,11 +18,13 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from typing import Any, Mapping
 
 
 REPORT_SCHEMA = "straintrace.agent-report/v1"
 PACKAGE_SCHEMA = "straintrace.agent-report-package/v1"
+_DIR_REPLACE_RETRY_DELAYS_S = (0.01, 0.02, 0.05, 0.1)
 _COLORS = ("#2563eb", "#c2410c", "#047857", "#9333ea", "#a21caf", "#0e7490")
 _MAX_TABLE_ROWS = 100
 _MAX_CURVE_POINTS = 600
@@ -73,7 +75,7 @@ def _validate_snapshot_binding(config: Mapping[str, Any], plan: Mapping[str, Any
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
 
 
 def _finite(value: Any) -> float | None:
@@ -100,21 +102,61 @@ def _read_table(path: Path, relative: str) -> dict[str, Any]:
     return {"path": relative, "columns": columns, "rows": rows}
 
 
+def _is_reparse_or_symlink(path: Path) -> bool:
+    try:
+        attributes = path.lstat()
+    except FileNotFoundError:
+        return False
+    return bool(
+        stat.S_ISLNK(attributes.st_mode)
+        or getattr(attributes, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _relative_under_root(root: Path, candidate: Path) -> str | None:
+    resolved_root = root.resolve()
+    candidate_abs = candidate.expanduser().absolute()
+    if candidate_abs.is_relative_to(resolved_root):
+        rel = candidate_abs.relative_to(resolved_root)
+        return rel.as_posix() if rel.parts else None
+    parts: list[str] = []
+    current = candidate_abs
+    while True:
+        try:
+            if current.resolve() == resolved_root:
+                return PurePosixPath(*reversed(parts)).as_posix() if parts else None
+        except OSError:
+            pass
+        if current.parent == current:
+            return None
+        parts.append(current.name)
+        current = current.parent
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    for attempt in range(len(_DIR_REPLACE_RETRY_DELAYS_S) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == len(_DIR_REPLACE_RETRY_DELAYS_S):
+                raise
+            time.sleep(_DIR_REPLACE_RETRY_DELAYS_S[attempt])
+
+
 def _safe_file(root: Path, relative: str) -> Path:
     rel = PurePosixPath(relative)
-    if not relative or rel.is_absolute() or ".." in rel.parts or "\\" in relative or ":" in relative:
+    if not relative or not rel.parts or rel.is_absolute() or ".." in rel.parts or "\\" in relative or ":" in relative:
         raise ValueError(f"Unsafe package path: {relative!r}")
-    path = root.joinpath(*rel.parts)
-    for part in [path, *path.parents]:
-        try:
-            attributes = part.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISLNK(attributes.st_mode) or getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+    resolved_root = root.resolve()
+    current = resolved_root
+    for segment in rel.parts:
+        current = current / segment
+        if _is_reparse_or_symlink(current):
             raise ValueError(f"Symlink or reparse point in package path: {relative!r}")
-    if not path.resolve().is_relative_to(root.resolve()):
+    if not current.resolve().is_relative_to(resolved_root):
         raise ValueError(f"Path escapes package: {relative!r}")
-    return path
+    return current
 
 
 def _checkpoint_expectations(source: Mapping[str, Any]) -> dict[str, str]:
@@ -291,6 +333,39 @@ def _geometry(config: Mapping[str, Any], plan: Mapping[str, Any]) -> dict[str, A
             "analysis_rectangle_status": plan.get("analysis_rectangle_status", "candidate_not_physical_specimen_confirmation")}
 
 
+def _preview_grayscale_image(image):
+    from PIL import Image, ImageOps
+
+    if image.mode in {"1", "L", "LA", "P", "RGB", "RGBA"}:
+        return ImageOps.autocontrast(image.convert("L"))
+    try:
+        import numpy as np
+    except ImportError:
+        extrema = image.getextrema()
+        if isinstance(extrema, tuple) and len(extrema) == 2 and all(isinstance(v, (int, float)) for v in extrema):
+            lo, hi = float(extrema[0]), float(extrema[1])
+            if math.isfinite(lo) and math.isfinite(hi) and hi > lo:
+                scale = 255.0 / (hi - lo)
+                return image.point(lambda value: max(0, min(255, int(round((value - lo) * scale))))).convert("L")
+        return ImageOps.autocontrast(image.convert("L"))
+    array = np.asarray(image, dtype=np.float64)
+    if array.ndim > 2:
+        array = np.mean(array[..., :3], axis=-1)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return Image.fromarray(np.zeros(array.shape[:2], dtype=np.uint8), mode="L")
+    lo, hi = (float(v) for v in np.percentile(finite, (1.0, 99.0)))
+    if not (hi > lo):
+        lo, hi = float(np.min(finite)), float(np.max(finite))
+    if hi > lo:
+        scaled = np.clip((array - lo) / (hi - lo), 0.0, 1.0) * 255.0
+        scaled = np.where(np.isfinite(array), scaled, 0.0)
+        uint8 = np.rint(scaled).astype(np.uint8)
+    else:
+        uint8 = np.zeros(array.shape[:2], dtype=np.uint8)
+    return Image.fromarray(uint8, mode="L")
+
+
 def _preview(stage: Path, geometry: dict[str, Any], source: Mapping[str, Any]) -> list[str]:
     warnings = []
     reference = geometry.get("reference_path")
@@ -301,10 +376,10 @@ def _preview(stage: Path, geometry: dict[str, Any], source: Mapping[str, Any]) -
     try:
         if not source_image.get("sha256") or _sha256(path) != source_image["sha256"]:
             return ["参考图 SHA-256 未与运行记录一致核实；没有嵌入图像预览。"]
-        from PIL import Image, ImageOps
+        from PIL import Image
         with Image.open(path) as image:
             geometry["image_shape_yx"] = [image.height, image.width]
-            preview = ImageOps.autocontrast(image.convert("L"))
+            preview = _preview_grayscale_image(image)
             preview.thumbnail((1600, 1600))
             (stage / "assets").mkdir(exist_ok=True)
             preview.save(stage / "assets" / "reference.png")
@@ -318,7 +393,14 @@ def _preview(stage: Path, geometry: dict[str, Any], source: Mapping[str, Any]) -
                     if [mask.height, mask.width] != geometry["image_shape_yx"]:
                         warnings.append("遮罩尺寸与参考图不一致；没有嵌入遮罩预览。")
                     else:
-                        excluded = mask.convert("L").point(lambda value: 0 if value else 100)
+                        if mask.mode in {"1", "L", "LA", "P", "RGB", "RGBA"}:
+                            excluded = mask.convert("L").point(lambda value: 0 if value else 100)
+                        else:
+                            import numpy as np
+                            mask_arr = np.asarray(mask)
+                            if mask_arr.ndim > 2:
+                                mask_arr = np.any(mask_arr > 0, axis=-1)
+                            excluded = Image.fromarray(np.where(mask_arr > 0, 0, 100).astype(np.uint8), mode="L")
                         overlay = Image.new("RGBA", mask.size, (220, 38, 38, 0))
                         overlay.putalpha(excluded)
                         overlay.thumbnail((1600, 1600))
@@ -586,10 +668,9 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
     tables = {}
     table_sources = {}
     for name, source_path in (("summary", run_root / "summary.csv"), ("gauges", run_root / "gauges.csv"), ("regions", regions_csv or run_root / "regions.csv")):
-        source_path = source_path.absolute()
-        if not source_path.is_relative_to(run_root):
+        source_relative = _relative_under_root(run_root, source_path)
+        if source_relative is None:
             raise ValueError("Report CSV must be a manifest-registered file in the run directory")
-        source_relative = source_path.relative_to(run_root).as_posix()
         source_path = _safe_file(run_root, source_relative)
         if not source_path.is_file():
             if source_relative in artifacts or (name in {"gauges", "regions"} and config.get(name)):
@@ -653,10 +734,12 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
             "field_maps": field_maps,
             "scientific_acceptance": "not_assessed", "experimental_uncertainty_calibrated": False}
     _write_json(stage / "data" / "report_data.json", data)
-    (stage / "index.html").write_text(_html(data), encoding="utf-8")
+    (stage / "index.html").write_text(_html(data), encoding="utf-8", newline="\n")
     module_path = Path(__file__)
     if not module_path.is_file():
-        module_path = Path(getattr(sys, "_MEIPASS", "")) / "sources" / "straintrace_agent" / "reporting.py"
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            module_path = Path(meipass) / "sources" / "straintrace_agent" / "reporting.py"
     if not module_path.is_file():
         raise ValueError("Report verifier source is unavailable in this distribution")
     shutil.copyfile(module_path, stage / "verify_report.py")
@@ -671,7 +754,7 @@ def _build(stage: Path, run_root: Path, config: Mapping[str, Any], plan: Mapping
         "CSV tables preserve all saved rows; blank cells are unavailable values.\n"
         "NPZ arrays (when included) must be opened with numpy.load(path, allow_pickle=False).\n"
         "To regenerate this report, call straintrace_agent.reporting.build_report on the saved run directory.\n",
-        encoding="utf-8")
+        encoding="utf-8", newline="\n")
     files = {path.relative_to(stage).as_posix(): {"sha256": _sha256(path), "bytes": path.stat().st_size}
              for path in sorted(stage.rglob("*")) if path.is_file()}
     _write_json(stage / "manifest.json", {"schema": PACKAGE_SCHEMA, "files": files,
@@ -690,9 +773,8 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
     raw image sequences remain externally referenced by path and SHA-256.
     Existing output directories are replaced only if they carry this schema.
     """
-    input_root = Path(run_root).absolute()
-    _safe_file(input_root, "checkpoints")
-    root = input_root.resolve()
+    root = Path(run_root).resolve()
+    _safe_file(root, "checkpoints")
     # Reject mismatched input snapshots before creating a staging directory.
     _validate_snapshot_binding(config, plan, _json(root / "manifest.json"))
     output = Path(output_dir).resolve() if output_dir else root / "report"
@@ -713,13 +795,13 @@ def build_report(run_root: str | os.PathLike[str], *, config: Mapping[str, Any],
         if output.exists():
             backup = Path(tempfile.mkdtemp(prefix=f".{output.name}-old-", dir=output.parent))
             backup.rmdir()
-            os.replace(output, backup)
+            _replace_with_retry(output, backup)
         try:
-            os.replace(stage, output)
+            _replace_with_retry(stage, output)
         except BaseException as publication_error:
             if backup is not None:
                 try:
-                    os.replace(backup, output)
+                    _replace_with_retry(backup, output)
                 except BaseException as restore_error:
                     # An open Windows handle can block both publication and
                     # restoration. The backup is then the only previous copy;
@@ -843,7 +925,9 @@ def verify_report(path: str | os.PathLike[str]) -> dict[str, Any]:
             _safe_file(root, entry["package_path"])
             if entry["sha256"] != source.get("artifacts", {}).get(entry["source_relative_path"]) or digests.get(entry["package_path"]) != entry["sha256"]:
                 errors.append(f"Field map source checksum mismatch: {entry['source_relative_path']}")
-        if (root / "index.html").read_text(encoding="utf-8") != _html(data):
+        expected_html = _html(data)
+        html_raw = (root / "index.html").read_bytes().decode("utf-8")
+        if html_raw != expected_html and html_raw.replace("\r\n", "\n") != expected_html:
             errors.append("HTML/report-data mismatch")
         checkpoint_expectations = _checkpoint_expectations(source)
         if {record["source_relative_path"] for record in data["checkpoint_files"]} != set(checkpoint_expectations):

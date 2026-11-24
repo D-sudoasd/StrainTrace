@@ -38,8 +38,6 @@ def _load_mechanics(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, d
         times = aligned_time[good]
         data = raw[good] * scale
         source_rows = np.flatnonzero(good).astype(np.int64) + 1
-        order = np.argsort(times, kind="stable")
-        times, data, source_rows = times[order], data[order], source_rows[order]
         if times.size < 2:
             channel_status[channel_name] = "fewer_than_two_finite_samples"
             return
@@ -55,13 +53,21 @@ def _load_mechanics(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, d
     channel(loads.get("force_column"), force_scale, "force_time_s", "force_N", "force")
     displacement_scale = 1.0 if loads.get("displacement_unit") == "mm" else 1e-3
     channel(loads.get("displacement_column"), displacement_scale, "displacement_time_s", "displacement_mm", "displacement")
-    overall_status = "aligned" if loads.get("clock_confirmed") else "unavailable"
     if not loads.get("clock_confirmed"):
+        overall_status = "unavailable"
+        overall_reason = "clock_not_confirmed"
         for name, state in list(channel_status.items()):
             if state == "available":
                 channel_status[name] = "clock_unconfirmed"
+    elif any(state == "available" for state in channel_status.values()):
+        overall_status = "aligned"
+        overall_reason = None
+    else:
+        overall_status = "unavailable"
+        failed_channels = [f"{name}:{state}" for name, state in channel_status.items() if state != "not_configured"]
+        overall_reason = ",".join(failed_channels) if failed_channels else "no_channels_available"
     return values, {
-        "status": overall_status, "reason": None if loads.get("clock_confirmed") else "clock_not_confirmed",
+        "status": overall_status, "reason": overall_reason,
         "source_rows": int(len(table)), "time_offset_s": float(loads["time_offset_s"]),
         "max_gap_s": float(loads["max_gap_s"]), "area_mm2": loads.get("area_mm2"),
         "force_status": channel_status["force"], "displacement_status": channel_status["displacement"],
@@ -176,9 +182,17 @@ def _mechanics_at(
                 machine_true = math.log1p(machine_engineering) if machine_engineering > -1.0 else None
     reference_detail = dict(displacement_reference_alignment or {})
     reference_kind = reference_detail.get("alignment_kind", "reference_unavailable" if loads.get("displacement_column") else "not_configured")
+    if stress is not None:
+        mechanics_status = "aligned"
+    elif value is not None:
+        mechanics_status = "force_aligned_area_unavailable"
+    elif not loads.get("force_column"):
+        mechanics_status = "displacement_aligned" if displacement_delta is not None else "displacement_channel_unavailable_or_outside_time_support"
+    else:
+        mechanics_status = "force_channel_unavailable_or_outside_time_support"
     return {
         "force_N": value, "stress_MPa": stress,
-        "mechanics_status": "aligned" if stress is not None else "force_aligned_area_unavailable" if value is not None else "force_channel_unavailable_or_outside_time_support",
+        "mechanics_status": mechanics_status,
         "machine_displacement_mm": displacement_delta,
         "machine_engineering_strain": machine_engineering,
         "machine_true_strain": machine_true,
@@ -388,7 +402,8 @@ def _measure_gauges(
 def _gauge_group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     valid = [row for row in rows if row.get("status") == "valid" and row.get("engineering_strain") is not None]
     summary: dict[str, Any] = {"dic_virtual_gauge_engineering_strain": None, "dic_virtual_gauge_engineering_strain_sd": None, "dic_virtual_gauge_true_strain": None, "dic_virtual_gauge_valid_count": 0, "dic_virtual_gauge_total_count": len(rows)}
-    for axis in ("x", "y"):
+    axes = ("x", "y", "distance")
+    for axis in axes:
         group = [row for row in valid if row.get("axis") == axis]
         values = [float(row["engineering_strain"]) for row in group]
         truths = [float(row["true_strain"]) for row in group if row.get("true_strain") is not None]
@@ -396,7 +411,7 @@ def _gauge_group_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         summary[f"dic_virtual_gauge_engineering_strain_sd_{axis}"] = float(np.std(values, ddof=1)) if len(values) > 1 else None
         summary[f"dic_virtual_gauge_valid_count_{axis}"] = len(values)
         summary[f"dic_virtual_gauge_true_strain_{axis}"] = float(np.mean(truths)) if truths else None
-    compatible_axes = [axis for axis in ("x", "y") if summary[f"dic_virtual_gauge_valid_count_{axis}"]]
+    compatible_axes = [axis for axis in axes if summary[f"dic_virtual_gauge_valid_count_{axis}"]]
     if len(compatible_axes) == 1:
         axis = compatible_axes[0]
         summary["dic_virtual_gauge_engineering_strain"] = summary[f"dic_virtual_gauge_engineering_strain_{axis}"]

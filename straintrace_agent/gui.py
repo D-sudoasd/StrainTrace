@@ -60,7 +60,10 @@ def _snapshot(api, project):
     plan = _read_json(_project_file(project, status["current_plan"])) if status.get("current_plan") else None
     if plan is None:
         # Use the planner's reference selection and its already loaded image.
-        record, gray, _selection = api._automatic_reference(config, inventory)
+        try:
+            record, gray, _selection = api._automatic_reference(config, inventory, allow_untextured_fallback=True)
+        except TypeError:
+            record, gray, _selection = api._automatic_reference(config, inventory)
     else:
         native = plan.get("reference_native_frame")
         if native is None:
@@ -241,12 +244,16 @@ class AgentPage(ttk.Frame):
         if target is not None and bounds and bounds[3] > bounds[1]:
             canvas.yview_moveto(max(0, target - bounds[1]) / (bounds[3] - bounds[1]))
 
-    def apply_theme(self):
+    def apply_theme(self, dark: bool | None = None):
         if self.app is not None:
             for page in (self.input_page, self.geometry_page, self.results_page):
                 page._canvas.configure(background=self.app.card_bg)
             for text in (self.discovery_text, self.result_text):
                 text.configure(background=self.app.panel_bg, foreground=self.app.text_color, insertbackground=self.app.text_color)
+            canvas = getattr(self, "image_canvas", None)
+            if canvas is not None:
+                canvas_bg = getattr(self.app, "canvas_bg", None) or ("#0f172a" if dark else "#111827")
+                canvas.configure(background=canvas_bg)
 
     def _build_input(self):
         p = self.input_page
@@ -321,7 +328,7 @@ class AgentPage(ttk.Frame):
         self.report_button = self._button(p, "打开分析报告", lambda: self.open_artifact("report"), "打开当前运行的 HTML 报告；没有 HTML 时打开 Markdown 摘要。", 2, 0)
         self.folder_button = self._button(p, "打开结果目录", lambda: self.open_artifact("folder"), "打开当前运行目录，查看表格、场图、检查点与报告。", 2, 1)
         self.summary_button = self._button(p, "打开逐帧表格", lambda: self.open_artifact("summary"), "打开 summary.csv；无效测量保持空值，数值质量不等同实验验收。", 3, 0)
-        self._button(p, "打开标距表格", lambda: self.open_artifact("gauges"), "打开每条标距的端点、应变与质量状态。", 3, 1)
+        self.gauges_button = self._button(p, "打开标距表格", lambda: self.open_artifact("gauges"), "打开每条标距的端点、应变与质量状态。", 3, 1)
         self.reprocess_button = self._button(p, "按新 ROI / 标距提取", self.reprocess, "只从已保存位移场提取当前列表中的 ROI / 标距，不重算 DIC。另存一份提取结果和报告；原项目设置与结果保留。", 4, 0, columnspan=2)
         self.result_text = tk.Text(p, height=15, width=24, wrap="word", state="disabled")
         self.result_text.grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=5)
@@ -350,6 +357,7 @@ class AgentPage(ttk.Frame):
         self.image_info_label.grid(row=2, column=0, sticky="ew")
         self.visual_page.bind("<Configure>", lambda e: self.image_info_label.configure(wraplength=max(200, e.width - 20)))
         notebook.add(self.visual_page, text="自动分析图像")
+        self.apply_theme()
 
     def _mark_dirty(self, editor=False):
         if self._loading:
@@ -411,8 +419,10 @@ class AgentPage(ttk.Frame):
                     mask_file=self.mask_var.get().strip() or None, regions=regions, gauges=gauges, exclusions_px=exclusions)
 
     def _project_changes(self):
-        if self.config and Path(self.source_var.get()).resolve() != Path(self.config["image_dir"]).resolve():
-            raise ValueError("当前项目的原始图像目录固定。分析其他序列请新建项目。")
+        if self.config:
+            source_text = self.source_var.get().strip()
+            if not source_text or Path(source_text).expanduser().resolve() != Path(self.config["image_dir"]).expanduser().resolve():
+                raise ValueError("当前项目的原始图像目录固定。分析其他序列请新建项目。")
         changes = self._changes()
         if self._reference_changed() and changes["roi_override_px"] != self.config.get("roi_override_px"):
             raise ValueError("参考帧已修改；请先还原计算区域并保存设置，显示新参考图后再编辑坐标。")
@@ -498,6 +508,8 @@ class AgentPage(ttk.Frame):
     def discover(self):
         def start():
             folder = self.source_var.get().strip()
+            if not folder:
+                raise ValueError("请先选择实验或图像目录。")
             options = self._init_options()
             # Discovery should be free to locate a nested sequence.
             options.pop("image_dir", None)
@@ -529,6 +541,8 @@ class AgentPage(ttk.Frame):
                 raise ValueError("请填写新项目目录。")
             project, options = Path(path).expanduser().resolve(), self._init_options()
             image_dir = options.pop("image_dir")
+            if not image_dir:
+                raise ValueError("请先选择实验或图像目录。")
             def operation(api, emit):
                 options["time_basis"] = _time_basis(api, {**options, "image_dir": image_dir})
                 api.init_project(project, image_dir, **options)
@@ -543,6 +557,8 @@ class AgentPage(ttk.Frame):
                 raise ValueError("请填写新项目目录。")
             project, options = Path(path).expanduser().resolve(), self._init_options()
             folder, objective = self.source_var.get().strip(), OBJECTIVES[self.objective_var.get()]
+            if not folder:
+                raise ValueError("请先选择实验或图像目录。")
             # Allow discovery to choose a nested sequence unless one was found.
             if not self._discovered_options.get("image_dir"):
                 options.pop("image_dir", None)
@@ -721,6 +737,8 @@ class AgentPage(ttk.Frame):
             return
         try:
             for _ in range(100):
+                if self._closed:
+                    return
                 kind, payload = self._queue.get_nowait()
                 if kind == "progress":
                     event = payload.get("event", "处理中")
@@ -745,10 +763,13 @@ class AgentPage(ttk.Frame):
                         self._error(error) if error else accept(value)
                     except Exception as exc:
                         self._error(exc)
+                    if self._closed:
+                        return
                     self._update_actions()
         except queue.Empty:
             pass
-        self._poll_id = self._scheduler.after(60, self._poll)
+        if not self._closed:
+            self._poll_id = self._scheduler.after(60, self._poll)
 
     def _update_actions(self):
         if not hasattr(self, "run_button"):
@@ -760,6 +781,7 @@ class AgentPage(ttk.Frame):
         self.report_button.configure(state="normal" if ready and self.artifacts.get("report") else "disabled")
         self.folder_button.configure(state="normal" if ready and self.run_dir else "disabled")
         self.summary_button.configure(state="normal" if ready and self.artifacts.get("summary") else "disabled")
+        self.gauges_button.configure(state="normal" if ready and self.artifacts.get("gauges") else "disabled")
         self.reprocess_button.configure(state="normal" if ready and self.run_dir else "disabled")
 
     @staticmethod
@@ -841,7 +863,11 @@ class AgentPage(ttk.Frame):
             prior = copy.deepcopy(self.items[self._selected]["value"]) if self._selected is not None and self.items[self._selected]["kind"] == kind else {}
             if kind != KINDS[2] and not name:
                 raise ValueError("请填写 ROI 或标距名称。")
-            if any(i != self._selected and item["kind"] == kind and isinstance(item["value"], dict) and item["value"].get("name") == name for i, item in enumerate(self.items)):
+            if kind != KINDS[2] and any(
+                i != self._selected and item["kind"] == kind and isinstance(item["value"], dict)
+                and str(item["value"].get("name", "")).strip().casefold() == name.casefold()
+                for i, item in enumerate(self.items)
+            ):
                 raise ValueError("同类 ROI / 标距名称不能重复。")
             if kind == KINDS[0]:
                 x, y, width, height = self._numbers(self.a_var.get(), (4,))
@@ -908,12 +934,13 @@ class AgentPage(ttk.Frame):
         if not candidates:
             self.status_var.set("请先生成计划，查看自动标距候选。")
             return
-        existing = {item["value"].get("name") for item in self.items if item["kind"] == KINDS[1]}
+        existing = {str(item["value"].get("name", "")).strip().casefold() for item in self.items if item["kind"] == KINDS[1]}
         for candidate in candidates:
-            if candidate.get("name") not in existing:
+            candidate_name = str(candidate.get("name", "")).strip().casefold()
+            if candidate_name not in existing:
                 gauge = {k: copy.deepcopy(v) for k, v in candidate.items() if k not in ("estimated_initial_length_px", "loading_axis")}
                 self.items.append({"kind": KINDS[1], "value": gauge})
-                existing.add(candidate.get("name"))
+                existing.add(candidate_name)
         self._dirty = True
         self._refresh_tree()
         self._render_image()
@@ -985,6 +1012,8 @@ class AgentPage(ttk.Frame):
 
     def _draw_start(self, event):
         self._drag = None
+        if hasattr(self, "image_canvas"):
+            self.image_canvas.delete("draft")
         if not self._busy:
             try:
                 self._require_geometry_reference()
@@ -1003,6 +1032,8 @@ class AgentPage(ttk.Frame):
                                            ox + point[0] * self._scale, oy + point[1] * self._scale, outline="#ffffff", dash=(4, 3), tags="draft")
 
     def _draw_end(self, event):
+        if hasattr(self, "image_canvas"):
+            self.image_canvas.delete("draft")
         end, start, self._drag = self._image_point(event), self._drag, None
         if start is None or end is None or self._busy:
             return
@@ -1047,4 +1078,13 @@ class AgentPage(ttk.Frame):
             except tk.TclError:
                 pass
             self._poll_id = None
+        project = getattr(self, "_cancel_project", None)
+        worker = self._worker
+        if self._busy and project is not None:
+            try:
+                (self._api or importlib.import_module("straintrace_agent.api")).cancel(project)
+            except Exception:
+                pass
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
         super().destroy()
