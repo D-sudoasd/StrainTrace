@@ -643,3 +643,41 @@ def test_seal_rejects_input_change_and_missing_required_output(tmp_path: Path) -
     tx2.create_staging()
     with pytest.raises(core.CoreError, match="OUTPUT_MISSING"):
         tx2.seal(status="completed", scientific_ok=True, required_outputs=["core/missing.txt"])
+
+
+def test_verify_manifest_v2_rejects_empty_code_files(tmp_path: Path) -> None:
+    root = tmp_path / "out"
+    manifest_path = _tx(root, "baseline", "result.txt", "baseline")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["code_files"] = []
+    payload["code_fingerprint"] = core.code_fingerprint()
+    payload["manifest_hash"] = core.canonical_json_hash({k: v for k, v in payload.items() if k != "manifest_hash"})
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    verification = core.verify_run_manifest(manifest_path, verify_code=True)
+    assert verification["ok"] is False
+    assert any(err["code"] == "CODE_FILE_SET_INVALID" for err in verification["errors"])
+
+
+def test_commit_preserves_core_error_code_cleans_archive_and_avoids_duplicate_abort(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "out"
+    _tx(root, "baseline", "result.txt", "baseline")
+    tx = core.RunTransaction(root, config={"mode": "verify-failure"}, mode="test", run_id="preserve-code")
+    tx.create_staging()
+    tx.stage_path("core/result.txt").write_text("new", encoding="utf-8")
+    tx.seal(status="completed", scientific_ok=True, required_outputs=["core/result.txt"])
+    real_verify = core.verify_run_manifest
+    monkeypatch.setattr(
+        core,
+        "verify_run_manifest",
+        lambda _path, **kwargs: real_verify(_path, **kwargs)
+        if kwargs.get("verify_code") is False
+        else {"ok": False, "code": "INJECTED", "errors": [{"code": "INJECTED"}]},
+    )
+    with pytest.raises(core.CoreError, match="事务提交失败") as exc:
+        tx.commit()
+    monkeypatch.setattr(core, "verify_run_manifest", real_verify)
+    assert exc.value.code == "MANIFEST_VERIFY_FAILED"
+    assert not (root / "_previous_runs" / "preserve-code").exists()
+    first_failed = tx.abort(exc.value)
+    assert first_failed is not None
+    assert len(list((root / "_failed_runs").iterdir())) == 1

@@ -249,3 +249,105 @@ def test_frozen_hash_resolution_covers_every_benchmark_input(tmp_path: Path, mon
     assert provenance["benchmark_runner_source_sha256"] == hashlib.sha256(b"runner").hexdigest()
     assert provenance["synthetic_cases_source_sha256"] == hashlib.sha256(b"synthetic").hexdigest()
     assert provenance["cases_json_sha256"] == hashlib.sha256(payloads[bundle / "benchmarks" / "cases_v1.json"]).hexdigest()
+
+
+def test_posinf_peak_ratio_and_tiny_second_over_best_are_handled_cleanly() -> None:
+    inverted, _ = RUNNER._canonical_peak_ratio(np.asarray([1e-15, 0.0, 0.5]), direction="second_over_best")
+    assert np.isposinf(inverted[0]) and np.isposinf(inverted[1])
+    assert inverted[2] == pytest.approx(2.0)
+
+    case = CASES.LOCKED_CASE_DOCUMENT["cases"][0]
+    fixture = CASES.make_case(case)
+    field = dict(
+        ezdic_core.run_2d_dic(
+            fixture["reference"],
+            fixture["deformed"],
+            CASES.ROI,
+            subset_size=CASES.SUBSET_SIZE,
+            step=CASES.STEP,
+            search_radius=8,
+            pyramid_levels=1,
+            zncc_min=0.75,
+            strain_window=CASES.STRAIN_WINDOW,
+            smooth_sigma=0.0,
+            initialization="local",
+        )
+    )
+    field["best_to_second_peak_ratio"] = np.asarray(field["best_to_second_peak_ratio"], dtype=float).copy()
+    field["best_to_second_peak_ratio"][0] = np.inf
+    _, rows = RUNNER._observation(
+        case,
+        fixture,
+        field,
+        run_id="posinf-probe",
+        panel=None,
+        thresholds=CASES.LOCKED_CASE_DOCUMENT["thresholds"][case["case_id"]],
+        quality_contract=CASES.LOCKED_CASE_DOCUMENT["quality_contract"],
+    )
+    assert rows[0]["quality_score"] is not None
+    assert rows[0]["second_to_best_peak_ratio"] == 0.0
+
+
+def test_false_reject_detects_rejected_point_within_error_tolerance() -> None:
+    case = CASES.LOCKED_CASE_DOCUMENT["cases"][0]
+    fixture = CASES.make_case(case)
+    field = dict(
+        ezdic_core.run_2d_dic(
+            fixture["reference"],
+            fixture["deformed"],
+            CASES.ROI,
+            subset_size=CASES.SUBSET_SIZE,
+            step=CASES.STEP,
+            search_radius=8,
+            pyramid_levels=1,
+            zncc_min=0.75,
+            strain_window=CASES.STRAIN_WINDOW,
+            smooth_sigma=0.0,
+            initialization="local",
+        )
+    )
+    field["valid"] = np.asarray(field["valid"], dtype=bool).copy()
+    field["valid"][0] = False
+    field["u_raw"] = np.asarray(field["u_raw"], dtype=float).copy()
+    field["v_raw"] = np.asarray(field["v_raw"], dtype=float).copy()
+    field["u_raw"][0] = fixture["oracle_u"][0] + 0.05
+    field["v_raw"][0] = fixture["oracle_v"][0]
+    _, rows = RUNNER._observation(
+        case,
+        fixture,
+        field,
+        run_id="false-reject-probe",
+        panel=None,
+        thresholds=CASES.LOCKED_CASE_DOCUMENT["thresholds"][case["case_id"]],
+        quality_contract=CASES.LOCKED_CASE_DOCUMENT["quality_contract"],
+    )
+    assert rows[0]["accepted"] is False
+    assert rows[0]["false_reject"] is True
+
+
+def test_benchmark_cli_does_not_hijack_cases_flag_and_passes_local_init(tmp_path: Path) -> None:
+    bad_cases = tmp_path / "not_a_json_cases_file.txt"
+    bad_cases.write_text("invalid", encoding="utf-8")
+    exit_code = RUNNER.main(["--cases", str(bad_cases)])
+    assert exit_code == 2
+    assert bad_cases.is_file()
+
+    seen_inits: list[str | None] = []
+
+    class InitSpyCore:
+        __file__ = ezdic_core.__file__
+        APP_VERSION = ezdic_core.APP_VERSION
+        generate_synthetic_speckle = staticmethod(ezdic_core.generate_synthetic_speckle)
+        warp_image_translation = staticmethod(ezdic_core.warp_image_translation)
+        warp_image_deformation_gradient = staticmethod(ezdic_core.warp_image_deformation_gradient)
+        require_texture = staticmethod(ezdic_core.require_texture)
+
+        @staticmethod
+        def run_2d_dic(*args, **kwargs):
+            seen_inits.append(kwargs.get("initialization"))
+            return ezdic_core.run_2d_dic(*args, **kwargs)
+
+    report = RUNNER.run_benchmark(output_dir=tmp_path / "init-out", core_module=InitSpyCore())
+    assert report["overall_pass"] is True
+    assert seen_inits and all(value == "local" for value in seen_inits)
+    assert report["app"]["version"] == ezdic_core.APP_VERSION

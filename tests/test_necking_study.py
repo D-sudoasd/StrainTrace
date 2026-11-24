@@ -139,3 +139,24 @@ def test_experimental_comparison_cannot_hide_other_parameter_changes(unrelated_s
     after = {**before, "experimental_full_search": True, unrelated_setting: before[unrelated_setting]+1}
     with pytest.raises(ValueError, match="beyond experimental_full_search"):
         comparison._parameter_difference(before, after, allow_experimental_policy_difference=True)
+
+
+def test_non_bool_experimental_flag_rejected_even_without_policy_diff_opt_in():
+    before = {"subset_size": 25, "experimental_full_search": "yes"}
+    after = {"subset_size": 25, "experimental_full_search": "yes"}
+    with pytest.raises(ValueError, match="Boolean"):
+        comparison._parameter_difference(before, after, allow_experimental_policy_difference=False)
+
+
+def test_plot_necking_study_handles_single_row_csv_without_genfromtxt_crash(tmp_path):
+    from benchmarks import plot_necking_study as plotter
+
+    csv_path = tmp_path / "study.points.csv"
+    csv_path.write_text("case,x_px,y_px,correlation_valid,strain_valid,u_px,v_px,true_u_px,true_v_px,Eyy,true_Eyy,exact_displacement_full_Eyy\nonly_case,80,80,1,1,0,0,0,0,0.1,0.1,0.1\n", encoding="utf-8")
+    report_path = tmp_path / "study.json"
+    report_path.write_text(json.dumps({
+        "pointwise_csv": {"filename": csv_path.name, "sha256": comparison.digest(csv_path), "row_count": 1},
+        "cases": {},
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="Missing required cases"):
+        plotter.plot(report_path, tmp_path / "fig.png")

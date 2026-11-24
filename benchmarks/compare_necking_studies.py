@@ -56,15 +56,15 @@ def stats(values):
 
 def _parameter_difference(before, after, *, allow_experimental_policy_difference=False):
     """Permit only an explicitly requested change in the experimental flag."""
-    if not allow_experimental_policy_difference:
-        if before != after:
-            raise ValueError("solver_parameters differ; experimental policy changes require explicit opt-in")
-        return {}
     a, b = dict(before), dict(after)
     old = a.pop("experimental_full_search", False)
     new = b.pop("experimental_full_search", False)
     if type(old) is not bool or type(new) is not bool:
         raise ValueError("experimental_full_search must be a Boolean")
+    if not allow_experimental_policy_difference:
+        if before != after:
+            raise ValueError("solver_parameters differ; experimental policy changes require explicit opt-in")
+        return {}
     if a != b:
         raise ValueError("solver_parameters differ beyond experimental_full_search")
     return {"experimental_full_search": {"before": old, "after": new}} if old != new else {}
@@ -133,10 +133,12 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
             "strain_valid_before_after": [old["strain_valid_count"], new["strain_valid_count"]],
             "common_valid_count": len(common), "common_strain_valid_count": len(common_strain),
             "gained_valid_count": len(gained), "lost_valid_count": len(lost),
-            "newly_rejected_old_error_le_0_5_px": sum(error <= cutoff for error in lost_errors),
-            "newly_rejected_old_error_gt_0_5_px": sum(error > cutoff for error in lost_errors),
-            "newly_accepted_error_le_0_5_px": sum(error <= cutoff for error in gained_errors),
-            "newly_accepted_error_gt_0_5_px": sum(error > cutoff for error in gained_errors),
+            "newly_rejected_old_error_le_0_5_px": sum(math.isfinite(error) and error <= cutoff for error in lost_errors),
+            "newly_rejected_old_error_gt_0_5_px": sum(math.isfinite(error) and error > cutoff for error in lost_errors),
+            "newly_rejected_without_displacement": sum(not math.isfinite(error) for error in lost_errors),
+            "newly_accepted_error_le_0_5_px": sum(math.isfinite(error) and error <= cutoff for error in gained_errors),
+            "newly_accepted_error_gt_0_5_px": sum(math.isfinite(error) and error > cutoff for error in gained_errors),
+            "newly_accepted_without_displacement": sum(not math.isfinite(error) for error in gained_errors),
             "gained_valid_xy_px": gained, "lost_valid_xy_px": lost,
             "common_displacement_error_before_px": stats([displacement_error(pa[p]) for p in common]),
             "common_displacement_error_after_px": stats([displacement_error(pb[p]) for p in common]),
@@ -152,7 +154,7 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
         }
         result["cases"][name] = record
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8") as stream:
+    with output.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(result, stream, indent=2, allow_nan=False)
         stream.write("\n")
     return result

@@ -8,12 +8,14 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import ezdic_core as core
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import ezdic_core as core  # noqa: E402
 
 ROI = (45, 30, 302, 975)
 SETTINGS = dict(subset_size=31, step=8, search_radius=16, strain_window=5,
@@ -23,26 +25,36 @@ SETTINGS = dict(subset_size=31, step=8, search_radius=16, strain_window=5,
 def metrics(field):
     valid = np.asarray(field['strain_valid'], dtype=bool)
     summary = field['quality_summary']
+    zncc = np.asarray(field['zncc'], dtype=float)
+    zncc_finite = zncc[np.isfinite(zncc)]
+    eyy_valid = np.asarray(field['Eyy'], dtype=float)[valid]
+    eyy_valid = eyy_valid[np.isfinite(eyy_valid)]
+    fit_res = np.asarray(field['strain_fit_residual_rms'], dtype=float)[valid]
+    fit_res = fit_res[np.isfinite(fit_res)]
     return {'correlation_fraction': summary['correlation_valid_fraction'],
             'strain_fraction': summary['strain_valid_fraction'],
             'scientific_ok': summary['scientific_ok'],
             'converged_valid_count': int(np.count_nonzero(field['converged'] & field['valid'])),
-            'median_zncc': float(np.nanmedian(field['zncc'])),
-            'median_Eyy': float(np.nanmedian(field['Eyy'][valid])),
-            'Eyy_p01_p99': np.nanpercentile(field['Eyy'][valid], [1, 99]).tolist(),
-            'median_fit_residual_px': float(np.nanmedian(field['strain_fit_residual_rms'][valid])),
+            'median_zncc': float(np.median(zncc_finite)) if zncc_finite.size else None,
+            'median_Eyy': float(np.median(eyy_valid)) if eyy_valid.size else None,
+            'Eyy_p01_p99': np.percentile(eyy_valid, [1, 99]).tolist() if eyy_valid.size else None,
+            'median_fit_residual_px': float(np.median(fit_res)) if fit_res.size else None,
             'invalid_reasons': summary['invalid_reason_histogram']}
 
 
 def validate(images: Path, output: Path, baseline_core: Path | None = None):
+    cv2.setRNGSeed(0)
     paths = [images/name for name in ('ohtcfrp_00.tif', 'ohtcfrp_04.tif', 'ohtcfrp_08.tif', 'roi.tif')]
     identities = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
     reference = core.read_gray_image(paths[0])
-    mask = np.asarray(Image.open(paths[-1]).convert('L')) >= 128
+    with Image.open(paths[-1]) as im:
+        mask = np.asarray(im.convert('L')) >= 128
     output.mkdir(parents=True, exist_ok=True)
     baseline = None
     if baseline_core:
         spec = importlib.util.spec_from_file_location('baseline_core', baseline_core)
+        if spec is None or spec.loader is None:
+            raise ValueError(f'cannot load baseline core: {baseline_core}')
         baseline = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(baseline)
     records = {}
@@ -60,10 +72,14 @@ def validate(images: Path, output: Path, baseline_core: Path | None = None):
             old_v = np.where(retained, old['V'], np.nan)
             fit = baseline.compute_strain_fields(old['X'], old['Y'], old_u, old_v, window=5)
             common = fit['strain_valid'] & field['strain_valid'].reshape(retained.shape)
+            before_common = np.asarray(fit['fit_residual_rms'], dtype=float)[common]
+            before_common = before_common[np.isfinite(before_common)]
+            after_common = np.asarray(field['strain_fit_residual_rms'], dtype=float).reshape(retained.shape)[common]
+            after_common = after_common[np.isfinite(after_common)]
             record['common_domain_fit_residual_px'] = {
                 'point_count': int(common.sum()),
-                'before': float(np.nanmedian(fit['fit_residual_rms'][common])),
-                'after': float(np.nanmedian(field['strain_fit_residual_rms'].reshape(retained.shape)[common]))}
+                'before': float(np.median(before_common)) if before_common.size else None,
+                'after': float(np.median(after_common)) if after_common.size else None}
         field['reference_image'], field['deformed_image'] = reference, target
         field['mask_provenance'] = {'mode': 'file', 'source_sha256': identities['roi.tif']}
         field['display_options'] = {'percent': True, 'background': 'none', 'cmap': 'viridis'}
@@ -71,12 +87,12 @@ def validate(images: Path, output: Path, baseline_core: Path | None = None):
         field['display_options']['background'] = 'deformed'
         core.plot_dic_field_map(field, output/f'{path.stem}_Eyy_overlay.png', 'Eyy')
         records[path.name] = record
-        print(path.name, json.dumps(record), flush=True)
+        print(path.name, json.dumps(record, allow_nan=False), flush=True)
     report = {'source': 'https://ncorr.com/download/sample12.zip', 'input_sha256': identities,
               'core_sha256': hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
               'settings': SETTINGS | {'after_reject_nonconverged': True}, 'roi_xywh': ROI, 'records': records,
               'boundary': 'Public experimental imagery; no independent strain ground truth or VIC-2D comparison.'}
-    (output/'validation.json').write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
+    (output/'validation.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n', encoding='utf-8', newline='\n')
     return report
 
 

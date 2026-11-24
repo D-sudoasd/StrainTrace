@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import importlib
+import json
 import math
 import platform
 import sys
@@ -284,14 +286,12 @@ def _canonical_peak_ratio(
     if direction == "second_over_best":
         with np.errstate(divide="ignore", invalid="ignore"):
             inverted = np.divide(1.0, array, out=np.full(array.shape, np.nan, dtype=float), where=np.abs(array) > 1e-12)
-        inverted[array == 0.0] = np.inf
+        inverted[(array >= 0.0) & (array <= 1e-12)] = np.inf
         return inverted, "best_over_second_inverted"
     raise BenchmarkGateError(f"unknown peak-ratio direction: {direction}")
 
 
 def _ratio_from_field(field: Mapping[str, Any], n: int) -> tuple[Any, Any, str]:
-    import numpy as np
-
     if "best_to_second_peak_ratio" in field:
         raw = _as_array(field, ("best_to_second_peak_ratio",), n)
         ratio, direction = _canonical_peak_ratio(raw, direction="best_over_second")
@@ -306,9 +306,6 @@ def _ratio_from_field(field: Mapping[str, Any], n: int) -> tuple[Any, Any, str]:
         ratio, direction = _canonical_peak_ratio(raw, direction="second_over_best")
     else:
         raise BenchmarkGateError("missing benchmark field: peak ratio")
-    finite = np.isfinite(ratio)
-    if np.any(ratio[finite] < 1.0 - 1e-9):
-        raise BenchmarkGateError("best/second peak ratio is below one")
     return ratio, raw, direction
 
 
@@ -333,7 +330,7 @@ def _required_field(field: Any, case_id: str) -> tuple[dict[str, Any], int]:
     diagnostics["second_peak_ratio_raw"] = raw_ratio
     diagnostics["ratio_direction"] = direction
     diagnostics["invalid_reason"] = _as_array(field, ("invalid_reason",), n, dtype=object) if "invalid_reason" in field else np.full(n, "", dtype=object)
-    for name in ("best_peak", "second_peak", "peak_margin", "peak_ratio"):
+    for name in ("best_peak", "second_peak", "peak_margin", "peak_ratio", "u_candidate", "v_candidate"):
         diagnostics[name] = _as_array(field, (name,), n) if name in field else np.full(n, np.nan, dtype=float)
     expected = np.asarray(LOCKED_COORDINATES, dtype=float)
     if not np.array_equal(diagnostics["x"], expected[:, 0]) or not np.array_equal(diagnostics["y"], expected[:, 1]):
@@ -342,7 +339,12 @@ def _required_field(field: Any, case_id: str) -> tuple[dict[str, Any], int]:
     accepted_finite = diagnostics["valid"] & raw_finite
     for name in ("zncc", "second_peak_margin", "second_peak_ratio_best_over_second", "residual_rms", "hessian_condition_number", "iterations"):
         values = np.asarray(diagnostics[name], dtype=float)
-        if not np.isfinite(values[accepted_finite]).all():
+        if name == "second_peak_ratio_best_over_second":
+            if not (np.isfinite(values[accepted_finite]) | np.isposinf(values[accepted_finite])).all():
+                raise BenchmarkGateError(f"benchmark diagnostic {name} is missing on an accepted point")
+            if np.any(values[accepted_finite] < 1.0 - 1e-9):
+                raise BenchmarkGateError("best/second peak ratio is below one")
+        elif not np.isfinite(values[accepted_finite]).all():
             raise BenchmarkGateError(f"benchmark diagnostic {name} is missing on an accepted point")
         if name == "second_peak_margin" and np.any(values[accepted_finite] < 0.0):
             raise BenchmarkGateError("second-peak margin is negative")
@@ -371,22 +373,33 @@ def _quality_score_at(diagnostics: Mapping[str, Any], index: int) -> float | Non
 
     if QUALITY_SCORE_VALIDITY_REQUIRED and not bool(np.asarray(diagnostics["valid"]).reshape(-1)[index]):
         return 0.0
-    def numeric(name: str) -> float | None:
+    def numeric(name: str, *, allow_posinf: bool = False) -> float | None:
         try:
             value = float(np.asarray(diagnostics[name]).reshape(-1)[index])
         except (TypeError, ValueError, IndexError):
             return None
-        return value if math.isfinite(value) else None
+        if math.isfinite(value) or (allow_posinf and math.isinf(value) and value > 0.0):
+            return value
+        return None
 
-    values = {name: numeric(name) for name in ("zncc", "second_peak_margin", "second_peak_ratio_best_over_second", "residual_rms", "hessian_condition_number", "iterations")}
+    values = {
+        name: numeric(name, allow_posinf=(name == "second_peak_ratio_best_over_second"))
+        for name in ("zncc", "second_peak_margin", "second_peak_ratio_best_over_second", "residual_rms", "hessian_condition_number", "iterations")
+    }
     if any(value is None for value in values.values()):
         return None
     converged = bool(np.asarray(diagnostics["converged"]).reshape(-1)[index])
     normalization = QUALITY_SCORE_NORMALIZATION
+    ratio_val = values["second_peak_ratio_best_over_second"]
+    ratio_component = (
+        1.0
+        if math.isinf(ratio_val) and ratio_val > 0.0
+        else _clamp01((ratio_val - normalization["second_peak_ratio_floor"]) / normalization["second_peak_ratio_span"])
+    )
     components = {
         "zncc": _clamp01((values["zncc"] - normalization["zncc_floor"]) / normalization["zncc_span"]),
         "second_peak_margin": _clamp01(values["second_peak_margin"] / normalization["second_peak_margin_span"]),
-        "second_peak_ratio_best_over_second": _clamp01((values["second_peak_ratio_best_over_second"] - normalization["second_peak_ratio_floor"]) / normalization["second_peak_ratio_span"]),
+        "second_peak_ratio_best_over_second": ratio_component,
         "residual_rms": math.exp(-max(0.0, values["residual_rms"]) / normalization["residual_rms_scale"]),
         "hessian_condition_number": _clamp01((normalization["hessian_condition_ceiling"] - values["hessian_condition_number"]) / normalization["hessian_condition_ceiling"]),
         "iterations": _clamp01(1.0 - max(0.0, values["iterations"] - normalization["iterations_free_ceiling"]) / normalization["iterations_span"]),
@@ -550,19 +563,30 @@ def _observation(
             and "engineering" not in strain_convention
             and "gamma" not in strain_convention
         )
-    quality_scores: list[float | None] = []
+    cand_u = np.asarray(diagnostics["u_candidate"], dtype=float)
+    cand_v = np.asarray(diagnostics["v_candidate"], dtype=float)
+    cand_error_px = np.hypot(cand_u - oracle_u, cand_v - oracle_v)
     quality_min = float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"])
     target_indices = set(int(value) for value in (panel or {}).get("target_point_indices", []))
     rows: list[dict[str, Any]] = []
     for index, coordinate in enumerate(np.asarray(LOCKED_COORDINATES, dtype=float)):
         quality = _quality_score_at(diagnostics, index)
-        quality_scores.append(quality)
         quality_accept = None if quality is None else bool(quality >= quality_min)
         accepted = bool(valid[index])
         # A rejected/nonfinite measurement is a bad outcome for ranking even
         # when no finite displacement error can be formed.  This keeps AUC
         # population accounting honest while preserving raw diagnostics.
         label_good = bool(accepted and np.isfinite(error_px[index]) and error_px[index] <= ERROR_TOLERANCE_PX)
+        candidate_within_tol = bool(
+            (np.isfinite(error_px[index]) and error_px[index] <= ERROR_TOLERANCE_PX)
+            or (np.isfinite(cand_error_px[index]) and cand_error_px[index] <= ERROR_TOLERANCE_PX)
+        )
+        raw_ratio_best_over_second = float(diagnostics["second_peak_ratio_best_over_second"][index])
+        if math.isinf(raw_ratio_best_over_second) and raw_ratio_best_over_second > 0.0:
+            second_to_best = 0.0
+        else:
+            finite_ratio = _finite_or_none(raw_ratio_best_over_second)
+            second_to_best = _finite_or_none(1.0 / finite_ratio) if finite_ratio not in (None, 0.0) else None
         rows.append(
             {
                 "case_id": str(case["case_id"]),
@@ -593,7 +617,7 @@ def _observation(
                 "quality_accept": quality_accept,
                 "quality_label_good": label_good,
                 "false_accept": bool(accepted and label_good is False),
-                "false_reject": bool((not accepted) and label_good is True),
+                "false_reject": bool((not accepted) and candidate_within_tol),
                 "quality_false_accept": bool(quality_accept is True and label_good is False),
                 "quality_false_reject": bool(quality_accept is False and label_good is True),
                 "quality_score": quality,
@@ -603,8 +627,8 @@ def _observation(
                 "ratio_direction": diagnostics["ratio_direction"],
                 "zncc": _finite_or_none(diagnostics["zncc"][index]),
                 "second_peak_margin": _finite_or_none(diagnostics["second_peak_margin"][index]),
-                "second_peak_ratio_best_over_second": _finite_or_none(diagnostics["second_peak_ratio_best_over_second"][index]),
-                "second_to_best_peak_ratio": _finite_or_none(1.0 / diagnostics["second_peak_ratio_best_over_second"][index]) if _finite_or_none(diagnostics["second_peak_ratio_best_over_second"][index]) not in (None, 0.0) else None,
+                "second_peak_ratio_best_over_second": _finite_or_none(raw_ratio_best_over_second),
+                "second_to_best_peak_ratio": second_to_best,
                 "best_peak": _finite_or_none(diagnostics["best_peak"][index]),
                 "second_peak": _finite_or_none(diagnostics["second_peak"][index]),
                 "peak_margin": _finite_or_none(diagnostics["peak_margin"][index]),
@@ -806,18 +830,31 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         raise BenchmarkIOError(f"cannot write benchmark CSV: {path}: {exc}") from exc
 
 
+def _stream_supports_utf8(stream: Any) -> bool:
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return False
+    return str(encoding).lower().replace("_", "-") in {"utf-8", "utf8", "utf-8-sig"}
+
+
+def _write_json_line(stream: Any, value: Any) -> None:
+    ensure_ascii = not _stream_supports_utf8(stream)
+    stream.write(json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+
+
 def run_benchmark(
     cases_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     *,
     core_module: Any | None = None,
+    _allow_legacy_positional_output: bool = True,
 ) -> dict[str, Any]:
     """Run all locked cases, preserving both clean and corrupted observations."""
 
     # Historical callers passed only an output directory.  Keep that harmless
     # positional form while retaining the explicit ``cases_path, output_dir``
     # package API used by the release command.
-    if output_dir is None and cases_path is not None:
+    if _allow_legacy_positional_output and output_dir is None and cases_path is not None:
         candidate = Path(cases_path)
         if candidate.is_dir() or candidate.suffix.casefold() != ".json":
             output_dir, cases_path = candidate, None
@@ -826,84 +863,60 @@ def run_benchmark(
         document = load_locked_cases(selected_cases_path)
     except ValueError as exc:
         raise BenchmarkConfigError(str(exc)) from exc
-    if output_dir is None:
-        output = Path(tempfile.mkdtemp(prefix="ezdic-benchmark-"))
-    else:
-        output = Path(output_dir)
+    with contextlib.ExitStack() as stack:
+        if output_dir is None:
+            output = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="ezdic-benchmark-")))
+        else:
+            output = Path(output_dir)
+            try:
+                output.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise BenchmarkIOError(f"cannot create benchmark output directory: {output}: {exc}") from exc
+        if not output.is_dir():
+            raise BenchmarkIOError(f"benchmark output path is not a directory: {output}")
         try:
-            output.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise BenchmarkIOError(f"cannot create benchmark output directory: {output}: {exc}") from exc
-    if not output.is_dir():
-        raise BenchmarkIOError(f"benchmark output path is not a directory: {output}")
-    try:
-        core = core_module or importlib.import_module("ezdic_core")
-    except Exception as exc:
-        raise BenchmarkError(f"cannot import ezdic_core: {exc}") from exc
-    expected_ids = ["small_translation", "large_translation", "small_affine_strain", "near_1d_periodic"]
-    if [str(case["case_id"]) for case in document["cases"]] != expected_ids:
-        raise BenchmarkConfigError("locked benchmark case set is incomplete or reordered")
-    thresholds = document["thresholds"]
-    quality_contract = document["quality_contract"]
-    panel_doc = quality_contract["corruption_panel"]
-    records: list[dict[str, Any]] = []
-    all_rows: list[dict[str, Any]] = []
-    expected_row_count = len(document["cases"]) * len(LOCKED_COORDINATES)
-    expected_row_count += sum(
-        len(LOCKED_COORDINATES)
-        for case in document["cases"]
-        for variant in panel_doc["variants"]
-        if str(case["case_id"]) in variant["case_ids"]
-    )
-    for case in document["cases"]:
-        case_id = str(case["case_id"])
-        case_hash = _case_hash(case)
-        try:
-            fixture = make_case(case, core_module=core)
-            preflight = _preflight(core, fixture["reference"])
-            case_thresholds = thresholds[case_id]
-            if case["kind"] == "near_1d_periodic":
-                record, rows = _near_record(case, fixture, preflight, case_thresholds)
-                record.update({"case_id": case_id, "kind": case["kind"], "seed": int(case["seed"]), "case_hash": case_hash, "config_hash": case_hash, "thresholds": dict(case_thresholds), "input_sha256": fixture["input_sha256"]})
-                records.append(record)
-                all_rows.extend(rows)
-                continue
-            if not preflight.get("ok"):
-                record = _failure_case(case, f"reference texture preflight failed: {preflight.get('code')}", case_hash=case_hash)
-                record.update({"texture_preflight": dict(preflight), "thresholds": dict(case_thresholds), "input_sha256": fixture["input_sha256"]})
-                records.append(record)
-                continue
-            run_records: list[dict[str, Any]] = []
-            baseline_field = core.run_2d_dic(
-                fixture["reference"],
-                fixture["deformed"],
-                ROI,
-                subset_size=SUBSET_SIZE,
-                step=STEP,
-                search_radius=int(case["search_radius"]),
-                pyramid_levels=int(case["pyramid_levels"]),
-                zncc_min=float(SOLVER_SETTINGS["zncc_min"]),
-                strain_window=int(SOLVER_SETTINGS["strain_window"]),
-                smooth_sigma=float(SOLVER_SETTINGS["smooth_sigma"]),
-            )
-            baseline_observation, baseline_rows = _observation(
-                case,
-                fixture,
-                baseline_field,
-                run_id="clean",
-                panel=None,
-                thresholds=case_thresholds,
-                quality_contract=quality_contract,
-            )
-            run_records.append(baseline_observation)
-            all_rows.extend(baseline_rows)
-            for variant in panel_doc["variants"]:
-                if case_id not in variant["case_ids"]:
+            core = core_module or importlib.import_module("ezdic_core")
+        except Exception as exc:
+            raise BenchmarkError(f"cannot import ezdic_core: {exc}") from exc
+        expected_ids = ["small_translation", "large_translation", "small_affine_strain", "near_1d_periodic"]
+        if [str(case["case_id"]) for case in document["cases"]] != expected_ids:
+            raise BenchmarkConfigError("locked benchmark case set is incomplete or reordered")
+        thresholds = document["thresholds"]
+        quality_contract = document["quality_contract"]
+        panel_doc = quality_contract["corruption_panel"]
+        records: list[dict[str, Any]] = []
+        all_rows: list[dict[str, Any]] = []
+        expected_row_count = len(document["cases"]) * len(LOCKED_COORDINATES)
+        expected_row_count += sum(
+            len(LOCKED_COORDINATES)
+            for case in document["cases"]
+            for variant in panel_doc["variants"]
+            if str(case["case_id"]) in variant["case_ids"]
+        )
+        solver_init = str(SOLVER_SETTINGS["initialization"])
+        for case in document["cases"]:
+            case_id = str(case["case_id"])
+            case_hash = _case_hash(case)
+            case_rows: list[dict[str, Any]] = []
+            try:
+                fixture = make_case(case, core_module=core)
+                preflight = _preflight(core, fixture["reference"])
+                case_thresholds = thresholds[case_id]
+                if case["kind"] == "near_1d_periodic":
+                    record, rows = _near_record(case, fixture, preflight, case_thresholds)
+                    record.update({"case_id": case_id, "kind": case["kind"], "seed": int(case["seed"]), "case_hash": case_hash, "config_hash": case_hash, "thresholds": dict(case_thresholds), "input_sha256": fixture["input_sha256"]})
+                    records.append(record)
+                    all_rows.extend(rows)
                     continue
-                corrupted_fixture, panel = apply_image_corruption(fixture, case, variant)
-                field = core.run_2d_dic(
-                    corrupted_fixture["reference"],
-                    corrupted_fixture["deformed"],
+                if not preflight.get("ok"):
+                    record = _failure_case(case, f"reference texture preflight failed: {preflight.get('code')}", case_hash=case_hash)
+                    record.update({"texture_preflight": dict(preflight), "thresholds": dict(case_thresholds), "input_sha256": fixture["input_sha256"]})
+                    records.append(record)
+                    continue
+                run_records: list[dict[str, Any]] = []
+                baseline_field = core.run_2d_dic(
+                    fixture["reference"],
+                    fixture["deformed"],
                     ROI,
                     subset_size=SUBSET_SIZE,
                     step=STEP,
@@ -912,209 +925,241 @@ def run_benchmark(
                     zncc_min=float(SOLVER_SETTINGS["zncc_min"]),
                     strain_window=int(SOLVER_SETTINGS["strain_window"]),
                     smooth_sigma=float(SOLVER_SETTINGS["smooth_sigma"]),
+                    initialization=solver_init,
                 )
-                panel_observation, panel_rows = _observation(
+                baseline_observation, baseline_rows = _observation(
                     case,
-                    corrupted_fixture,
-                    field,
-                    run_id=str(panel["variant_id"]),
-                    panel=panel,
+                    fixture,
+                    baseline_field,
+                    run_id="clean",
+                    panel=None,
                     thresholds=case_thresholds,
                     quality_contract=quality_contract,
                 )
-                run_records.append(panel_observation)
-                all_rows.extend(panel_rows)
-            baseline_pass = bool(baseline_observation.get("status") == "PASS" and all(baseline_observation["gates"].values()))
-            panel_rows_for_case = [row for row in all_rows if row["case_id"] == case_id and row["corruption_applied"]]
-            expected_panel_variants = [variant for variant in panel_doc["variants"] if case_id in variant["case_ids"]]
-            panel_gate = len(panel_rows_for_case) == sum(len(variant["target_point_indices"]) for variant in expected_panel_variants)
-            record = {
-                "case_id": case_id,
-                "kind": case["kind"],
-                "seed": int(case["seed"]),
-                "case_hash": case_hash,
-                "config_hash": case_hash,
-                "input_sha256": fixture["input_sha256"],
-                "thresholds": dict(case_thresholds),
-                "status": "PASS" if baseline_pass and panel_gate else "FAIL",
-                "benchmark_pass": baseline_pass and panel_gate,
-                "scientific_ok": baseline_pass,
-                "failure_code": None if baseline_pass and panel_gate else "SCIENTIFIC_GATE_FAILED",
-                "texture_preflight": dict(preflight),
-                "metrics": dict(baseline_observation["observed"]),
-                "gates": {**dict(baseline_observation["gates"]), "corruption_rows": panel_gate},
-                "runs": run_records,
-                "corruption_panel_version": CORRUPTION_PANEL_VERSION,
-            }
-            records.append(record)
-        except BenchmarkError as exc:
-            records.append(_failure_case(case, str(exc), case_hash=case_hash))
-        except Exception as exc:
-            records.append(_failure_case(case, f"benchmark execution failed: {exc}", case_hash=case_hash))
+                run_records.append(baseline_observation)
+                case_rows.extend(baseline_rows)
+                for variant in panel_doc["variants"]:
+                    if case_id not in variant["case_ids"]:
+                        continue
+                    corrupted_fixture, panel = apply_image_corruption(fixture, case, variant)
+                    field = core.run_2d_dic(
+                        corrupted_fixture["reference"],
+                        corrupted_fixture["deformed"],
+                        ROI,
+                        subset_size=SUBSET_SIZE,
+                        step=STEP,
+                        search_radius=int(case["search_radius"]),
+                        pyramid_levels=int(case["pyramid_levels"]),
+                        zncc_min=float(SOLVER_SETTINGS["zncc_min"]),
+                        strain_window=int(SOLVER_SETTINGS["strain_window"]),
+                        smooth_sigma=float(SOLVER_SETTINGS["smooth_sigma"]),
+                        initialization=solver_init,
+                    )
+                    panel_observation, panel_rows = _observation(
+                        case,
+                        corrupted_fixture,
+                        field,
+                        run_id=str(panel["variant_id"]),
+                        panel=panel,
+                        thresholds=case_thresholds,
+                        quality_contract=quality_contract,
+                    )
+                    run_records.append(panel_observation)
+                    case_rows.extend(panel_rows)
+                baseline_pass = bool(baseline_observation.get("status") == "PASS" and all(baseline_observation["gates"].values()))
+                panel_rows_for_case = [row for row in case_rows if row["case_id"] == case_id and row["corruption_applied"]]
+                expected_panel_variants = [variant for variant in panel_doc["variants"] if case_id in variant["case_ids"]]
+                panel_gate = len(panel_rows_for_case) == sum(len(variant["target_point_indices"]) for variant in expected_panel_variants)
+                record = {
+                    "case_id": case_id,
+                    "kind": case["kind"],
+                    "seed": int(case["seed"]),
+                    "case_hash": case_hash,
+                    "config_hash": case_hash,
+                    "input_sha256": fixture["input_sha256"],
+                    "thresholds": dict(case_thresholds),
+                    "status": "PASS" if baseline_pass and panel_gate else "FAIL",
+                    "benchmark_pass": baseline_pass and panel_gate,
+                    "scientific_ok": baseline_pass,
+                    "failure_code": None if baseline_pass and panel_gate else "SCIENTIFIC_GATE_FAILED",
+                    "texture_preflight": dict(preflight),
+                    "metrics": dict(baseline_observation["observed"]),
+                    "gates": {**dict(baseline_observation["gates"]), "corruption_rows": panel_gate},
+                    "runs": run_records,
+                    "corruption_panel_version": CORRUPTION_PANEL_VERSION,
+                }
+                records.append(record)
+                all_rows.extend(case_rows)
+            except BenchmarkError as exc:
+                records.append(_failure_case(case, str(exc), case_hash=case_hash))
+            except Exception as exc:
+                records.append(_failure_case(case, f"benchmark execution failed: {exc}", case_hash=case_hash))
 
-    # Keep every numeric solver outcome in the ranking population.  A rejected
-    # or nonfinite measurement is explicitly a bad outcome even when no finite
-    # error can be calculated; only the preflight-only near-1D case is excluded.
-    quality_rows = [
-        row
-        for row in all_rows
-        if row.get("case_id") != "near_1d_periodic" and row.get("quality_score") is not None
-    ]
-    scores = [float(row["quality_score"]) for row in quality_rows]
-    labels = [bool(row["quality_label_good"]) for row in quality_rows]
-    auc = _roc_auc(scores, labels)
-    good_count = int(sum(labels))
-    bad_count = int(len(labels) - good_count)
-    finite_label_rows = [row for row in quality_rows if row.get("error_px") is not None]
-    finite_good_count = int(sum(bool(row["quality_label_good"]) for row in finite_label_rows))
-    finite_bad_count = int(len(finite_label_rows) - finite_good_count)
-    false_accept = int(sum(bool(row["quality_false_accept"]) for row in finite_label_rows))
-    false_reject = int(sum(bool(row["quality_false_reject"]) for row in finite_label_rows))
-    ranking_false_accept = int(sum(bool(row["quality_false_accept"]) for row in quality_rows))
-    ranking_false_reject = int(sum(bool(row["quality_false_reject"]) for row in quality_rows))
-    bad_min_gate = bad_count >= int(quality_contract["minimum_bad_label_count"])
-    corruption_row_gate = sum(bool(row["corruption_applied"]) for row in all_rows) == int(quality_contract["minimum_corruption_row_count"])
-    quality_ranking_pass = (
-        auc is not None
-        and auc >= float(quality_contract["roc_auc_min"])
-        and good_count > 0
-        and bad_count > 0
-        and bad_min_gate
-        and corruption_row_gate
-    )
-    finite_false_accept_rate = None if finite_bad_count == 0 else false_accept / finite_bad_count
-    finite_false_reject_rate = None if finite_good_count == 0 else false_reject / finite_good_count
-    ranking_false_accept_rate = None if bad_count == 0 else ranking_false_accept / bad_count
-    ranking_false_reject_rate = None if good_count == 0 else ranking_false_reject / good_count
-    quality_error = {
-        "version": QUALITY_SCORE_VERSION,
-        "threshold_status": "NOT_CALIBRATED",
-        "quality_threshold_evaluated": False,
-        "quality_threshold_pass": None,
-        "error_tolerance_px": float(quality_contract["error_tolerance_px"]),
-        "illustrative_quality_accept_score_min": float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"]),
-        "point_count": len(finite_label_rows),
-        "finite_error_label_count": len(finite_label_rows),
-        "ranking_point_count": len(quality_rows),
-        "ranking_label_basis": "numeric solver rows; accepted finite error <= tolerance is good, rejected or nonfinite is bad; near-1D preflight excluded",
-        "all_row_count": len(all_rows),
-        "rejected_point_count": int(sum(not bool(row["accepted"]) for row in all_rows)),
-        "good_label_count": finite_good_count,
-        "bad_label_count": finite_bad_count,
-        "ranking_good_label_count": good_count,
-        "ranking_bad_label_count": bad_count,
-        "ranking_rejected_bad_count": int(sum(not bool(row["accepted"]) for row in quality_rows)),
-        "minimum_bad_label_count": int(quality_contract["minimum_bad_label_count"]),
-        "corruption_row_count": int(sum(bool(row["corruption_applied"]) for row in all_rows)),
-        "minimum_corruption_row_count": int(quality_contract["minimum_corruption_row_count"]),
-        "roc_auc": auc,
-        "roc_auc_min": float(quality_contract["roc_auc_min"]),
-        "roc_auc_gate": bool(quality_ranking_pass),
-        "false_accept_count": false_accept,
-        "false_reject_count": false_reject,
-        "false_accept_rate": finite_false_accept_rate,
-        "false_reject_rate": finite_false_reject_rate,
-        "ranking_false_accept_count": ranking_false_accept,
-        "ranking_false_reject_count": ranking_false_reject,
-        "ranking_false_accept_rate": ranking_false_accept_rate,
-        "ranking_false_reject_rate": ranking_false_reject_rate,
-        "class_conditional_rates": {
-            "finite_error_labels": {
-                "false_accept_count": false_accept,
-                "bad_label_count": finite_bad_count,
-                "false_accept_rate": finite_false_accept_rate,
-                "false_reject_count": false_reject,
-                "good_label_count": finite_good_count,
-                "false_reject_rate": finite_false_reject_rate,
+        # Keep every numeric solver outcome in the ranking population.  A rejected
+        # or nonfinite measurement is explicitly a bad outcome even when no finite
+        # error can be calculated; only the preflight-only near-1D case is excluded.
+        quality_rows = [
+            row
+            for row in all_rows
+            if row.get("case_id") != "near_1d_periodic" and row.get("quality_score") is not None
+        ]
+        scores = [float(row["quality_score"]) for row in quality_rows]
+        labels = [bool(row["quality_label_good"]) for row in quality_rows]
+        auc = _roc_auc(scores, labels)
+        good_count = int(sum(labels))
+        bad_count = int(len(labels) - good_count)
+        finite_label_rows = [row for row in quality_rows if row.get("error_px") is not None]
+        finite_good_count = int(sum(bool(row["quality_label_good"]) for row in finite_label_rows))
+        finite_bad_count = int(len(finite_label_rows) - finite_good_count)
+        false_accept = int(sum(bool(row["quality_false_accept"]) for row in finite_label_rows))
+        false_reject = int(sum(bool(row["quality_false_reject"]) for row in finite_label_rows))
+        ranking_false_accept = int(sum(bool(row["quality_false_accept"]) for row in quality_rows))
+        ranking_false_reject = int(sum(bool(row["quality_false_reject"]) for row in quality_rows))
+        bad_min_gate = bad_count >= int(quality_contract["minimum_bad_label_count"])
+        corruption_row_gate = sum(bool(row["corruption_applied"]) for row in all_rows) == int(quality_contract["minimum_corruption_row_count"])
+        quality_ranking_pass = (
+            auc is not None
+            and auc >= float(quality_contract["roc_auc_min"])
+            and good_count > 0
+            and bad_count > 0
+            and bad_min_gate
+            and corruption_row_gate
+        )
+        finite_false_accept_rate = None if finite_bad_count == 0 else false_accept / finite_bad_count
+        finite_false_reject_rate = None if finite_good_count == 0 else false_reject / finite_good_count
+        ranking_false_accept_rate = None if bad_count == 0 else ranking_false_accept / bad_count
+        ranking_false_reject_rate = None if good_count == 0 else ranking_false_reject / good_count
+        quality_error = {
+            "version": QUALITY_SCORE_VERSION,
+            "threshold_status": "NOT_CALIBRATED",
+            "quality_threshold_evaluated": False,
+            "quality_threshold_pass": None,
+            "error_tolerance_px": float(quality_contract["error_tolerance_px"]),
+            "illustrative_quality_accept_score_min": float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"]),
+            "point_count": len(finite_label_rows),
+            "finite_error_label_count": len(finite_label_rows),
+            "ranking_point_count": len(quality_rows),
+            "ranking_label_basis": "numeric solver rows; accepted finite error <= tolerance is good, rejected or nonfinite is bad; near-1D preflight excluded",
+            "all_row_count": len(all_rows),
+            "rejected_point_count": int(sum(not bool(row["accepted"]) for row in all_rows)),
+            "good_label_count": finite_good_count,
+            "bad_label_count": finite_bad_count,
+            "ranking_good_label_count": good_count,
+            "ranking_bad_label_count": bad_count,
+            "ranking_rejected_bad_count": int(sum(not bool(row["accepted"]) for row in quality_rows)),
+            "minimum_bad_label_count": int(quality_contract["minimum_bad_label_count"]),
+            "corruption_row_count": int(sum(bool(row["corruption_applied"]) for row in all_rows)),
+            "minimum_corruption_row_count": int(quality_contract["minimum_corruption_row_count"]),
+            "roc_auc": auc,
+            "roc_auc_min": float(quality_contract["roc_auc_min"]),
+            "roc_auc_gate": bool(quality_ranking_pass),
+            "false_accept_count": false_accept,
+            "false_reject_count": false_reject,
+            "false_accept_rate": finite_false_accept_rate,
+            "false_reject_rate": finite_false_reject_rate,
+            "ranking_false_accept_count": ranking_false_accept,
+            "ranking_false_reject_count": ranking_false_reject,
+            "ranking_false_accept_rate": ranking_false_accept_rate,
+            "ranking_false_reject_rate": ranking_false_reject_rate,
+            "class_conditional_rates": {
+                "finite_error_labels": {
+                    "false_accept_count": false_accept,
+                    "bad_label_count": finite_bad_count,
+                    "false_accept_rate": finite_false_accept_rate,
+                    "false_reject_count": false_reject,
+                    "good_label_count": finite_good_count,
+                    "false_reject_rate": finite_false_reject_rate,
+                },
+                "ranking_outcomes": {
+                    "false_accept_count": ranking_false_accept,
+                    "bad_label_count": bad_count,
+                    "false_accept_rate": ranking_false_accept_rate,
+                    "false_reject_count": ranking_false_reject,
+                    "good_label_count": good_count,
+                    "false_reject_rate": ranking_false_reject_rate,
+                },
             },
-            "ranking_outcomes": {
-                "false_accept_count": ranking_false_accept,
-                "bad_label_count": bad_count,
-                "false_accept_rate": ranking_false_accept_rate,
-                "false_reject_count": ranking_false_reject,
-                "good_label_count": good_count,
-                "false_reject_rate": ranking_false_reject_rate,
+        }
+        numeric_baseline_pass = len(records) == 4 and all(
+            bool(record.get("benchmark_pass"))
+            for record in records
+            if record.get("case_id") != "near_1d_periodic"
+        )
+        near_1d_preflight_pass = any(
+            record.get("case_id") == "near_1d_periodic" and bool(record.get("benchmark_pass"))
+            for record in records
+        )
+        provenance = _code_provenance(core, selected_cases_path)
+        provenance_keys = (
+            "synthetic_cases_source_sha256",
+            "cases_json_sha256",
+            "benchmark_runner_source_sha256",
+            "benchmark_source_sha256",
+            "core_source_sha256",
+            "cli_source_sha256",
+        )
+        provenance_gate = all(isinstance(provenance.get(key), str) and len(str(provenance[key])) == 64 for key in provenance_keys)
+        expected_rows_gate = len(all_rows) == expected_row_count
+        csv_path = output / "benchmark_report.csv"
+        _write_csv(csv_path, all_rows)
+        try:
+            csv_exists_gate = csv_path.is_file() and csv_path.stat().st_size > 0
+        except OSError:
+            csv_exists_gate = False
+        csv_hash = _sha256_path(csv_path) if csv_exists_gate else "unavailable"
+        overall_pass = bool(
+            numeric_baseline_pass
+            and near_1d_preflight_pass
+            and quality_ranking_pass
+            and provenance_gate
+            and expected_rows_gate
+            and csv_exists_gate
+        )
+        gate_summary = {
+            "numeric_baseline_pass": numeric_baseline_pass,
+            "near_1d_preflight_pass": near_1d_preflight_pass,
+            "quality_ranking_pass": quality_ranking_pass,
+            "quality_threshold_evaluated": False,
+            "quality_threshold_pass": None,
+            "code_provenance": provenance_gate,
+            "csv_rows": expected_rows_gate,
+            "csv_exists": csv_exists_gate,
+        }
+        core_version = str(getattr(core, "APP_VERSION", None) or getattr(core, "__version__", None) or "unknown")
+        report: dict[str, Any] = {
+            "report_version": REPORT_VERSION,
+            "cases_version": CASE_DOCUMENT_VERSION,
+            "migration": {
+                "previous_report_version": "ezdic-benchmark-report-v5",
+                "previous_cases_version": "ezdic-benchmark-cases-v3",
+                "reason": "independent continuous image oracle; stricter numerical accuracy gates; per-run CSV integrity rather than a platform-dependent CSV byte baseline",
             },
-        },
-    }
-    numeric_baseline_pass = len(records) == 4 and all(
-        bool(record.get("benchmark_pass"))
-        for record in records
-        if record.get("case_id") != "near_1d_periodic"
-    )
-    near_1d_preflight_pass = any(
-        record.get("case_id") == "near_1d_periodic" and bool(record.get("benchmark_pass"))
-        for record in records
-    )
-    provenance = _code_provenance(core, selected_cases_path)
-    provenance_keys = (
-        "synthetic_cases_source_sha256",
-        "cases_json_sha256",
-        "benchmark_runner_source_sha256",
-        "benchmark_source_sha256",
-        "core_source_sha256",
-        "cli_source_sha256",
-    )
-    provenance_gate = all(isinstance(provenance.get(key), str) and len(str(provenance[key])) == 64 for key in provenance_keys)
-    expected_rows_gate = len(all_rows) == expected_row_count
-    csv_path = output / "benchmark_report.csv"
-    _write_csv(csv_path, all_rows)
-    try:
-        csv_exists_gate = csv_path.is_file() and csv_path.stat().st_size > 0
-    except OSError:
-        csv_exists_gate = False
-    csv_hash = _sha256_path(csv_path) if csv_exists_gate else "unavailable"
-    overall_pass = bool(
-        numeric_baseline_pass
-        and near_1d_preflight_pass
-        and quality_ranking_pass
-        and provenance_gate
-        and expected_rows_gate
-        and csv_exists_gate
-    )
-    gate_summary = {
-        "numeric_baseline_pass": numeric_baseline_pass,
-        "near_1d_preflight_pass": near_1d_preflight_pass,
-        "quality_ranking_pass": quality_ranking_pass,
-        "quality_threshold_evaluated": False,
-        "quality_threshold_pass": None,
-        "code_provenance": provenance_gate,
-        "csv_rows": expected_rows_gate,
-        "csv_exists": csv_exists_gate,
-    }
-    report: dict[str, Any] = {
-        "report_version": REPORT_VERSION,
-        "cases_version": CASE_DOCUMENT_VERSION,
-        "migration": {
-            "previous_report_version": "ezdic-benchmark-report-v5",
-            "previous_cases_version": "ezdic-benchmark-cases-v3",
-            "reason": "independent continuous image oracle; stricter numerical accuracy gates; per-run CSV integrity rather than a platform-dependent CSV byte baseline",
-        },
-        "locked_cases_hash": locked_case_hash(),
-        "app": {"name": "ezDIC", "benchmark": "quality_to_known_error", "version": "v0.2.0-dev"},
-        "code": provenance,
-        "environment": {"python": platform.python_version(), "platform": platform.system(), "image_shape": list(IMAGE_SHAPE)},
-        "contract": document["contract"],
-        "texture_preflight_contract": TEXTURE_PREFLIGHT,
-        "quality_contract": quality_contract,
-        "quality_error": quality_error,
-        "quality_score": {"version": QUALITY_SCORE_VERSION, "components": QUALITY_SCORE_COMPONENTS, "normalization": QUALITY_SCORE_NORMALIZATION, "validity_required": QUALITY_SCORE_VALIDITY_REQUIRED, "ratio_direction": "best_over_second", "threshold_status": "NOT_CALIBRATED", "quality_threshold_evaluated": False, "quality_threshold_pass": None, "illustrative_accept_score_min": float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"]), "error_tolerance_px": float(quality_contract["error_tolerance_px"]), "roc_auc": auc, "roc_auc_min": float(quality_contract["roc_auc_min"])},
-        "quality_auc": auc,
-        "thresholds": document["thresholds"],
-        "cases": [{key: value for key, value in record.items() if key != "points"} for record in records],
-        "artifacts": {"benchmark_report_csv": "benchmark_report.csv", "benchmark_report_csv_sha256": csv_hash},
-        "gate_summary": gate_summary,
-        "gates": dict(gate_summary),
-        "overall_pass": overall_pass,
-        "exit_code": EXIT_SUCCESS if overall_pass else EXIT_GATE_ERROR,
-    }
-    if not provenance_gate:
-        report["provenance_failure"] = "CODE_PROVENANCE_UNAVAILABLE"
-    try:
-        (output / "benchmark_report.json").write_text(canonical_json(_json_safe(report)) + "\n", encoding="utf-8")
-    except OSError as exc:
-        raise BenchmarkIOError(f"cannot write benchmark report: {output / 'benchmark_report.json'}: {exc}") from exc
-    return report
+            "locked_cases_hash": locked_case_hash(),
+            "app": {"name": "ezDIC", "benchmark": "quality_to_known_error", "version": core_version},
+            "code": provenance,
+            "environment": {"python": platform.python_version(), "platform": platform.system(), "image_shape": list(IMAGE_SHAPE)},
+            "contract": document["contract"],
+            "texture_preflight_contract": TEXTURE_PREFLIGHT,
+            "quality_contract": quality_contract,
+            "quality_error": quality_error,
+            "quality_score": {"version": QUALITY_SCORE_VERSION, "components": QUALITY_SCORE_COMPONENTS, "normalization": QUALITY_SCORE_NORMALIZATION, "validity_required": QUALITY_SCORE_VALIDITY_REQUIRED, "ratio_direction": "best_over_second", "threshold_status": "NOT_CALIBRATED", "quality_threshold_evaluated": False, "quality_threshold_pass": None, "illustrative_accept_score_min": float(quality_contract["illustrative_quality_threshold"]["quality_accept_score_min"]), "error_tolerance_px": float(quality_contract["error_tolerance_px"]), "roc_auc": auc, "roc_auc_min": float(quality_contract["roc_auc_min"])},
+            "quality_auc": auc,
+            "thresholds": document["thresholds"],
+            "cases": [{key: value for key, value in record.items() if key != "points"} for record in records],
+            "artifacts": {"benchmark_report_csv": "benchmark_report.csv", "benchmark_report_csv_sha256": csv_hash},
+            "gate_summary": gate_summary,
+            "gates": dict(gate_summary),
+            "overall_pass": overall_pass,
+            "exit_code": EXIT_SUCCESS if overall_pass else EXIT_GATE_ERROR,
+        }
+        if not provenance_gate:
+            report["provenance_failure"] = "CODE_PROVENANCE_UNAVAILABLE"
+        safe_report = _json_safe(report)
+        try:
+            (output / "benchmark_report.json").write_text(canonical_json(safe_report) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            raise BenchmarkIOError(f"cannot write benchmark report: {output / 'benchmark_report.json'}: {exc}") from exc
+        return safe_report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1125,11 +1170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=None, help="output directory for benchmark JSON/CSV")
     args = parser.parse_args(argv)
     try:
-        report = run_benchmark(args.cases, args.output)
+        report = run_benchmark(args.cases, args.output, _allow_legacy_positional_output=False)
     except BenchmarkError as exc:
-        sys.stderr.write(canonical_json({"error_code": exc.code, "message": str(exc), "exit_code": exc.exit_code}) + "\n")
+        _write_json_line(sys.stderr, {"error_code": exc.code, "message": str(exc), "exit_code": exc.exit_code})
         return int(exc.exit_code)
-    sys.stdout.write(canonical_json(report) + "\n")
+    except Exception as exc:
+        _write_json_line(sys.stderr, {"error_code": "BENCHMARK_RUNTIME_ERROR", "message": str(exc), "exit_code": EXIT_RUNTIME_ERROR})
+        return int(EXIT_RUNTIME_ERROR)
+    _write_json_line(sys.stdout, report)
     return int(report["exit_code"])
 
 

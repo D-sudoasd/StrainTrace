@@ -22,11 +22,12 @@ import numpy as np
 import scipy
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-import ezdic_core as core
-from benchmarks import necking_validation as bench
-from benchmarks import synthetic_cases
+import ezdic_core as core  # noqa: E402
+from benchmarks import necking_validation as bench  # noqa: E402
+from benchmarks import synthetic_cases  # noqa: E402
 
 SCHEMA = "straintrace-necking-study-v1"
 ERROR_DIAGNOSTIC_PX = 0.5  # Descriptive, never passed to a solver quality gate.
@@ -46,6 +47,8 @@ def sha256(path):
 
 def load_core(path):
     spec = importlib.util.spec_from_file_location("necking_study_core", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load core module: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -110,9 +113,15 @@ def summarize_field(field, params, settings, solver_core):
     true_u, true_v, true_Eyy = bench.truth(X, Y, params)
     U, V = _array(field, "U", shape), _array(field, "V", shape)
     Eyy = _array(field, "Eyy_grid", shape)
-    subset_F = np.asarray(field["P"])
-    subset_supported = solver_core._positive_deformation_jacobian(
-        1 + subset_F[..., 1], subset_F[..., 2], subset_F[..., 4], 1 + subset_F[..., 5])
+    subset_F = np.asarray(field["P"]) if "P" in field else None
+    pos_jac = getattr(solver_core, "_positive_deformation_jacobian", None)
+    if callable(pos_jac) and subset_F is not None and subset_F.shape == (*shape, 6):
+        subset_supported = np.asarray(
+            pos_jac(1 + subset_F[..., 1], subset_F[..., 2], subset_F[..., 4], 1 + subset_F[..., 5]),
+            dtype=bool,
+        )
+    else:
+        subset_supported = np.ones(shape, dtype=bool)
     fit_support = valid & subset_supported
     fitting = dict(window=settings["strain_window"], smooth_sigma=0,
                    degree=settings.get("strain_degree", 2),
@@ -129,8 +138,11 @@ def summarize_field(field, params, settings, solver_core):
     raw_error = np.hypot(raw_u-true_u, raw_v-true_v)
     outlier = _array(field, "spatial_outlier", shape, False).astype(bool)
     # This exposes false rejection of a non-polynomial but exact displacement.
-    exact_outliers = solver_core._displacement_outliers(
-        X, Y, true_u, true_v, settings.get("outlier_threshold_px", 1.0))
+    outlier_fn = getattr(solver_core, "_displacement_outliers", None)
+    exact_outliers = (
+        outlier_fn(X, Y, true_u, true_v, settings.get("outlier_threshold_px", 1.0))
+        if callable(outlier_fn) else np.zeros(shape, dtype=bool)
+    )
     candidate_present = all(key in field for key in ("u_candidate", "v_candidate"))
     candidate_u = _array(field, "u_candidate", shape)
     candidate_v = _array(field, "v_candidate", shape)
@@ -154,6 +166,7 @@ def summarize_field(field, params, settings, solver_core):
             "strain_coverage": float(strain_accepted.sum()/denominator) if denominator else None,
             "displacement_vector_error_px": bench._stats(delta[accepted]),
             "accepted_error_above_0_5_px_count": int(np.count_nonzero(accepted & (delta > ERROR_DIAGNOSTIC_PX))),
+            "accepted_without_displacement_count": int(np.count_nonzero(accepted & ~np.isfinite(delta))),
             "Eyy_error": bench._stats((Eyy-true_Eyy)[strain_accepted]),
             "true_peak_full_domain": _peak(X, Y, true_Eyy, domain),
             "true_peak_on_measured_support": _peak(X, Y, true_Eyy, strain_accepted),
@@ -167,8 +180,14 @@ def summarize_field(field, params, settings, solver_core):
             "strain_invalid_reasons": _count_reasons(_array(field, "strain_invalid_reason", shape, ""), domain & ~sv),
             "correlation_invalid_reasons": _count_reasons(_array(field, "invalid_reason", shape, ""), domain & ~valid),
         }
+    domain_bounds = [
+        int(round(float(X.min()))) if np.isclose(X.min(), round(float(X.min()))) else float(X.min()),
+        int(round(float(Y.min()))) if np.isclose(Y.min(), round(float(Y.min()))) else float(Y.min()),
+        int(round(float(X.max()))) if np.isclose(X.max(), round(float(X.max()))) else float(X.max()),
+        int(round(float(Y.max()))) if np.isclose(Y.max(), round(float(Y.max()))) else float(Y.max()),
+    ]
     result = {
-        "locked_poi_domain_xy_px": [32, 32, 120, 120],
+        "locked_poi_domain_xy_px": domain_bounds,
         "grid_sha256": hashlib.sha256(X.tobytes()+Y.tobytes()).hexdigest(),
         "strain_gauge_center_span_px": (settings["strain_window"]-1)*settings["step"],
         "nominal_image_support_width_px": settings["subset_size"]+(settings["strain_window"]-1)*settings["step"],
@@ -227,8 +246,9 @@ def reference_strategy_diagnostic(solver_core):
                          for key, value in final_params.items()}
         reference, final_image = bench.image_pair(final_params)
         _, middle_image = bench.image_pair(middle_params)
-        prepared_fixed = solver_core._prepare_dic_images(reference, final_image)
-        prepared_middle = solver_core._prepare_dic_images(middle_image, final_image)
+        prepare_fn = getattr(solver_core, "_prepare_dic_images", None)
+        prepared_fixed = prepare_fn(reference, final_image) if callable(prepare_fn) else None
+        prepared_middle = prepare_fn(middle_image, final_image) if callable(prepare_fn) else None
         for x, y in ((80., 72.), (80., 80.), (96., 72.), (112., 80.)):
             uf, vf, _ = bench.truth(x, y, final_params)
             um, vm, _ = bench.truth(x, y, middle_params)
@@ -241,12 +261,14 @@ def reference_strategy_diagnostic(solver_core):
                                    vf, F_final[1, 0], F_final[1, 1]-1])
             relative_seed = np.array([uf-um, F_relative[0, 0]-1, F_relative[0, 1],
                                       vf-vm, F_relative[1, 0], F_relative[1, 1]-1])
+            fixed_kwargs = {"_prepared": prepared_fixed} if prepared_fixed is not None else {}
+            middle_kwargs = {"_prepared": prepared_middle} if prepared_middle is not None else {}
             fixed = solver_core.refine_subset_icgn(
                 reference, final_image, x, y, 25, p0=fixed_seed,
-                max_iter=50, tol=1e-4, _prepared=prepared_fixed)
+                max_iter=50, tol=1e-4, **fixed_kwargs)
             middle = solver_core.refine_subset_icgn(
                 middle_image, final_image, x+um, y+vm, 25, p0=relative_seed,
-                max_iter=50, tol=1e-4, _prepared=prepared_middle)
+                max_iter=50, tol=1e-4, **middle_kwargs)
             record = {"case": name, "original_material_point_xy_px": [x, y],
                       "known_middle_point_xy_px": [float(x+um), float(y+vm)],
                       "true_final_displacement_uv_px": final_displacement.tolist(),
@@ -259,9 +281,9 @@ def reference_strategy_diagnostic(solver_core):
                 total = np.array([fit["u"], fit["v"]])+offset
                 record[key] = {
                     "candidate_exists": True, "total_displacement_uv_px": total.tolist(),
-                    "total_displacement_vector_error_px": float(np.linalg.norm(total-final_displacement)),
-                    "converged": bool(fit["converged"]), "zncc": float(fit["zncc"]),
-                    "residual_rms": float(fit["residual_rms"]), "stop_reason": str(fit["stop_reason"]),
+                    "total_displacement_vector_error_px": _number(float(np.linalg.norm(total-final_displacement))),
+                    "converged": bool(fit["converged"]), "zncc": _number(float(fit["zncc"])),
+                    "residual_rms": _number(float(fit["residual_rms"])), "stop_reason": str(fit["stop_reason"]),
                 }
             rows.append(record)
     return {
@@ -325,6 +347,8 @@ def matched_case_comparisons(records, points_by_case):
 def run(output, core_file=None, selected_cases=None, *, experimental_full_search=False):
     output = Path(output)
     points_path = output.with_name(output.stem+".points.csv")
+    if points_path == output:
+        raise ValueError("output filename must not collide with its adjacent .points.csv artifact")
     if output.exists() or points_path.exists():
         raise FileExistsError("Use new output files; existing research evidence is preserved")
     solver_core = core if core_file is None else load_core(core_file)
@@ -376,7 +400,7 @@ def run(output, core_file=None, selected_cases=None, *, experimental_full_search
             raise RuntimeError("Experimental search must not report numerical approval")
         extra, points = summarize_field(field, deformation, settings, solver_core)
         if degradation.get("texture_mix") == 1.0:
-            covered, clear = bench._footprint_categories(field["X"], field["Y"], deformation, settings)
+            covered, _ = bench._footprint_categories(field["X"], field["Y"], deformation, settings)
             extra["fully_destroyed_texture"] = {
                 "fully_covered_subsets": int(covered.sum()),
                 "accepted_fully_covered_subsets": int((covered.ravel() & field["valid"]).sum()),
@@ -395,14 +419,21 @@ def run(output, core_file=None, selected_cases=None, *, experimental_full_search
         raise RuntimeError("Core changed during the run; repeat with a frozen core")
     output.parent.mkdir(parents=True, exist_ok=True)
     with points_path.open("x", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=POINT_COLUMNS)
+        writer = csv.DictWriter(stream, fieldnames=POINT_COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows({key: _csv_value(value) for key, value in row.items()} for row in all_points)
     report["pointwise_csv"] = {"filename": points_path.name, "sha256": sha256(points_path),
                                "row_count": len(all_points), "missing_numeric_values": "empty cells"}
-    with output.open("x", encoding="utf-8") as stream:
-        json.dump(report, stream, indent=2, allow_nan=False)
-        stream.write("\n")
+    try:
+        with output.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(report, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+    except Exception:
+        try:
+            points_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return report
 
 

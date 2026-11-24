@@ -369,3 +369,101 @@ def test_benchmark_without_output_is_structured_config_error() -> None:
     assert result.returncode == ezdic_cli.EXIT_CONFIG_ERROR
     error = json.loads(result.stderr)
     assert error["error_code"] == "BENCHMARK_OUTPUT_REQUIRED"
+
+
+def test_schema_enforces_normalization_if_then_odd_solver_and_mode_fields() -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    validator = jsonschema.Draft202012Validator(ezdic_cli.load_schema())
+
+    missing_bounds = _config("fullfield", ["a.png", "b.png"])
+    missing_bounds["normalization"] = {"policy": "fixed_bounds"}
+    assert list(validator.iter_errors(missing_bounds))
+
+    null_bounds = _config("fullfield", ["a.png", "b.png"])
+    null_bounds["normalization"] = {"policy": "fixed_bounds", "bounds": None}
+    assert list(validator.iter_errors(null_bounds))
+
+    valid_fixed = _config("fullfield", ["a.png", "b.png"])
+    valid_fixed["normalization"] = {"policy": "fixed_bounds", "bounds": {"lo": 10.0, "hi": 200.0}}
+    assert not list(validator.iter_errors(valid_fixed))
+
+    unexpected_bounds = _config("fullfield", ["a.png", "b.png"])
+    unexpected_bounds["normalization"] = {"policy": "reference_percentile", "bounds": {"lo": 0.0, "hi": 1.0}}
+    assert list(validator.iter_errors(unexpected_bounds))
+
+    ext_with_field_ref = _config("extensometer", ["a.png", "b.png"])
+    ext_with_field_ref["field_roi_reference_frame_1based"] = 1
+    assert list(validator.iter_errors(ext_with_field_ref))
+
+    even_subset = _config("fullfield", ["a.png", "b.png"])
+    even_subset["solver"] = {"subset_size_px": 20}
+    assert list(validator.iter_errors(even_subset))
+
+    even_window = _config("fullfield", ["a.png", "b.png"])
+    even_window["solver"] = {"strain_window_px": 4}
+    assert list(validator.iter_errors(even_window))
+
+    policy_mismatch = _config("extensometer", ["a.png", "b.png"])
+    policy_mismatch["tracking"] = {"template_policy": "fixed_reference", "use_prev_frame_template": True}
+    assert list(validator.iter_errors(policy_mismatch))
+
+    policy_mismatch_2 = _config("extensometer", ["a.png", "b.png"])
+    policy_mismatch_2["tracking"] = {"template_policy": "follow_deformed_experimental", "use_prev_frame_template": False}
+    assert list(validator.iter_errors(policy_mismatch_2))
+
+
+def test_tracking_rejects_soft_corr_above_hard_corr() -> None:
+    config = _config("extensometer", ["a.png", "b.png"])
+    config["tracking"] = {"hard_corr": 0.50, "soft_corr": 0.70}
+    with pytest.raises(ezdic_cli.ConfigError) as exc:
+        ezdic_cli.normalize_config(config)
+    assert exc.value.code == "CONFIG_VALUE_ERROR"
+    assert exc.value.path == "$.tracking.soft_corr"
+
+
+def test_core_settings_copy_preserves_canonical_snapshot(tmp_path: Path) -> None:
+    images = [tmp_path / "a.png", tmp_path / "b.png"]
+    for path in images:
+        path.write_bytes(b"img")
+    normalized = ezdic_cli.normalize_config(_config("fullfield", [str(p) for p in images]))
+
+    class StubCore:
+        __file__ = __file__
+
+    settings = ezdic_cli.build_core_settings(normalized, StubCore)
+    cloned = settings.copy()
+    assert isinstance(cloned, ezdic_cli._CoreSettings)
+    assert dict(cloned.items()) == dict(settings.items())
+    assert ezdic_cli.config_hash(cloned) == ezdic_cli.config_hash(normalized)
+
+
+def test_cli_json_output_is_safe_on_cp1252_stream_and_version_flag(monkeypatch) -> None:
+    import io
+
+    raw_buf = io.BytesIO()
+    cp1252_stream = io.TextIOWrapper(raw_buf, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(ezdic_cli.sys, "stderr", cp1252_stream)
+    ezdic_cli._write_error("TEST_CODE", "事务提交失败：中文路径", exit_code=3)
+    cp1252_stream.flush()
+    decoded = json.loads(raw_buf.getvalue().decode("cp1252"))
+    assert decoded["error_code"] == "TEST_CODE"
+    assert "事务提交失败" in decoded["message"]
+
+    version_result = subprocess.run(
+        [sys.executable, "-m", "ezdic_cli", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert version_result.returncode == 0
+    assert "ezdic " in version_result.stdout
+
+
+def test_frozen_entrypoint_marker_uses_lf_line_endings(tmp_path: Path) -> None:
+    import ezdic_frozen_entrypoint as frozen
+
+    marker = tmp_path / "marker.json"
+    frozen._write_marker(marker, {"ok": True, "step": 1})
+    raw = marker.read_bytes()
+    assert b"\r\n" not in raw
+    assert json.loads(raw.decode("utf-8")) == {"ok": True, "step": 1}

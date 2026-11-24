@@ -89,7 +89,7 @@ def _write_marker(path: Path, payload: dict[str, Any]) -> None:
     path = path.expanduser()
     if not path.parent.is_dir():
         raise RuntimeError(f"smoke marker parent does not exist: {path.parent}")
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
 def smoke_test() -> int:
@@ -167,6 +167,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     try:
         raise SystemExit(main())
     except Exception as exc:

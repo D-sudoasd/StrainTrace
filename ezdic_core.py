@@ -11,14 +11,13 @@ import math
 import os
 import platform
 import re
-import shutil
+import shutil  # noqa: F401 - kept for backward-compatible monkeypatching in tests.
 import sys
-import time
 import uuid
 import threading
 import stat
 from contextlib import contextmanager
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from datetime import datetime
@@ -247,12 +246,26 @@ def natural_sort_key(s):
     ]
 
 
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+
 def safe_name(s):
     s = str(s).strip()
     if not s:
         return "group"
     s = re.sub(r"[^\w\-.]+", "_", s, flags=re.UNICODE)
-    return s[:80]
+    s = s.strip(". ")
+    if not s or s in {".", ".."}:
+        return "group"
+    stem = s.split(".", 1)[0].casefold()
+    if stem in _WINDOWS_RESERVED_STEMS:
+        s = f"_{s}"
+    s = s[:80].rstrip(". ")
+    return s or "group"
 
 
 def _output_name_key(value):
@@ -791,8 +804,11 @@ def verify_run_manifest(manifest_or_path, *, verify_code=True):
     missing_manifest_fields = [field for field in required_manifest_fields if field not in manifest]
     if missing_manifest_fields:
         errors.append({"code": "MANIFEST_REQUIRED_FIELD_MISSING", "fields": missing_manifest_fields})
-    if manifest.get("manifest_version", 0) >= 2 and "code_files" not in manifest:
-        errors.append({"code": "MANIFEST_REQUIRED_FIELD_MISSING", "fields": ["code_files"]})
+    if manifest.get("manifest_version", 0) >= 2:
+        if "code_files" not in manifest:
+            errors.append({"code": "MANIFEST_REQUIRED_FIELD_MISSING", "fields": ["code_files"]})
+        elif not isinstance(manifest.get("code_files"), list) or len(manifest.get("code_files")) == 0:
+            errors.append({"code": "CODE_FILE_SET_INVALID", "message": "manifest_version >= 2 requires a non-empty code_files list"})
     expected_hash = manifest.get("manifest_hash")
     if expected_hash is not None:
         actual_hash = canonical_json_hash(
@@ -868,7 +884,7 @@ def verify_run_manifest(manifest_or_path, *, verify_code=True):
     if verify_code and manifest.get("code_fingerprint"):
         try:
             code_entries = manifest.get("code_files")
-            if code_entries:
+            if isinstance(code_entries, list) and len(code_entries) > 0:
                 module_root = _runtime_code_root()
                 observed_entries = []
                 for item in code_entries:
@@ -891,28 +907,21 @@ def verify_run_manifest(manifest_or_path, *, verify_code=True):
                         )
                     observed_entries.append({"path": str(item["path"]).replace("\\", "/"), "sha256": observed_sha256})
                 observed_code = canonical_json_hash(observed_entries)
+            elif manifest.get("manifest_version", 0) >= 2:
+                # Version >= 2 manifests must never silently fall back to the
+                # v1 single-file fingerprint when ``code_files`` is empty/missing.
+                observed_code = None
             else:
                 # Version-1 manifests used the module's implicit single file.
                 observed_code = code_fingerprint()
         except CoreError as exc:
             errors.append({"code": exc.code, "details": exc.details})
         else:
-            if manifest["code_fingerprint"] != observed_code:
+            if observed_code is not None and manifest["code_fingerprint"] != observed_code:
                 errors.append({"code": "CODE_FINGERPRINT_MISMATCH", "expected": manifest["code_fingerprint"], "observed": observed_code})
     owned_output_paths = manifest.get("owned_output_paths") or sorted(expected_output_paths)
     if manifest_path is not None and owned_output_paths:
         preserved = {str(value).replace("\\", "/") for value in manifest.get("preserved_output_paths", []) or []}
-
-        def is_explicit_ezdic_candidate(relative):
-            if relative.startswith("core/"):
-                return bool(re.fullmatch(r"core/(?:strain|engineering_strain|poisson_ratio)(?:_[\w.\-]+)?\.(?:txt|png)", relative, flags=re.IGNORECASE)) or relative == f"core/{ORIGIN_OPJU_FILENAME}"
-            if relative == "qc/qc_summary.txt":
-                return True
-            if relative.startswith("optional/"):
-                return bool(re.fullmatch(r"optional/(?:publication_figures|correlation_plots)/[\w.\-/]+\.(?:png|tiff|pdf|svg|eps)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/full_csv/(?:strain_results_all_groups\.csv|per_group_results/strain_results_[\w.\-]+\.csv)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/parameters/(?:tracking_parameters|acceptance_summary)\.txt", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/overlays/[\w.\-]+/tracked_\d{5}\.png", relative, flags=re.IGNORECASE))
-            if relative.startswith("dic/"):
-                return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
-            return False
 
         # Scan only explicit ezDIC output patterns.  Arbitrary files under a
         # shared output folder remain user-owned and are not verification
@@ -924,8 +933,12 @@ def verify_run_manifest(manifest_or_path, *, verify_code=True):
             for candidate in root.rglob("*"):
                 if not candidate.is_file():
                     continue
-                relative = candidate.resolve().relative_to(manifest_root).as_posix()
-                if relative not in expected_output_paths and relative not in preserved and is_explicit_ezdic_candidate(relative):
+                try:
+                    relative = candidate.resolve().relative_to(manifest_root).as_posix()
+                except ValueError:
+                    errors.append({"code": "MANIFEST_OUTPUT_OUTSIDE_ROOT", "path": str(candidate)})
+                    continue
+                if relative not in expected_output_paths and relative not in preserved and _is_ezdic_output_pattern(relative):
                     errors.append({"code": "UNEXPECTED_OUTPUT", "path": relative})
     result = {"ok": not errors, "code": "OK" if not errors else "MANIFEST_INVALID", "errors": errors}
     if manifest_path is not None:
@@ -950,13 +963,13 @@ def _validate_finite_image(image, *, path=None):
                 "message": "image must be a non-empty 2-D or 3-D array",
             },
         )
-    if arr.dtype.kind not in "biufc":
+    if arr.dtype.kind not in "biuf":
         raise CoreError(
             "INVALID_IMAGE",
             {
                 "path": str(path) if path is not None else None,
                 "dtype": str(arr.dtype),
-                "message": "image samples must be numeric",
+                "message": "image samples must be real numeric values",
             },
         )
     try:
@@ -1026,8 +1039,22 @@ def _color_to_gray(img, *, color_order, path=None):
                 "message": f"unsupported colour order: {color_order}",
             },
         )
+    src = img
+    if src.dtype not in (np.uint8, np.uint16, np.float32):
+        src = src.astype(np.float32)
+        if not np.isfinite(src).all():
+            count = int((~np.isfinite(src)).sum())
+            raise CoreError(
+                "NONFINITE_IMAGE",
+                {
+                    "path": str(path) if path is not None else None,
+                    "count": count,
+                    "dtype": str(img.dtype),
+                    "message": "float32 colour conversion produced non-finite samples",
+                },
+            )
     try:
-        gray = cv2.cvtColor(img, code)
+        gray = cv2.cvtColor(src, code)
     except cv2.error as exc:
         raise CoreError(
             "INVALID_IMAGE",
@@ -1224,9 +1251,10 @@ def normalize_with_bounds(image, bounds, *, return_metadata=False, policy=None, 
 def normalize_dic_float(image, bounds):
     """Reference-fixed intensity scaling without an 8-bit quantization step."""
     lo, hi = _coerce_normalization_bounds(bounds)
-    arr = _validate_finite_image(image).astype(np.float64)
+    arr = _validate_finite_image(image)
     if arr.ndim == 3:
-        arr = cv2.cvtColor(arr.astype(np.float32), cv2.COLOR_BGR2GRAY).astype(float)
+        arr = _color_to_gray(arr, color_order="bgr")
+    arr = arr.astype(np.float64)
     if hi <= lo:
         return np.zeros(arr.shape, dtype=float)
     return np.clip((arr-lo)*255/(hi-lo), 0, 255)
@@ -1690,7 +1718,19 @@ def _empty_template_match_result(last_rect, reason):
     }
 
 
-def _match_template_candidate_diagnostic(img8, last_rect, template, search_radius):
+def _match_template_candidate_diagnostic(
+    img8,
+    last_rect,
+    template,
+    search_radius,
+    *,
+    peak_margin_min=None,
+    peak_ratio_min=None,
+):
+    if peak_margin_min is None:
+        peak_margin_min = DEFAULT_PEAK_MARGIN_MIN
+    if peak_ratio_min is None:
+        peak_ratio_min = DEFAULT_PEAK_RATIO_MIN
     H, W = img8.shape[:2]
     x, y, w, h = last_rect
     x = float(x)
@@ -1739,8 +1779,8 @@ def _match_template_candidate_diagnostic(img8, last_rect, template, search_radiu
     peak_is_ambiguous = bool(
         np.isfinite(peak_diagnostics["peak_margin"])
         and np.isfinite(peak_diagnostics["peak_ratio"])
-        and peak_diagnostics["peak_margin"] < DEFAULT_PEAK_MARGIN_MIN
-        and peak_diagnostics["peak_ratio"] < DEFAULT_PEAK_RATIO_MIN
+        and peak_diagnostics["peak_margin"] < float(peak_margin_min)
+        and peak_diagnostics["peak_ratio"] < float(peak_ratio_min)
     )
     return {
         "candidate_rect": (float(new_x), float(new_y), w, h),
@@ -2001,6 +2041,9 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
     L = strain = true_strain = np.nan
     strain_valid = False
 
+    ambiguous1 = False
+    ambiguous2 = False
+
     if frame_idx == 0:
         template_ok1 = has_nonzero_variance(template1)
         template_ok2 = has_nonzero_variance(template2)
@@ -2029,22 +2072,18 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
         diag2 = _tracking_template_match(image, last_rect2, template2, search_radius_used)
         candidate_rect1, candidate_rect2 = diag1["candidate_rect"], diag2["candidate_rect"]
         score1, score2 = float(diag1["score"]), float(diag2["score"])
-        ambiguous = bool(
-            (
-                np.isfinite(float(diag1.get("peak_margin", np.nan)))
-                and np.isfinite(float(diag1.get("peak_ratio", np.nan)))
-                and float(diag1.get("peak_margin")) < peak_margin_min
-                and float(diag1.get("peak_ratio")) < peak_ratio_min
-            )
-            or (
-                np.isfinite(float(diag2.get("peak_margin", np.nan)))
-                and np.isfinite(float(diag2.get("peak_ratio", np.nan)))
-                and float(diag2.get("peak_margin")) < peak_margin_min
-                and float(diag2.get("peak_ratio")) < peak_ratio_min
-            )
-            or diag1.get("peak_is_ambiguous", False)
-            or diag2.get("peak_is_ambiguous", False)
-        )
+        def _diag_is_ambiguous(diag):
+            if str(diag.get("reason", "peak_found")) != "peak_found" or float(diag.get("score", -1.0)) < 0:
+                return False
+            margin_val = float(diag.get("peak_margin", np.nan))
+            ratio_val = float(diag.get("peak_ratio", np.nan))
+            if np.isfinite(margin_val) and np.isfinite(ratio_val):
+                return bool(margin_val < peak_margin_min and ratio_val < peak_ratio_min)
+            return bool(diag.get("peak_is_ambiguous", False))
+
+        ambiguous1 = _diag_is_ambiguous(diag1)
+        ambiguous2 = _diag_is_ambiguous(diag2)
+        ambiguous = bool(ambiguous1 or ambiguous2)
         candidate_ok = score1 >= 0 and score2 >= 0 and candidate_rect1 is not None and candidate_rect2 is not None
         if candidate_ok:
             try:
@@ -2063,14 +2102,18 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
         ok_soft_corr = score1 >= soft_corr and score2 >= soft_corr and not ambiguous
         ok_fb = True
         if enable_fb_check:
-            fb_err1, fb_score1 = _tracking_forward_backward_error(
-                state["last_good_img8"], image, last_rect1, candidate_rect1, search_radius_used
-            )
-            fb_err2, fb_score2 = _tracking_forward_backward_error(
-                state["last_good_img8"], image, last_rect2, candidate_rect2, search_radius_used
-            )
-            fb_ok = bool(fb_err1 <= fb_tolerance and fb_err2 <= fb_tolerance)
-            ok_fb = fb_ok
+            if candidate_ok:
+                fb_err1, fb_score1 = _tracking_forward_backward_error(
+                    state["last_good_img8"], image, last_rect1, candidate_rect1, search_radius_used
+                )
+                fb_err2, fb_score2 = _tracking_forward_backward_error(
+                    state["last_good_img8"], image, last_rect2, candidate_rect2, search_radius_used
+                )
+                fb_ok = bool(fb_err1 <= fb_tolerance and fb_err2 <= fb_tolerance)
+                ok_fb = fb_ok
+            else:
+                fb_ok = False
+                ok_fb = False
         accepted = bool(ok_hard_corr and ok_jump and ok_fb)
         if accepted:
             accept_mode = "hard"
@@ -2084,9 +2127,29 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
         else:
             accepted = False
             accept_mode = "rejected"
+            empty_reasons = [
+                str(d.get("reason", ""))
+                for d in (diag1, diag2)
+                if str(d.get("reason", "")) in {
+                    "SEARCH_TOO_SMALL",
+                    "TEMPLATE_SHAPE_MISMATCH",
+                    "ZERO_VARIANCE",
+                    "ZERO_VARIANCE_CANDIDATE",
+                    "NONFINITE_CORRELATION",
+                    "NONFINITE_PEAK",
+                    "INVALID_RETURN",
+                }
+            ]
             if ambiguous:
                 tracking_status_code = "AMBIGUOUS_PEAK"
                 reason = "repeated correlation peak; frame rejected"
+            elif empty_reasons:
+                tracking_status_code = empty_reasons[0]
+                reason = f"template match failed: {empty_reasons[0]}"
+            elif not ok_hard_corr and (not enable_adaptive or not ok_soft_corr):
+                tracking_status_code = "CORRELATION_BELOW_THRESHOLD"
+                threshold_label = "soft" if enable_adaptive else "hard"
+                reason = f"correlation below {threshold_label} threshold: ROI1 {score1:.3f}, ROI2 {score2:.3f}"
             elif enable_fb_check and not ok_fb:
                 tracking_status_code = "FB_FAILED"
                 reason = f"FB fail: ROI1 {fb_err1:.2f}px, ROI2 {fb_err2:.2f}px > {fb_tolerance:.2f}px"
@@ -2096,9 +2159,6 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
             elif not ok_jump:
                 tracking_status_code = "STRAIN_JUMP"
                 reason = f"strain jump {jump_value:.4f} > {max_frame_jump}"
-            elif not ok_hard_corr and not ok_soft_corr:
-                tracking_status_code = "CORRELATION_BELOW_THRESHOLD"
-                reason = f"correlation below soft threshold: ROI1 {score1:.3f}, ROI2 {score2:.3f}"
             else:
                 tracking_status_code = "REJECTED"
                 reason = "tracking rejected"
@@ -2164,8 +2224,8 @@ def track_extensometer_group_frame(state, img8, frame_idx, filename, params):
         "peak_margin_roi2": diag2.get("peak_margin", np.nan),
         "best_to_second_peak_ratio_roi2": diag2.get("best_to_second_peak_ratio", np.nan),
         "second_to_best_peak_ratio_roi2": diag2.get("second_to_best_peak_ratio", np.nan),
-        "peak_is_ambiguous_roi1": bool(diag1.get("peak_is_ambiguous", False)),
-        "peak_is_ambiguous_roi2": bool(diag2.get("peak_is_ambiguous", False)),
+        "peak_is_ambiguous_roi1": bool(ambiguous1),
+        "peak_is_ambiguous_roi2": bool(ambiguous2),
         "fb_error_roi1_px": fb_err1,
         "fb_error_roi2_px": fb_err2,
         "fb_score_roi1": fb_score1,
@@ -2411,7 +2471,7 @@ def generate_synthetic_speckle(height, width, *, seed=0, n_dots=None, sigma=1.8)
 def _as_float_image(image):
     arr = _validate_finite_image(image)
     if arr.ndim == 3:
-        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY) if arr.shape[2] >= 3 else arr[:, :, 0]
+        arr = _color_to_gray(arr, color_order="bgr")
     arr = arr.astype(np.float32, copy=False)
     if not np.isfinite(arr).all():
         count = int((~np.isfinite(arr)).sum())
@@ -2586,11 +2646,21 @@ def _displacement_outliers(X, Y, U, V, threshold_px=1.0):
 
 def estimate_dic_initial_transform(reference, deformed, roi, specimen_mask=None):
     """SIFT + RANSAC affine initialization, never a displacement measurement."""
-    height, width = reference.shape[:2]
+    ref_arr = _as_float_image(reference)
+    def_arr = _as_float_image(deformed)
+    height, width = ref_arr.shape[:2]
     scale = min(1., 1600/max(height,width))
     shape = (max(1,round(width*scale)),max(1,round(height*scale)))
-    f = cv2.resize(np.clip(reference,0,255).astype(np.uint8),shape)
-    g = cv2.resize(np.clip(deformed,0,255).astype(np.uint8),shape)
+    ref_min, ref_max = float(np.min(ref_arr)), float(np.max(ref_arr))
+    if ref_min < 0.0 or ref_max > 255.0 or (ref_max - ref_min) <= 2.0:
+        bounds = compute_reference_normalization(ref_arr)
+        ref_u8 = normalize_with_bounds(ref_arr, bounds)
+        def_u8 = normalize_with_bounds(def_arr, bounds)
+    else:
+        ref_u8 = np.clip(ref_arr, 0, 255).astype(np.uint8)
+        def_u8 = np.clip(def_arr, 0, 255).astype(np.uint8)
+    f = cv2.resize(ref_u8, shape)
+    g = cv2.resize(def_u8, shape)
     mask = np.zeros((height,width),dtype=np.uint8)
     x,y,w,h = [int(round(value)) for value in roi]
     mask[y:y+h,x:x+w] = 255
@@ -3028,7 +3098,7 @@ def _refine_subset_ic(reference, deformed, x, y, subset_size, p0=None,
     def evaluate(parameters):
         map_x = float(x) + parameters[0] + (1+parameters[1])*xx + parameters[2]*yy
         map_y = float(y) + parameters[3] + parameters[4]*xx + (1+parameters[5])*yy
-        if map_x.min() < 2 or map_y.min() < 2 or map_x.max() > width-3 or map_y.max() > height-3:
+        if map_x.min() < 0 or map_y.min() < 0 or map_x.max() > width-1 or map_y.max() > height-1:
             return None
         g = ndimage.map_coordinates(prepared["coefficients"], [map_y.ravel(), map_x.ravel()],
                                    order=5, mode="mirror", prefilter=False)
@@ -3757,22 +3827,75 @@ def _run_2d_dic_multiscale(
         for scale, level in zip(level_scales, reference_pyramid)
     ]
     refine = _legacy_refiner_for(solver_name)
+    coarse_count = len(reference_pyramid) - 1
     initial_guesses = {}
-    prepared_levels = [_prepare_dic_images(f, g) for f, g in zip(reference_pyramid, deformed_pyramid)] if refine is _CANONICAL_REFINERS[solver_name] else []
+    prepared_levels = [
+        _prepare_dic_images(f, g)
+        for f, g in zip(reference_pyramid[:coarse_count], deformed_pyramid[:coarse_count])
+    ] if refine is _CANONICAL_REFINERS[solver_name] else []
+    eligible = np.ones(X.shape, dtype=bool)
+    if specimen_mask is not None:
+        mask_bool = np.asarray(specimen_mask, dtype=bool)
+        if mask_bool.shape != reference.shape:
+            raise ValueError("specimen mask must match the reference image shape")
+        supported = ndimage.minimum_filter(mask_bool.astype(np.uint8), size=fine_subset, mode="constant", cval=0).astype(bool)
+        eligible = supported[np.rint(Y).astype(int), np.rint(X).astype(int)]
     pyramid_diagnostics = []
     pyramid_ambiguous = np.zeros(X.shape, dtype=bool)
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
             x_fine, y_fine = float(X[i, j]), float(Y[i, j])
+            if not eligible[i, j]:
+                point_levels = [
+                    {
+                        "level_index": int(level_index),
+                        "scale_x": float(scales_x[level_index]),
+                        "scale_y": float(scales_y[level_index]),
+                        "scale": float(level_scales[level_index]),
+                        "pad": 0,
+                        "x": float(x_fine * scales_x[level_index]),
+                        "y": float(y_fine * scales_y[level_index]),
+                        "subset_size": int(level_subset_sizes[level_index]),
+                        "seed_u": None,
+                        "seed_v": None,
+                        "guess_u": None,
+                        "guess_v": None,
+                        "guess_zncc": None,
+                        "best_peak": None,
+                        "second_peak": None,
+                        "peak_margin": None,
+                        "best_to_second_peak_ratio": None,
+                        "second_to_best_peak_ratio": None,
+                        "peak_is_ambiguous": False,
+                        "competing_peak_status": "NOT_EVALUATED",
+                        "competing_peak_refined_u": None,
+                        "competing_peak_refined_v": None,
+                        "competing_peak_refined_zncc": None,
+                        "refine_u": None,
+                        "refine_v": None,
+                        "refine_zncc": None,
+                        "residual_rms": None,
+                        "hessian_condition_number": None,
+                        "iterations": 0,
+                        "converged": None,
+                        "stop_reason": "mask_excluded",
+                        "boundary_support_ok": False,
+                        "accepted": False,
+                    }
+                    for level_index in range(coarse_count)
+                ]
+                initial_guesses[(i, j)] = (0.0, 0.0)
+                pyramid_diagnostics.append(point_levels)
+                continue
             seed_p = _affine_initial_parameters(_global_initial_transform,x_fine,y_fine) if _global_initial_transform is not None else None
             seed_u = float(seed_p[0]*scales_x[0]) if seed_p is not None else 0.
             seed_v = float(seed_p[3]*scales_y[0]) if seed_p is not None else 0.
             if seed_p is not None:
                 seed_p[0],seed_p[3] = seed_u,seed_v
             point_levels = []
-            for level_index, (reference_level, deformed_level) in enumerate(
-                zip(reference_pyramid, deformed_pyramid)
-            ):
+            for level_index in range(coarse_count):
+                reference_level = reference_pyramid[level_index]
+                deformed_level = deformed_pyramid[level_index]
                 sx, sy = scales_x[level_index], scales_y[level_index]
                 x_level, y_level = x_fine * sx, y_fine * sy
                 subset_level = level_subset_sizes[level_index]
@@ -3903,12 +4026,11 @@ def _run_2d_dic_multiscale(
                 # A finite but rejected solution is not initialization evidence.
                 # A coarse boundary may become supported at the next level;
                 # continue with this seed and its proper coordinate scaling.
-                if level_index + 1 < len(reference_pyramid):
-                    seed_u *= scales_x[level_index + 1] / sx
-                    seed_v *= scales_y[level_index + 1] / sy
-                    if seed_p is not None:
-                        seed_p[0] *= scales_x[level_index + 1] / sx
-                        seed_p[3] *= scales_y[level_index + 1] / sy
+                seed_u *= scales_x[level_index + 1] / sx
+                seed_v *= scales_y[level_index + 1] / sy
+                if seed_p is not None:
+                    seed_p[0] *= scales_x[level_index + 1] / sx
+                    seed_p[3] *= scales_y[level_index + 1] / sy
             if seed_p is not None and np.isfinite(seed_p).all():
                 initial_guesses[(i, j)] = [float(value) for value in seed_p]
             else:
@@ -4151,15 +4273,96 @@ def run_2d_dic(
     stop_reason = np.full((ny, nx), "", dtype=object)
     total = max(ny * nx, 1)
 
+    _EMPTY_GUESS_REASONS = {
+        "OUT_OF_BOUNDS",
+        "SEARCH_TOO_SMALL",
+        "ZERO_VARIANCE",
+        "ZERO_VARIANCE_CANDIDATE",
+        "NONFINITE_CORRELATION",
+        "NONFINITE_PEAK",
+        "INVALID_RETURN",
+    }
+
+    def _append_fine_pyramid_record(
+        point_idx,
+        *,
+        px,
+        py,
+        seed_u=None,
+        seed_v=None,
+        guess=None,
+        guess_u=None,
+        guess_v=None,
+        boundary_ok=False,
+        fine_ambiguous=False,
+        competing_status_val="NOT_EVALUATED",
+        alternate=None,
+        refine_u=None,
+        refine_v=None,
+        refine_zncc=None,
+        residual_val=None,
+        condition_val=None,
+        iters_val=0,
+        converged_val=None,
+        stop_reason_val="",
+        accepted_val=False,
+    ):
+        if _pyramid_diagnostics is None or point_idx >= len(_pyramid_diagnostics):
+            return
+        point_levels = _pyramid_diagnostics[point_idx]
+        if not isinstance(point_levels, list):
+            return
+        point_levels.append(
+            {
+                "level_index": int(len(point_levels)),
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+                "scale": 1.0,
+                "pad": 0,
+                "x": float(px),
+                "y": float(py),
+                "subset_size": int(subset_size),
+                "seed_u": _serializable_float(seed_u),
+                "seed_v": _serializable_float(seed_v),
+                "guess_u": _serializable_float(guess_u),
+                "guess_v": _serializable_float(guess_v),
+                "guess_zncc": _serializable_float(guess.get("zncc") if isinstance(guess, Mapping) else None),
+                "best_peak": _serializable_float(guess.get("best_peak") if isinstance(guess, Mapping) else None),
+                "second_peak": _serializable_float(guess.get("second_peak") if isinstance(guess, Mapping) else None),
+                "peak_margin": _serializable_float(guess.get("peak_margin") if isinstance(guess, Mapping) else None),
+                "best_to_second_peak_ratio": _serializable_float(guess.get("best_to_second_peak_ratio") if isinstance(guess, Mapping) else None),
+                "second_to_best_peak_ratio": _serializable_float(guess.get("second_to_best_peak_ratio") if isinstance(guess, Mapping) else None),
+                "peak_is_ambiguous": bool(fine_ambiguous),
+                "competing_peak_status": str(competing_status_val),
+                "competing_peak_refined_u": _serializable_float(alternate.get("u") if isinstance(alternate, Mapping) else None),
+                "competing_peak_refined_v": _serializable_float(alternate.get("v") if isinstance(alternate, Mapping) else None),
+                "competing_peak_refined_zncc": _serializable_float(alternate.get("zncc") if isinstance(alternate, Mapping) else None),
+                "refine_u": _serializable_float(refine_u),
+                "refine_v": _serializable_float(refine_v),
+                "refine_zncc": _serializable_float(refine_zncc),
+                "residual_rms": _serializable_float(residual_val),
+                "hessian_condition_number": _serializable_float(condition_val),
+                "iterations": int(iters_val),
+                "converged": None if converged_val is None else bool(converged_val),
+                "stop_reason": str(stop_reason_val),
+                "boundary_support_ok": bool(boundary_ok),
+                "accepted": bool(accepted_val),
+            }
+        )
+
     for i in range(ny):
         for j in range(nx):
-            if not eligible[i, j]:
-                invalid_reason[i, j] = "MASK_EXCLUDED"
-                if progress_callback is not None:
-                    progress_callback(i*nx+j+1, total)
-                continue
+            point_idx = i * nx + j
             px = float(grid_X[i, j])
             py = float(grid_Y[i, j])
+            if not eligible[i, j]:
+                invalid_reason[i, j] = "MASK_EXCLUDED"
+                _append_fine_pyramid_record(
+                    point_idx, px=px, py=py, stop_reason_val="mask_excluded", accepted_val=False,
+                )
+                if progress_callback is not None:
+                    progress_callback(point_idx + 1, total)
+                continue
             seed = _affine_initial_parameters(global_transform,px,py) if global_transform is not None else (0.0,0.0)
             if _initial_guesses is not None:
                 seed = _initial_guesses.get((i, j), seed)
@@ -4184,6 +4387,18 @@ def run_2d_dic(
                 initial_u=seed_u,
                 initial_v=seed_v,
             )
+            guess_reason = str(guess.get("stop_reason", guess.get("reason", "")))
+            if guess_reason in _EMPTY_GUESS_REASONS:
+                peak_is_ambiguous[i, j] = bool(pyramid_ambiguous[i, j])
+                invalid_reason[i, j] = guess_reason
+                stop_reason[i, j] = guess_reason.lower()
+                _append_fine_pyramid_record(
+                    point_idx, px=px, py=py, seed_u=seed_u, seed_v=seed_v, guess=guess,
+                    stop_reason_val=stop_reason[i, j], accepted_val=False,
+                )
+                if progress_callback is not None:
+                    progress_callback(point_idx + 1, total)
+                continue
             u0 = float(guess.get("u", 0.0))
             v0 = float(guess.get("v", 0.0))
             cc = float(guess.get("zncc", -1.0))
@@ -4197,8 +4412,13 @@ def run_2d_dic(
             ):
                 invalid_reason[i, j] = "BOUNDARY_SUPPORT"
                 stop_reason[i, j] = "boundary_support_failure"
+                _append_fine_pyramid_record(
+                    point_idx, px=px, py=py, seed_u=seed_u, seed_v=seed_v, guess=guess,
+                    guess_u=u0, guess_v=v0, boundary_ok=False,
+                    stop_reason_val="boundary_support_failure", accepted_val=False,
+                )
                 if progress_callback is not None:
-                    progress_callback(i * nx + j + 1, total)
+                    progress_callback(point_idx + 1, total)
                 continue
             for target, key in (
                 (peak_best, "best_peak"),
@@ -4223,8 +4443,13 @@ def run_2d_dic(
             if ambiguous and reject_ambiguous_peaks:
                 invalid_reason[i, j] = "AMBIGUOUS_PEAK"
                 stop_reason[i, j] = "ambiguous_peak"
+                _append_fine_pyramid_record(
+                    point_idx, px=px, py=py, seed_u=seed_u, seed_v=seed_v, guess=guess,
+                    guess_u=u0, guess_v=v0, boundary_ok=True, fine_ambiguous=True,
+                    stop_reason_val="ambiguous_peak", accepted_val=False,
+                )
                 if progress_callback is not None:
-                    progress_callback(i * nx + j + 1, total)
+                    progress_callback(point_idx + 1, total)
                 continue
             p0 = [u0, 0.0, 0.0, v0, 0.0, 0.0]
             if seed_p is not None:
@@ -4248,8 +4473,13 @@ def run_2d_dic(
             if result is None:
                 invalid_reason[i, j] = invalid_reason[i, j] or "REFINE_FAILED"
                 stop_reason[i, j] = stop_reason[i, j] or "refine_failed"
+                _append_fine_pyramid_record(
+                    point_idx, px=px, py=py, seed_u=seed_u, seed_v=seed_v, guess=guess,
+                    guess_u=u0, guess_v=v0, boundary_ok=True, fine_ambiguous=ambiguous,
+                    stop_reason_val=stop_reason[i, j], accepted_val=False,
+                )
                 if progress_callback is not None:
-                    progress_callback(i * nx + j + 1, total)
+                    progress_callback(point_idx + 1, total)
                 continue
             try:
                 result = dict(result)
@@ -4324,6 +4554,7 @@ def run_2d_dic(
                 invalid_reason[i, j] = invalid_reason[i, j] or "RESIDUAL_ABOVE_THRESHOLD"
             elif reject_nonconverged and convergence_known[i, j] and not converged[i, j]:
                 invalid_reason[i, j] = invalid_reason[i, j] or "NOT_CONVERGED"
+            alternate = None
             if not invalid_reason[i, j] and experimental_full_search:
                 candidate = _refine_competing_peak(
                     guess, {"u": result_u, "v": result_v}, p0, refine,
@@ -4351,14 +4582,41 @@ def run_2d_dic(
                 Z[i, j] = result_zncc
                 valid[i, j] = True
                 P[i, j, :] = result_p
+            _append_fine_pyramid_record(
+                point_idx,
+                px=px,
+                py=py,
+                seed_u=seed_u,
+                seed_v=seed_v,
+                guess=guess,
+                guess_u=u0,
+                guess_v=v0,
+                boundary_ok=True,
+                fine_ambiguous=bool(ambiguous or competing_status[i, j] == "DISTINCT_VALID_CANDIDATE"),
+                competing_status_val=competing_status[i, j],
+                alternate=alternate,
+                refine_u=result_u if result_finite else None,
+                refine_v=result_v if result_finite else None,
+                refine_zncc=result_zncc if result_finite else None,
+                residual_val=residual_rms[i, j] if np.isfinite(residual_rms[i, j]) else None,
+                condition_val=hessian_condition_number[i, j] if np.isfinite(hessian_condition_number[i, j]) else None,
+                iters_val=iterations[i, j],
+                converged_val=bool(converged[i, j]) if convergence_known[i, j] else None,
+                stop_reason_val=stop_reason[i, j],
+                accepted_val=bool(valid[i, j]),
+            )
             if progress_callback is not None:
-                progress_callback(i * nx + j + 1, total)
+                progress_callback(point_idx + 1, total)
 
     raw_U, raw_V = U.copy(), V.copy()
     spatial_outlier = _displacement_outliers(X, Y, U, V, outlier_threshold_px)
     U[spatial_outlier] = V[spatial_outlier] = np.nan
     valid[spatial_outlier] = False
     invalid_reason[spatial_outlier] = "SPATIAL_OUTLIER"
+    if _pyramid_diagnostics is not None:
+        for outlier_idx in np.flatnonzero(spatial_outlier.ravel()):
+            if outlier_idx < len(_pyramid_diagnostics) and isinstance(_pyramid_diagnostics[outlier_idx], list) and _pyramid_diagnostics[outlier_idx]:
+                _pyramid_diagnostics[outlier_idx][-1]["accepted"] = False
     # A finite, high-correlation displacement is useful diagnostic evidence,
     # but a folded/collapsed subset is not support for a material strain fit.
     # Preserve raw correlation results and exclude these points from both
@@ -4613,7 +4871,7 @@ def write_dic_field_txt(field, path):
             else:
                 cells.append(f"{float(value):.8f}")
         lines.append("\t".join(cells))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -4721,7 +4979,14 @@ def dic_color_limits(field, component, options=None):
     finite = values[np.isfinite(values)]*scale
     mode = options.get("color_mode", "range")
     if mode == "manual":
-        lo, hi = float(options["vmin"]), float(options["vmax"])
+        raw_lo = options.get("vmin")
+        raw_hi = options.get("vmax")
+        if raw_lo is None or raw_hi is None:
+            raise ValueError("manual color mode requires finite numeric vmin and vmax")
+        try:
+            lo, hi = float(raw_lo), float(raw_hi)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("manual color mode requires finite numeric vmin and vmax") from exc
         if not np.isfinite([lo, hi]).all() or lo >= hi:
             raise ValueError("color minimum and maximum must be finite and increasing")
     elif component == "zncc" and mode in ("range", "symmetric"):
@@ -4812,20 +5077,23 @@ def plot_dic_field_map(field, path, component="u", title=None, preset_name="publ
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax, preset = create_plot_figure(preset_name)
-    span_x, span_y = np.ptp(field["X"]), np.ptp(field["Y"])
-    if span_y > 1.8*max(span_x,1):
-        fig.set_size_inches(4.2,6.4)
-    mesh = render_dic_field_on_axes(ax, field, component)
-    label = DIC_COMPONENT_LABELS.get(component, component)
-    if (field.get("display_options") or {}).get("percent") and component not in ("u", "v", "zncc"):
-        label += " (%)"
-    add_dic_colorbar(fig, ax, mesh, label, preset_name=preset_name)
-    if title is None:
-        title = label
-    style_publication_axes(ax, preset, "x (px)", "y (px)", title, show_legend=False)
-    ax.grid(False)
-    ax.set_aspect("equal")
-    save_plot_figure(fig, path, preset_name)
+    try:
+        span_x, span_y = np.ptp(field["X"]), np.ptp(field["Y"])
+        if span_y > 1.8*max(span_x,1):
+            fig.set_size_inches(4.2,6.4)
+        mesh = render_dic_field_on_axes(ax, field, component)
+        label = DIC_COMPONENT_LABELS.get(component, component)
+        if (field.get("display_options") or {}).get("percent") and component not in ("u", "v", "zncc"):
+            label += " (%)"
+        add_dic_colorbar(fig, ax, mesh, label, preset_name=preset_name)
+        if title is None:
+            title = label
+        style_publication_axes(ax, preset, "x (px)", "y (px)", title, show_legend=False)
+        ax.grid(False)
+        ax.set_aspect("equal")
+        save_plot_figure(fig, path, preset_name)
+    finally:
+        plt.close(fig)
     return path
 
 
@@ -4834,7 +5102,7 @@ def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap=
     gray = _as_float_image(image)
     h, w = gray.shape[:2]
     base = cv2.cvtColor(np.clip(gray, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2RGB)
-    settings = {"coordinate_frame": "deformed"} | dict(field.get("display_options") or {}) | dict(options or {})
+    settings = dict(field.get("display_options") or {}) | {"coordinate_frame": "deformed", "background": "none"} | dict(options or {})
     alpha = float(settings.get("alpha", alpha))
     if not np.isfinite(alpha) or not 0 <= alpha <= 1:
         raise ValueError("overlay opacity must be between zero and one")
@@ -4843,6 +5111,8 @@ def overlay_dic_field_on_image(image, field, component="u", *, alpha=0.55, cmap=
         return base
     x0, x1 = max(0,int(np.floor(X[valid].min()))), min(w,int(np.ceil(X[valid].max()))+1)
     y0, y1 = max(0,int(np.floor(Y[valid].min()))), min(h,int(np.ceil(Y[valid].max()))+1)
+    if x1 <= x0 or y1 <= y0:
+        return base
     yy, xx = np.mgrid[y0:y1, x0:x1]
     interpolator = mtri.LinearTriInterpolator(tri, np.nan_to_num(values.ravel()))
     pixels = interpolator(xx, yy)
@@ -4934,6 +5204,24 @@ def _restore_dic_archive_metadata(field):
     return restored, metadata
 
 
+def _json_safe_preserve_order(value):
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.generic):
+        return _json_safe_preserve_order(value.item())
+    if isinstance(value, np.ndarray):
+        return [_json_safe_preserve_order(item) for item in value.tolist()]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_preserve_order(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_preserve_order(item) for item in value]
+    return str(value)
+
+
 def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name="publication"):
     field, archived_metadata = _restore_dic_archive_metadata(field)
     output_dir = Path(output_dir)
@@ -4972,7 +5260,7 @@ def export_dic_field_outputs(field, output_dir, *, stem="dic_field", preset_name
                 "strain_gauge_span_px": field.get("strain_gauge_span_px"), "mask": field.get("mask_provenance"),
                 "display": field.get("display_options", {}), "quality_summary": field.get("quality_summary"),
                 "pyramid_level_diagnostics": field.get("pyramid_level_diagnostics", [])}
-    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
+    arrays["metadata_json"] = np.asarray(json.dumps(_json_safe_preserve_order(metadata), allow_nan=False))
     array_path = output_dir / f"{stem}.npz"
     np.savez_compressed(array_path, **arrays)
     return {"txt": table_path, "csv": csv_path, "plots": plot_paths, "parameters": parameters_path, "arrays": array_path}
@@ -5407,8 +5695,10 @@ def save_plot_figure(fig, path, preset_name="publication"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     preset = get_plot_preset(preset_name)
-    fig.savefig(path, dpi=preset["dpi"], bbox_inches="tight", pad_inches=0.04, facecolor="white")
-    plt.close(fig)
+    try:
+        fig.savefig(path, dpi=preset["dpi"], bbox_inches="tight", pad_inches=0.04, facecolor="white")
+    finally:
+        plt.close(fig)
 
 
 def publication_figure_paths(folder, stem):
@@ -5431,25 +5721,28 @@ def plot_engineering_strain(gdf, path, title, preset_name="publication"):
     normal_mask = (~rejected_mask) & (~adaptive_mask) & strain.notna()
 
     fig, ax, preset = create_plot_figure(preset_name)
-    ax.plot(frame, strain, color=PLOT_COLOR_CYCLE[0], linewidth=preset["line_width"], alpha=0.72)
-    ax.scatter(frame[normal_mask], strain[normal_mask], color=PLOT_COLOR_CYCLE[0], s=preset["marker_size"], label="Accepted")
+    try:
+        ax.plot(frame, strain, color=PLOT_COLOR_CYCLE[0], linewidth=preset["line_width"], alpha=0.72)
+        ax.scatter(frame[normal_mask], strain[normal_mask], color=PLOT_COLOR_CYCLE[0], s=preset["marker_size"], label="Accepted")
 
-    if adaptive_mask.any():
-        ax.scatter(frame[adaptive_mask], strain[adaptive_mask], color="#E69F00", s=preset["marker_size"] * 1.35, label="Adaptive")
+        if adaptive_mask.any():
+            ax.scatter(frame[adaptive_mask], strain[adaptive_mask], color="#E69F00", s=preset["marker_size"] * 1.35, label="Adaptive")
 
-    if rejected_mask.any():
-        finite_strain = strain[np.isfinite(strain)]
-        if len(finite_strain) > 0:
-            ymin = float(finite_strain.min())
-            ymax = float(finite_strain.max())
-            span = ymax - ymin if ymax > ymin else max(abs(ymax), 1e-6)
-            rejected_y = np.full(int(rejected_mask.sum()), ymin - 0.08 * span)
-        else:
-            rejected_y = np.zeros(int(rejected_mask.sum()))
-        ax.scatter(frame[rejected_mask], rejected_y, color="#CC3311", marker="x", s=preset["marker_size"] * 1.75, label="Rejected/NaN")
+        if rejected_mask.any():
+            finite_strain = strain[np.isfinite(strain)]
+            if len(finite_strain) > 0:
+                ymin = float(finite_strain.min())
+                ymax = float(finite_strain.max())
+                span = ymax - ymin if ymax > ymin else max(abs(ymax), 1e-6)
+                rejected_y = np.full(int(rejected_mask.sum()), ymin - 0.08 * span)
+            else:
+                rejected_y = np.zeros(int(rejected_mask.sum()))
+            ax.scatter(frame[rejected_mask], rejected_y, color="#CC3311", marker="x", s=preset["marker_size"] * 1.75, label="Rejected/NaN")
 
-    style_publication_axes(ax, preset, "Frame", "Engineering strain (-)", title=title)
-    save_plot_figure(fig, path, preset_name)
+        style_publication_axes(ax, preset, "Frame", "Engineering strain (-)", title=title)
+        save_plot_figure(fig, path, preset_name)
+    finally:
+        plt.close(fig)
 
 
 def plot_all_groups_engineering_strain(df, groups, path, preset_name="publication"):
@@ -5457,42 +5750,46 @@ def plot_all_groups_engineering_strain(df, groups, path, preset_name="publicatio
     path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax, preset = create_plot_figure(preset_name)
-    for group in groups:
-        gname = group["name"]
-        gdf = df[df["group"] == gname]
-        if gdf.empty:
-            continue
-        ax.plot(
-            gdf["frame_global_1based"],
-            gdf["engineering_strain"],
-            linewidth=max(preset["line_width"] * 0.8, 0.8),
-            alpha=0.56,
-            label=gname,
-        )
+    try:
+        for group in groups:
+            gname = group["name"]
+            gdf = df[df["group"] == gname]
+            if gdf.empty:
+                continue
+            table = build_core_strain_table(gdf)
+            ax.plot(
+                table["Frame"].astype(float),
+                table["EngineeringStrain"].astype(float),
+                linewidth=max(preset["line_width"] * 0.8, 0.8),
+                alpha=0.56,
+                label=gname,
+            )
 
-    mean_table = build_mean_strain_table(df, groups)
-    if not mean_table.empty:
-        frame = mean_table["Frame"].astype(float)
-        for col in [c for c in mean_table.columns if c.startswith("MeanEngineeringStrain_")]:
-            key = col.replace("MeanEngineeringStrain_", "", 1)
-            mean = pd.to_numeric(mean_table[col], errors="coerce").astype(float)
-            std_col = f"StdEngineeringStrain_{key}"
-            line = ax.plot(frame, mean, linewidth=preset["line_width"] * 1.8, label=f"Mean {key}")[0]
-            if std_col in mean_table.columns:
-                std = pd.to_numeric(mean_table[std_col], errors="coerce").astype(float)
-                finite = mean.notna() & std.notna() & np.isfinite(mean) & np.isfinite(std)
-                if finite.any():
-                    ax.fill_between(
-                        frame[finite],
-                        mean[finite] - std[finite],
-                        mean[finite] + std[finite],
-                        color=line.get_color(),
-                        alpha=0.13,
-                        linewidth=0,
-                    )
+        mean_table = build_mean_strain_table(df, groups)
+        if not mean_table.empty:
+            frame = mean_table["Frame"].astype(float)
+            for col in [c for c in mean_table.columns if c.startswith("MeanEngineeringStrain_")]:
+                key = col.replace("MeanEngineeringStrain_", "", 1)
+                mean = pd.to_numeric(mean_table[col], errors="coerce").astype(float)
+                std_col = f"StdEngineeringStrain_{key}"
+                line = ax.plot(frame, mean, linewidth=preset["line_width"] * 1.8, label=f"Mean {key}")[0]
+                if std_col in mean_table.columns:
+                    std = pd.to_numeric(mean_table[std_col], errors="coerce").astype(float)
+                    finite = mean.notna() & std.notna() & np.isfinite(mean) & np.isfinite(std)
+                    if finite.any():
+                        ax.fill_between(
+                            frame[finite],
+                            mean[finite] - std[finite],
+                            mean[finite] + std[finite],
+                            color=line.get_color(),
+                            alpha=0.13,
+                            linewidth=0,
+                        )
 
-    style_publication_axes(ax, preset, "Frame", "Engineering strain (-)", title="Engineering strain - all ROI groups")
-    save_plot_figure(fig, path, preset_name)
+        style_publication_axes(ax, preset, "Frame", "Engineering strain (-)", title="Engineering strain - all ROI groups")
+        save_plot_figure(fig, path, preset_name)
+    finally:
+        plt.close(fig)
 
 
 def plot_poisson_ratio(df, groups, path, preset_name="publication"):
@@ -5505,35 +5802,42 @@ def plot_poisson_ratio(df, groups, path, preset_name="publication"):
     valid = ratio.notna() & np.isfinite(ratio)
 
     fig, ax, preset = create_plot_figure(preset_name)
-    ax.plot(frame, ratio, color="#009E73", linewidth=preset["line_width"], alpha=0.78)
-    if valid.any():
-        ax.scatter(frame[valid], ratio[valid], color="#009E73", s=preset["marker_size"], label="Valid")
-    invalid = ~valid
-    if invalid.any():
-        finite_ratio = ratio[valid]
-        if len(finite_ratio) > 0:
-            ymin = float(finite_ratio.min())
-            ymax = float(finite_ratio.max())
-            span = max(ymax - ymin, 1e-6)
-            invalid_y = np.full(int(invalid.sum()), ymin - 0.08 * span)
-        else:
-            invalid_y = np.zeros(int(invalid.sum()))
-        ax.scatter(frame[invalid], invalid_y, color="#CC3311", marker="x", s=preset["marker_size"] * 1.75, label="NaN")
+    try:
+        ax.plot(frame, ratio, color="#009E73", linewidth=preset["line_width"], alpha=0.78)
+        if valid.any():
+            ax.scatter(frame[valid], ratio[valid], color="#009E73", s=preset["marker_size"], label="Valid")
+        invalid = ~valid
+        if invalid.any():
+            finite_ratio = ratio[valid]
+            if len(finite_ratio) > 0:
+                ymin = float(finite_ratio.min())
+                ymax = float(finite_ratio.max())
+                span = max(ymax - ymin, 1e-6)
+                invalid_y = np.full(int(invalid.sum()), ymin - 0.08 * span)
+            else:
+                invalid_y = np.zeros(int(invalid.sum()))
+            ax.scatter(frame[invalid], invalid_y, color="#CC3311", marker="x", s=preset["marker_size"] * 1.75, label="NaN")
 
-    style_publication_axes(ax, preset, "Frame", "Poisson ratio (-)", title="Poisson ratio")
-    save_plot_figure(fig, path, preset_name)
+        style_publication_axes(ax, preset, "Frame", "Poisson ratio (-)", title="Poisson ratio")
+        save_plot_figure(fig, path, preset_name)
+    finally:
+        plt.close(fig)
 
 
 def plot_correlation_scores(gdf, path, group_name, hard_corr, soft_corr, preset_name="publication"):
     fig, ax, preset = create_plot_figure(preset_name)
-    frame = gdf["frame_global_1based"]
-    ax.plot(frame, gdf["corr_score_roi1"], marker="o", markersize=4, linewidth=preset["line_width"], label="ROI 1")
-    ax.plot(frame, gdf["corr_score_roi2"], marker="s", markersize=4, linewidth=preset["line_width"], label="ROI 2")
-    ax.axhline(hard_corr, color="#CC3311", linestyle="--", linewidth=preset["line_width"] * 0.9, label="strict threshold")
-    ax.axhline(soft_corr, color="#E69F00", linestyle=":", linewidth=preset["line_width"] * 0.9, label="weak threshold")
-    ax.set_ylim(-0.05, 1.05)
-    style_publication_axes(ax, preset, "Frame", "Normalized correlation score (-)", title=f"Correlation scores - {group_name}")
-    save_plot_figure(fig, path, preset_name)
+    try:
+        frame_col = _frame_column(gdf)
+        frame = gdf[frame_col]
+        ax.plot(frame, gdf["corr_score_roi1"], marker="o", markersize=4, linewidth=preset["line_width"], label="ROI 1")
+        ax.plot(frame, gdf["corr_score_roi2"], marker="s", markersize=4, linewidth=preset["line_width"], label="ROI 2")
+        ax.axhline(hard_corr, color="#CC3311", linestyle="--", linewidth=preset["line_width"] * 0.9, label="strict threshold")
+        ax.axhline(soft_corr, color="#E69F00", linestyle=":", linewidth=preset["line_width"] * 0.9, label="weak threshold")
+        ax.set_ylim(-0.05, 1.05)
+        style_publication_axes(ax, preset, "Frame", "Normalized correlation score (-)", title=f"Correlation scores - {group_name}")
+        save_plot_figure(fig, path, preset_name)
+    finally:
+        plt.close(fig)
 
 
 def build_qc_summary(df):
@@ -5542,7 +5846,6 @@ def build_qc_summary(df):
 
     for gname, sub in df.groupby("group", sort=False):
         frames = int(len(sub))
-        accepted = sub["accepted"].astype(bool) if "accepted" in sub.columns else pd.Series([True] * frames, index=sub.index)
         eng = pd.to_numeric(sub["engineering_strain"], errors="coerce")
         strain_valid = _strain_valid_mask(sub)
         rejected_mask = pd.Series(
@@ -5763,6 +6066,42 @@ def _assert_no_reparse_components(path, *, allow_missing_leaf=True):
             return
 
 
+def _win32_lock_file(handle, *, lock: bool) -> None:
+    import ctypes
+    import msvcrt
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", ctypes.c_uint32),
+            ("OffsetHigh", ctypes.c_uint32),
+            ("hEvent", ctypes.c_void_p),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    osf_handle = ctypes.c_void_p(msvcrt.get_osfhandle(handle.fileno()))
+    overlapped = _Overlapped()
+    if lock:
+        lock_fn = kernel32.LockFileEx
+        lock_fn.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(_Overlapped),
+        ]
+        lock_fn.restype = ctypes.c_int
+        ok = lock_fn(osf_handle, 0x00000002, 0, 1, 0, ctypes.byref(overlapped))
+    else:
+        unlock_fn = kernel32.UnlockFileEx
+        unlock_fn.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(_Overlapped),
+        ]
+        unlock_fn.restype = ctypes.c_int
+        ok = unlock_fn(osf_handle, 0, 1, 0, ctypes.byref(overlapped))
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 @contextmanager
 def _operation_os_lock(output_root):
     """Acquire an OS-level cooperative lock for one output root."""
@@ -5773,28 +6112,28 @@ def _operation_os_lock(output_root):
     lock_path = _operation_lock_path(output_root)
     _assert_no_reparse_components(lock_path, allow_missing_leaf=True)
     handle = lock_path.open("a+b")
+    locked = False
     try:
         if os.name == "nt":
-            import msvcrt
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            _win32_lock_file(handle, lock=True)
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
         yield lock_path
     finally:
         try:
-            if os.name == "nt":
-                import msvcrt
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if locked:
+                if os.name == "nt":
+                    _win32_lock_file(handle, lock=False)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 
@@ -5885,9 +6224,9 @@ def _is_ezdic_output_pattern(relative, mode=None):
         if relative.startswith("core/"):
             return bool(re.fullmatch(r"core/(?:strain|engineering_strain|poisson_ratio)(?:_[\w.\-]+)?\.(?:txt|png)", relative, flags=re.IGNORECASE)) or relative == f"core/{ORIGIN_OPJU_FILENAME}"
         if relative.startswith("optional/"):
-            return bool(re.fullmatch(r"optional/(?:publication_figures|correlation_plots)/[\w.\-/]+\.(?:png|tiff|pdf|svg|eps)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/full_csv/(?:strain_results_all_groups\.csv|per_group_results/strain_results_[\w.\-]+\.csv)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/parameters/(?:tracking_parameters|acceptance_summary)\.txt", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/overlays/[\w.\-]+/tracked_\d{5}\.png", relative, flags=re.IGNORECASE))
+            return bool(re.fullmatch(r"optional/(?:publication_figures|correlation_plots)/[\w.\-/]+\.(?:png|tiff|pdf|svg|eps)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/full_csv/(?:strain_results_all_groups\.csv|per_group_results/strain_results_[\w.\-]+\.csv)", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/parameters/(?:tracking_parameters|acceptance_summary)\.txt", relative, flags=re.IGNORECASE)) or bool(re.fullmatch(r"optional/overlays/[\w.\-]+/tracked_\d{5,}\.png", relative, flags=re.IGNORECASE))
     if mode in (None, ANALYSIS_MODE_FULLFIELD) and relative.startswith("dic/"):
-        return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
+        return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4,}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
     return False
 
 
@@ -6352,6 +6691,7 @@ class RunTransaction:
         self._sealed_manifest = None
         self._sealed_manifest_path = None
         self._failure_record = None
+        self._aborted = False
         self._previous_owned = _current_owned_output_paths(self.output_root, mode=self.mode)
         self.preserved_output_paths = _preserved_unowned_output_paths(self.output_root, self._previous_owned)
 
@@ -6393,6 +6733,9 @@ class RunTransaction:
         return target
 
     def _retain_failure(self, exc):
+        if self._aborted:
+            return self._failure_record
+        self._aborted = True
         self.run_id = _validate_run_id(self.run_id)
         if self.staging_dir is None or not self.staging_dir.exists():
             return None
@@ -6496,6 +6839,7 @@ class RunTransaction:
             raise RuntimeError("transaction must be sealed before commit")
         archived_moves = []
         published_moves = []
+        archive_dir = None
         os_lock = _operation_os_lock(self.output_root)
         try:
             os_lock.__enter__()
@@ -6554,6 +6898,12 @@ class RunTransaction:
             except Exception as exc:
                 rollback_errors = _rollback_moves(published_moves, root=self.output_root)
                 rollback_errors.extend(_rollback_moves(archived_moves, root=self.output_root))
+                if archive_dir is not None and archive_dir.exists():
+                    _remove_empty_directories(archive_dir)
+                    try:
+                        (self.output_root / RUN_PREVIOUS_DIRNAME).rmdir()
+                    except OSError:
+                        pass
                 failed = self._retain_failure(exc)
                 try:
                     os_lock.__exit__(type(exc), exc, exc.__traceback__)
@@ -6564,6 +6914,8 @@ class RunTransaction:
                     message += "；回滚失败：" + " | ".join(rollback_errors)
                 if failed is not None:
                     message += f"；失败证据保留于 {failed}"
+                if isinstance(exc, CoreError):
+                    raise CoreError(exc.code, {**exc.details, "message": message}) from exc
                 raise RuntimeError(message) from exc
 
     def abort(self, exc):
@@ -6723,14 +7075,18 @@ def _prepare_roi_groups(settings, reference8):
 
 
 def _setting_value(settings, name, *, section=None, aliases=(), default=None):
-    if name in settings:
+    if name in settings and settings[name] is not None:
         return settings[name]
     for alias in aliases:
-        if alias in settings:
+        if alias in settings and settings[alias] is not None:
             return settings[alias]
     nested = settings.get(section) if section else None
-    if isinstance(nested, Mapping) and name in nested:
-        return nested[name]
+    if isinstance(nested, Mapping):
+        if name in nested and nested[name] is not None:
+            return nested[name]
+        for alias in aliases:
+            if alias in nested and nested[alias] is not None:
+                return nested[alias]
     return default
 
 
@@ -7027,6 +7383,7 @@ def _export_extensometer_artifacts(df, groups, summary, settings, stage_root, *,
 def _build_1d_gate(df, groups, settings, optional_failures=None):
     min_frames = int(_setting_value(settings, "min_valid_frames", section="quality", aliases=("min_strain_points",), default=1))
     min_ratio = float(_setting_value(settings, "min_strain_valid_ratio", section="quality", aliases=("min_strain_valid_fraction",), default=0.0))
+    min_frame_ratio = float(_setting_value(settings, "min_valid_frame_ratio", section="quality", default=0.0))
     reference_frame = int(settings.get("reference_frame_1based", settings.get("start_frame_1based", int(settings.get("start_idx", 0)) + 1)))
     details = {}
     reasons = []
@@ -7040,15 +7397,38 @@ def _build_1d_gate(df, groups, settings, optional_failures=None):
         count = len(sub)
         valid_count = int(accepted.sum())
         strain_count = int(strain_valid.sum())
+        valid_frame_ratio = float(valid_count / count) if count else 0.0
         ratio = float(strain_count / count) if count else 0.0
-        passed = bool(valid_count >= min_frames and strain_count >= min_frames and ratio >= min_ratio)
+        passed = bool(
+            valid_count >= min_frames
+            and strain_count >= min_frames
+            and valid_frame_ratio >= min_frame_ratio
+            and ratio >= min_ratio
+        )
         if not passed:
             reasons.append(f"{group['name']}:validity_gate")
-        details[group["name"]] = {"frames": count, "valid_frames": valid_count, "strain_valid_frames": strain_count, "strain_valid_ratio": ratio, "passed": passed}
+        details[group["name"]] = {
+            "frames": count,
+            "valid_frames": valid_count,
+            "valid_frame_ratio": valid_frame_ratio,
+            "strain_valid_frames": strain_count,
+            "strain_valid_ratio": ratio,
+            "passed": passed,
+        }
     required_optional_failures = [item for item in (optional_failures or []) if item.get("required_for_scientific_gate")]
     if required_optional_failures:
         reasons.append("required_optional_export_failed")
-    return {"scientific_ok": not reasons, "reasons": reasons, "groups": details, "required_optional_failures": required_optional_failures, "thresholds": {"min_valid_frames": min_frames, "min_strain_valid_ratio": min_ratio}}
+    return {
+        "scientific_ok": not reasons,
+        "reasons": reasons,
+        "groups": details,
+        "required_optional_failures": required_optional_failures,
+        "thresholds": {
+            "min_valid_frames": min_frames,
+            "min_valid_frame_ratio": min_frame_ratio,
+            "min_strain_valid_ratio": min_ratio,
+        },
+    }
 
 
 def _texture_preflight_record(groups, texture_thresholds, *, states=None, field_roi=None, field_metrics=None, field_code=None):
@@ -7154,17 +7534,17 @@ def run_extensometer_sequence(settings, progress_callback=None):
     transaction.create_staging()
     params = {
         "search_radius_base": int(_setting_value(settings, "search_radius_base", section="tracking", aliases=("search_radius_px",), default=180)),
-        "hard_corr": float(settings.get("hard_corr", (settings.get("quality") or {}).get("zncc_min", 0.55))),
+        "hard_corr": float(_setting_value(settings, "hard_corr", section="tracking", default=_setting_value(settings, "zncc_min", section="quality", default=0.55))),
         "soft_corr": float(_setting_value(settings, "soft_corr", section="tracking", default=0.35)),
         "enable_adaptive": bool(_setting_value(settings, "enable_adaptive", section="tracking", default=True)),
         "use_prev_frame_template": bool(_setting_value(settings, "use_prev_frame_template", section="tracking", default=False)),
         "template_alpha": float(_setting_value(settings, "template_alpha", section="tracking", default=0.70)),
-        "max_frame_jump": _setting_value(settings, "max_frame_jump", section="tracking", default=None),
+        "max_frame_jump": _setting_value(settings, "max_frame_jump", section="tracking", aliases=("max_frame_jump_px",), default=None),
         "enable_fb_check": bool(_setting_value(settings, "enable_fb_check", section="quality", default=True)),
         "fb_tolerance": float(_setting_value(settings, "fb_tolerance", section="quality", aliases=("fb_tolerance_px",), default=12.0)),
         "pixel_size_mm": _setting_value(settings, "pixel_size_mm", section="tracking", default=None),
         "peak_margin_min": float(_setting_value(settings, "peak_margin_min", section="quality", aliases=("second_peak_margin_min",), default=DEFAULT_PEAK_MARGIN_MIN)),
-        "peak_ratio_min": float(_setting_value(settings, "peak_ratio_min", section="quality", default=DEFAULT_PEAK_RATIO_MIN)),
+        "peak_ratio_min": float(_setting_value(settings, "peak_ratio_min", section="quality", aliases=("best_to_second_peak_ratio_min",), default=DEFAULT_PEAK_RATIO_MIN)),
     }
     all_rows = []
     staged_overlays = {group["name"]: [] for group in groups}
@@ -7209,9 +7589,9 @@ def run_extensometer_sequence(settings, progress_callback=None):
         required_outputs = [_portable_relative(path, transaction.stage_root) for path in written]
         if not gate["scientific_ok"]:
             manifest_extra["warnings"].append("scientific_gate_failed")
-            _, failed_manifest = transaction.seal(status="scientific_gate_failed", scientific_ok=False, manifest_extra=manifest_extra, required_outputs=required_outputs, code_paths=_code_paths_for_settings(settings))
+            sealed_manifest_path, _ = transaction.seal(status="scientific_gate_failed", scientific_ok=False, manifest_extra=manifest_extra, required_outputs=required_outputs, code_paths=_code_paths_for_settings(settings))
             failed_dir = transaction.abort(CoreError("SCIENTIFIC_GATE_FAILED", {"gate": gate, "message": "scientific validity gate did not pass"}))
-            manifest_path = (failed_dir / RUN_MANIFEST_FILENAME) if failed_dir is not None else failed_manifest
+            manifest_path = (failed_dir / RUN_MANIFEST_FILENAME) if failed_dir is not None else sealed_manifest_path
             failed_verification = verify_run_manifest(manifest_path)
             return {
                 "status": "scientific_gate_failed",
@@ -7273,9 +7653,9 @@ def _fullfield_settings(settings):
         "conv_tol": float(_setting_value(settings, "conv_tol", section="solver", default=solver.get("tolerance", 1e-3))),
         "zncc_min": float(_setting_value(settings, "zncc_min", aliases=("dic_zncc_min",), section="quality", default=quality.get("zncc_min", 0.75))),
         "peak_margin_min": float(_setting_value(settings, "peak_margin_min", section="quality", aliases=("second_peak_margin_min",), default=quality.get("second_peak_margin_min", DEFAULT_PEAK_MARGIN_MIN))),
-        "peak_ratio_min": float(_setting_value(settings, "peak_ratio_min", section="quality", default=ratio_min)),
+        "peak_ratio_min": float(_setting_value(settings, "peak_ratio_min", section="quality", aliases=("best_to_second_peak_ratio_min",), default=ratio_min)),
         "max_condition_number": float(_setting_value(settings, "max_condition_number", section="quality", default=quality.get("max_condition_number", DEFAULT_MAX_HESSIAN_CONDITION_NUMBER))),
-        "max_residual_rms": float(_setting_value(settings, "max_residual_rms", section="quality", default=quality.get("max_residual_rms", float("inf")))),
+        "max_residual_rms": float(_setting_value(settings, "max_residual_rms", section="quality", default=float("inf"))),
         "reject_nonconverged": bool(_setting_value(settings, "reject_nonconverged", section="quality", default=False)),
         "pyramid_levels": int(_setting_value(settings, "pyramid_levels", aliases=("levels", "dic_pyramid_levels"), section="pyramid", default=pyramid.get("levels", 1))),
         "pyramid_scale": float(_setting_value(settings, "pyramid_scale", aliases=("scale", "dic_pyramid_scale"), section="pyramid", default=pyramid.get("scale", 0.5))),
@@ -7399,6 +7779,8 @@ def run_fullfield_sequence(settings, progress_callback=None):
                     robust_strain=solver["robust_strain"], outlier_threshold_px=solver["outlier_threshold_px"],
                     initialization=solver["initialization"],
                 )
+            except CoreError as exc:
+                raise CoreError(exc.code, {**exc.details, "message": f"fullfield solver failed at frame {global_index + 1}: {exc}"}) from exc
             except Exception as exc:
                 raise RuntimeError(f"fullfield solver failed at frame {global_index + 1}: {exc}") from exc
             field = dict(field)
@@ -7476,7 +7858,10 @@ def run_fullfield_sequence(settings, progress_callback=None):
                     if missing:
                         raise CoreError("OUTPUT_MISSING", {"missing": missing, "message": "fullfield exporter reported a missing artifact"})
                 if output_options["overlays"]:
-                    overlay = overlay_dic_field_on_image(image8, field, component="Exx")
+                    overlay = overlay_dic_field_on_image(
+                        image8, field, component="Exx",
+                        options={"coordinate_frame": "deformed", "background": "none"},
+                    )
                     write_image_checked(transaction.stage_root / "dic" / f"{stem}_overlay.png", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
                 fields.append(field)
                 last_field = field
@@ -7551,9 +7936,9 @@ def run_fullfield_sequence(settings, progress_callback=None):
         }
         required_outputs = [_portable_relative(path, transaction.stage_root) for path in _iter_files(transaction.stage_root)]
         if not gate["scientific_ok"]:
-            _, failed_manifest = transaction.seal(status=status, scientific_ok=False, manifest_extra=manifest_extra, required_outputs=required_outputs, code_paths=_code_paths_for_settings(settings))
+            sealed_manifest_path, _ = transaction.seal(status=status, scientific_ok=False, manifest_extra=manifest_extra, required_outputs=required_outputs, code_paths=_code_paths_for_settings(settings))
             failed_dir = transaction.abort(CoreError("SCIENTIFIC_GATE_FAILED", {"gate": gate, "message": "fullfield scientific validity gate did not pass"}))
-            manifest_path = (failed_dir / RUN_MANIFEST_FILENAME) if failed_dir is not None else failed_manifest
+            manifest_path = (failed_dir / RUN_MANIFEST_FILENAME) if failed_dir is not None else sealed_manifest_path
             failed_verification = verify_run_manifest(manifest_path)
             return {
                 "status": status,

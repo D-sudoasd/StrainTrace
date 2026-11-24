@@ -1,7 +1,5 @@
 """Scientific-state and provenance regression tests for the 1-D core."""
 
-import hashlib
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -195,3 +193,81 @@ def test_gui_methods_and_public_match_template_api_are_core_canonical():
     assert gui.track_extensometer_group_frame is core.track_extensometer_group_frame
     assert gui.match_template_candidate is core.match_template_candidate
     assert gui.match_template_candidate_diagnostic is core.match_template_candidate_diagnostic
+
+
+def test_zero_variance_frame_is_not_misclassified_as_ambiguous_peak():
+    reference = core.generate_synthetic_speckle(256, 256, seed=17)
+    blank = np.full((256, 256), 120.0, dtype=np.float32)
+    state = core.initialize_extensometer_group_state(reference, _group())
+    core.track_extensometer_group_frame(state, reference, 0, "ref", _params())
+    row, _ = core.track_extensometer_group_frame(state, blank, 1, "blank", _params())
+    assert row["accepted"] is False
+    assert row["tracking_status_code"] == "ZERO_VARIANCE"
+    assert row["peak_is_ambiguous_roi1"] is False
+    assert row["peak_is_ambiguous_roi2"] is False
+
+
+def test_permissive_peak_thresholds_are_not_overridden_by_defaults(monkeypatch):
+    reference = core.generate_synthetic_speckle(256, 256, seed=17)
+    deformed = core.warp_image_translation(reference, 1.0, 0.0)
+
+    def slightly_close_peak(_image, rect, _template, _radius, **_kwargs):
+        return {
+            "candidate_rect": (float(rect[0] + 1.0), float(rect[1]), rect[2], rect[3]),
+            "score": 0.90,
+            "best_peak": 0.90,
+            "second_peak": 0.89,
+            "peak_margin": 0.01,
+            "peak_ratio": 1.011,
+            "best_to_second_peak_ratio": 1.011,
+            "second_to_best_peak_ratio": 0.89 / 0.90,
+            "peak_is_ambiguous": True,
+            "reason": "peak_found",
+        }
+
+    monkeypatch.setattr(core, "match_template_candidate", slightly_close_peak)
+    state = core.initialize_extensometer_group_state(reference, _group())
+    core.track_extensometer_group_frame(state, reference, 0, "ref", _params(enable_fb_check=False))
+    row, _ = core.track_extensometer_group_frame(
+        state,
+        deformed,
+        1,
+        "def",
+        _params(enable_fb_check=False, peak_margin_min=0.0, peak_ratio_min=1.0),
+    )
+    assert row["accepted"] is True
+    assert row["peak_is_ambiguous_roi1"] is False
+    assert row["peak_is_ambiguous_roi2"] is False
+
+
+def test_adaptive_disabled_and_low_corr_report_correlation_below_threshold(monkeypatch):
+    reference = core.generate_synthetic_speckle(256, 256, seed=17)
+    deformed = core.warp_image_translation(reference, 1.0, 0.0)
+
+    def mid_score(_image, rect, _template, _radius, **_kwargs):
+        return {
+            "candidate_rect": (float(rect[0] + 1.0), float(rect[1]), rect[2], rect[3]),
+            "score": 0.45,
+            "best_peak": 0.45,
+            "second_peak": 0.10,
+            "peak_margin": 0.35,
+            "peak_ratio": 4.5,
+            "best_to_second_peak_ratio": 4.5,
+            "second_to_best_peak_ratio": 0.10 / 0.45,
+            "peak_is_ambiguous": False,
+            "reason": "peak_found",
+        }
+
+    monkeypatch.setattr(core, "match_template_candidate", mid_score)
+    monkeypatch.setattr(core, "forward_backward_error", lambda *_a, **_k: (99.0, 0.1))
+    state = core.initialize_extensometer_group_state(reference, _group())
+    core.track_extensometer_group_frame(state, reference, 0, "ref", _params())
+    row, _ = core.track_extensometer_group_frame(
+        state,
+        deformed,
+        1,
+        "def",
+        _params(enable_adaptive=False, hard_corr=0.55, soft_corr=0.35, enable_fb_check=True),
+    )
+    assert row["accepted"] is False
+    assert row["tracking_status_code"] == "CORRELATION_BELOW_THRESHOLD"

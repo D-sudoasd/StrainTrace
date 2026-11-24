@@ -22,8 +22,8 @@ from scipy.ndimage import gaussian_filter
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-import ezdic_core as current
-from benchmarks.necking_search_validation import (
+import ezdic_core as current  # noqa: E402
+from benchmarks.necking_search_validation import (  # noqa: E402
     ROI, SETTINGS, displacement_truth, make_case,
 )
 
@@ -84,6 +84,7 @@ def field_metrics(field, truth_u, truth_v, center=None):
 
 
 def compare(baseline, *, experimental_full_search=False):
+    cv2.setRNGSeed(0)
     rows = []
     cases = []
     for name in ("uniform_affine", "localized_shear_band"):
@@ -163,9 +164,11 @@ def main():
     parser.add_argument("--experimental-full-search", action="store_true",
                         help="Explicitly evaluate the unvalidated full-radius/secondary-peak research mode")
     args=parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(f"Use a new output path; refusing to overwrite existing report: {args.output}")
     result=compare(load_core(args.baseline_core.resolve()), experimental_full_search=args.experimental_full_search)
     args.output.parent.mkdir(parents=True,exist_ok=True)
-    with args.output.open("x",encoding="utf-8") as handle:
+    with args.output.open("x",encoding="utf-8",newline="\n") as handle:
         json.dump(result,handle,ensure_ascii=False,indent=2,allow_nan=False)
         handle.write("\n")
 

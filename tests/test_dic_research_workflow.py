@@ -206,3 +206,27 @@ def test_npz_and_all_strain_components_export_without_interpolated_measurements(
         np.testing.assert_array_equal(arrays['u_raw'],field['u_raw'])
         np.testing.assert_array_equal(arrays['strain_valid'],field['strain_valid'])
         assert arrays['metadata_json'].item()
+
+
+def test_overlay_defaults_to_deformed_frame_and_manual_color_limits_reject_none():
+    field = _display_field()
+    field['u'][:] = 25.0
+    field['display_options'] = {'coordinate_frame': 'reference', 'background': 'reference'}
+    image = np.full((80, 100), 120, dtype=np.uint8)
+    overlay = core.overlay_dic_field_on_image(image, field, 'Exx')
+    assert np.all(overlay[20, 20] == 120)
+    assert np.any(overlay[20, 70] != 120)
+
+    # Displaced points completely outside image bounds return unmodified base image.
+    field_out = _display_field()
+    field_out['u'][:] = 500.0
+    overlay_out = core.overlay_dic_field_on_image(image, field_out, 'Exx')
+    assert (overlay_out == 120).all()
+
+    with pytest.raises(ValueError, match='manual color mode'):
+        core.dic_color_limits(field, 'Exx', {'color_mode': 'manual', 'vmin': None, 'vmax': 1.0})
+
+
+def test_research_validation_analytic_pair_rejects_non_invertible_quadratic():
+    with pytest.raises(ValueError, match='not invertible'):
+        analytic_pair(a=0.0, b=0.1)

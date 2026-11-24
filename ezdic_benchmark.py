@@ -33,6 +33,7 @@ from benchmarks.synthetic_cases import (
     STEP,
     STRAIN_WINDOW,
     SUBSET_SIZE,
+    default_cases_path,
     locked_case_hash,
     load_locked_cases,
 )
@@ -51,7 +52,6 @@ LOCKED_GEOMETRY = {
     "locked_coordinates": [list(point) for point in LOCKED_COORDINATES],
 }
 locked_cases_hash = locked_case_hash
-locked_case_hash = locked_cases_hash
 
 
 def validate_cases_path(path: str | Path) -> None:
@@ -86,7 +86,7 @@ def _source_hash() -> str:
 
 def _core_provenance(core: Any | None) -> dict[str, Any]:
     try:
-        info = _code_provenance(core, Path(__file__).resolve().parent / "benchmarks" / "cases_v1.json")
+        info = _code_provenance(core, default_cases_path())
     except Exception:
         return {"module": "ezdic_core", "source_sha256": "unavailable", "version": "unavailable"}
     version = getattr(core, "APP_VERSION", None) or getattr(core, "__version__", None) or getattr(core, "VERSION", None) or "unknown"

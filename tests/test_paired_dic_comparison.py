@@ -379,3 +379,26 @@ def test_tied_negative_minimum_does_not_claim_unique_location(tmp_path):
     assert frame["common_domain_minima"]["strain_xy"]["straintrace"]["tied_point_count"] == 3
     assert frame["common_domain_minima"]["strain_xy"]["location_distance_px"] is None
     assert frame["native_roi_extrema_comparison"]["signed_minimum"]["strain_xy"]["location_distance_px"] is None
+
+
+def test_malformed_null_sections_bool_numbers_and_empty_quality_raise_value_error(tmp_path):
+    path, config = _fixture(tmp_path)
+
+    bad_sources = copy.deepcopy(config)
+    bad_sources["sources"] = None
+    _save(path, bad_sources)
+    with pytest.raises(ValueError, match="sources"):
+        compare(path, tmp_path / "out-sources")
+
+    bad_bool = copy.deepcopy(config)
+    bad_bool["sources"]["straintrace"]["parameters"]["subset_size_px"] = True
+    _save(path, bad_bool)
+    with pytest.raises(ValueError, match="boolean"):
+        compare(path, tmp_path / "out-bool")
+
+    empty_quality = copy.deepcopy(config)
+    empty_quality["sources"]["comparison"]["columns"].pop("quality", None)
+    empty_quality["sources"]["comparison"]["quality"] = {}
+    _save(path, empty_quality)
+    with pytest.raises(ValueError, match="quality definition requires"):
+        compare(path, tmp_path / "out-empty-q")
