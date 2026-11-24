@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 
-import numpy as np
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+from benchmarks._common import (  # noqa: E402
+    compact_vector_stats as stats,
+    sha256_file as digest,
+    write_json_lf,
+)
 
 
 def load_points(report_path, report):
@@ -44,14 +48,6 @@ def number(value):
 def displacement_error(row):
     return math.hypot(number(row["u_px"])-number(row["true_u_px"]),
                       number(row["v_px"])-number(row["true_v_px"]))
-
-
-def stats(values):
-    values = np.asarray(values, dtype=float)
-    finite = values[np.isfinite(values)]
-    return {"count": int(finite.size),
-            "rmse": float(np.sqrt(np.mean(finite**2))) if finite.size else None,
-            "max_abs": float(np.max(np.abs(finite))) if finite.size else None}
 
 
 def _parameter_difference(before, after, *, allow_experimental_policy_difference=False):
@@ -153,10 +149,7 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
             "scientific_reasons_before_after": [old["quality"]["scientific_reasons"], new["quality"]["scientific_reasons"]],
         }
         result["cases"][name] = record
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8", newline="\n") as stream:
-        json.dump(result, stream, indent=2, allow_nan=False)
-        stream.write("\n")
+    write_json_lf(output, result, exclusive=True, indent=2, allow_nan=False)
     return result
 
 

@@ -7,7 +7,6 @@ no independent case definitions or PASS/FAIL accounting.
 
 from __future__ import annotations
 
-import sys
 import copy
 from pathlib import Path
 from typing import Any
@@ -19,9 +18,7 @@ from benchmarks.run_benchmark import (
     BenchmarkIOError,
     REPORT_VERSION,
     _ambiguity_result_passes,
-    _code_provenance,
     _machine_ambiguity_code,
-    _module_hash,
     run_benchmark as _canonical_run_benchmark,
 )
 from benchmarks.synthetic_cases import (
@@ -33,7 +30,6 @@ from benchmarks.synthetic_cases import (
     STEP,
     STRAIN_WINDOW,
     SUBSET_SIZE,
-    default_cases_path,
     locked_case_hash,
     load_locked_cases,
 )
@@ -78,24 +74,6 @@ def run_benchmark(
     """Delegate historical calls to the canonical benchmark implementation."""
 
     return _canonical_run_benchmark(cases_path=cases_path, output_dir=output_dir, core_module=core_module)
-
-
-def _source_hash() -> str:
-    return _module_hash(sys.modules.get(__name__), "ezdic_benchmark")
-
-
-def _core_provenance(core: Any | None) -> dict[str, Any]:
-    try:
-        info = _code_provenance(core, default_cases_path())
-    except Exception:
-        return {"module": "ezdic_core", "source_sha256": "unavailable", "version": "unavailable"}
-    version = getattr(core, "APP_VERSION", None) or getattr(core, "__version__", None) or getattr(core, "VERSION", None) or "unknown"
-    return {"module": "ezdic_core", "source_sha256": info.get("core_source_sha256", "unavailable"), "version": str(version)}
-
-
-def _green_lagrange(F: Any, np: Any) -> tuple[float, float, float]:
-    tensor = 0.5 * (np.asarray(F, dtype=float).T @ np.asarray(F, dtype=float) - np.eye(2))
-    return float(tensor[0, 0]), float(tensor[1, 1]), float(tensor[0, 1])
 
 
 __all__ = [

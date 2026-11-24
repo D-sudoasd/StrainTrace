@@ -750,64 +750,43 @@ def _resolve_runtime_paths(normalized: Mapping[str, Any], core: Any) -> list[str
 
 
 def _resolve_code_paths(core_path: Path | None = None) -> list[Path]:
-    """Resolve the complete real source set for source and PyInstaller layouts.
+    """Resolve the complete real source set via :func:`ezdic_core.resolve_code_paths`."""
 
-    The release spec stores executable source copies below ``sources/`` while
-    keeping the schema at the bundle root.  A frozen module's ``__file__`` can
-    point into an archive, so resolution must be based on ``_MEIPASS`` and must
-    include every executable implementation used by a run.
-    """
-
-    module_path = Path(core_path).resolve() if core_path is not None else None
-    roots: list[Path] = []
     bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root:
-        roots.append(Path(bundle_root).resolve())
-    roots.append(Path(__file__).resolve().parent)
-    if module_path is not None and module_path.exists():
-        roots.append(module_path.parent)
-    seen_roots: set[str] = set()
-    for root in roots:
-        root_key = os.path.normcase(os.fspath(root))
-        if root_key in seen_roots:
-            continue
-        seen_roots.add(root_key)
-        candidates_sets = [
-            # Actual ezDIC.spec layout: source copies in ``sources/`` and the
-            # schema in the root ``schemas/`` directory.
-            [
-                root / "sources" / "ezdic_core.py",
-                root / "sources" / "ezdic_cli.py",
-                root / "sources" / "ezdic_benchmark.py",
-                root / "schemas" / "run_config_v1.json",
-            ],
-            # Compatibility layout used by older source/frozen fixtures where
-            # all data were copied below ``sources/``.
-            [
-                root / "sources" / "ezdic_core.py",
-                root / "sources" / "ezdic_cli.py",
-                root / "sources" / "ezdic_benchmark.py",
-                root / "sources" / "schemas" / "run_config_v1.json",
-            ],
-            [
-                root / "ezdic_core.py",
-                root / "ezdic_cli.py",
-                root / "ezdic_benchmark.py",
-                root / "schemas" / "run_config_v1.json",
-            ],
-        ]
-        for candidates in candidates_sets:
-            if all(path.is_file() for path in candidates):
-                return candidates
-        # A frozen runtime must never fall back to hashing only the importer or
-        # schema when one executable source copy is absent.  That would create
-        # a superficially valid but incomplete code fingerprint.
+    requested: list[Path] | None = None
+    if not bundle_root and core_path is not None and Path(core_path).name.casefold() == "ezdic_core.py":
+        requested = [Path(core_path)]
+    try:
+        core = _import_core()
+        resolve_root = Path(bundle_root).resolve() if bundle_root else None
+        if requested is not None and resolve_root is None:
+            try:
+                resolved_core = requested[0].resolve()
+            except OSError:
+                resolved_core = None
+            if resolved_core is not None and resolved_core.is_file():
+                runtime_root = core._runtime_code_root()
+                try:
+                    resolved_core.relative_to(runtime_root)
+                except ValueError:
+                    resolve_root = resolved_core.parent
+        return list(
+            core.resolve_code_paths(
+                paths=requested,
+                include_cli=True,
+                include_benchmark=True,
+                include_schema=True,
+                root=resolve_root,
+            )
+        )
+    except Exception as exc:
         if bundle_root:
             raise ConfigError(
                 "CODE_FILE_SET_INCOMPLETE",
                 "frozen bundle must contain ezdic_core.py, ezdic_cli.py, ezdic_benchmark.py, and run_config_v1.json",
                 "$.code_paths",
-            )
+            ) from exc
+    module_path = Path(core_path).resolve() if core_path is not None else None
     fallback = [
         module_path if module_path is not None and module_path.is_file() else Path(__file__).resolve(),
         Path(__file__).resolve(),
@@ -817,16 +796,16 @@ def _resolve_code_paths(core_path: Path | None = None) -> list[Path]:
 
 
 class _CoreSettings(dict[str, Any]):
-    """Runtime aliases with a canonical snapshot for core manifest sealing."""
+    """Runtime settings dict carrying an immutable canonical config snapshot."""
 
     def __init__(self, runtime: Mapping[str, Any], canonical: Mapping[str, Any]) -> None:
         super().__init__(runtime)
         self._canonical_snapshot = copy.deepcopy(dict(canonical))
+        self.setdefault("_canonical_config", copy.deepcopy(self._canonical_snapshot))
 
-    def items(self):  # type: ignore[override]
-        # ezdic_core._canonical_settings snapshots through items(). Keep
-        # private runtime aliases and _code_paths out of the config hash.
-        return self._canonical_snapshot.items()
+    @property
+    def canonical_config(self) -> dict[str, Any]:
+        return copy.deepcopy(self._canonical_snapshot)
 
     def copy(self) -> "_CoreSettings":
         return _CoreSettings(dict.copy(self), self._canonical_snapshot)

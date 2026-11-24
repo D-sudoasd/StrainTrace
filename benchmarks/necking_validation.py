@@ -8,8 +8,6 @@ only numerical inversion is monotone Newton iteration in the axial direction.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import inspect
 import json
 import platform
@@ -27,6 +25,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import ezdic_core as core  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    distribution_stats as _distribution,
+    load_core_module,
+    sha256_bytes,
+    sha256_file,
+    signed_error_stats as _stats,
+    write_json_lf,
+)
 from benchmarks.synthetic_cases import analytic_texture  # noqa: E402
 import benchmarks.synthetic_cases as synthetic_cases  # noqa: E402
 
@@ -79,27 +85,6 @@ def image_pair(params):
         raise ValueError("deformation is not invertible")
     rx = cx + (x - cx) / lateral_stretch
     return analytic_texture(x, y, seed=SEED), analytic_texture(rx, cy + ry, seed=SEED)
-
-
-def _stats(error):
-    error = np.asarray(error, dtype=float)
-    error = error[np.isfinite(error)]
-    if not error.size:
-        return {"count": 0, "bias": None, "rmse": None, "p95_abs": None, "max_abs": None}
-    return {"count": int(error.size), "bias": float(np.mean(error)),
-            "rmse": float(np.sqrt(np.mean(error**2))),
-            "p95_abs": float(np.percentile(np.abs(error), 95)),
-            "max_abs": float(np.max(np.abs(error)))}
-
-
-def _distribution(values):
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if not values.size:
-        return {"count": 0, "min": None, "median": None, "p95": None, "max": None}
-    return {"count": int(values.size), "min": float(np.min(values)),
-            "median": float(np.median(values)), "p95": float(np.percentile(values, 95)),
-            "max": float(np.max(values))}
 
 
 def _footprint_categories(X, Y, params, solver_params):
@@ -225,7 +210,7 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
     oracle_valid_eyy = oracle_valid_eyy[np.isfinite(oracle_valid_eyy)]
     # Maximum measured only among valid values and true maximum over the entire
     # eligible grid are reported separately so rejected peaks cannot look good.
-    result = {"input_sha256": hashlib.sha256(reference.tobytes() + target.tobytes()).hexdigest(),
+    result = {"input_sha256": sha256_bytes(reference.tobytes() + target.tobytes()),
             "roi_xywh_px": actual_roi, "local_unrelated_texture_mix": float(texture_mix),
             "target_blur_sigma_px": float(blur_sigma),
             "solver_parameters": settings, "independent_gaussian_image_noise_sigma_gray": noise_sigma,
@@ -274,17 +259,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--core-file", type=Path, help="Archived core for a matched comparison")
     args = parser.parse_args()
-    solver_core = core
-    if args.core_file:
-        spec = importlib.util.spec_from_file_location("archived_necking_core", args.core_file)
-        if spec is None or spec.loader is None:
-            raise ValueError(f"cannot load archived core: {args.core_file}")
-        solver_core = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(solver_core)
-    result = {"schema": "necking-validation-v1", "core_sha256": hashlib.sha256(
-                  Path(solver_core.__file__).read_bytes()).hexdigest(),
-              "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "texture_source_sha256": hashlib.sha256(Path(synthetic_cases.__file__).read_bytes()).hexdigest(),
+    solver_core = load_core_module(args.core_file, "archived_necking_core") if args.core_file else core
+    result = {"schema": "necking-validation-v1", "core_sha256": sha256_file(solver_core.__file__),
+              "benchmark_sha256": sha256_file(__file__),
+              "texture_source_sha256": sha256_file(synthetic_cases.__file__),
               "python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__,
               "shape": SHAPE, "roi": ROI, "texture_seed": SEED, "solver_parameters": PARAMETERS,
               "strain_definition": "Green-Lagrange Eyy in reference coordinates, dimensionless",
@@ -306,8 +284,7 @@ def main():
         result["cases"][name] = {"deformation": CASES["narrow_localization"],
                                   **run_case(CASES["narrow_localization"], solver_core,
                                              solver_params=settings, noise_sigma=noise)}
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    write_json_lf(args.output, result, indent=2, allow_nan=False)
     print(json.dumps(result, indent=2, allow_nan=False))
 
 

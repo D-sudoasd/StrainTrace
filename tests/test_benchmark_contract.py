@@ -229,13 +229,16 @@ def test_frozen_hash_resolution_covers_every_benchmark_input(tmp_path: Path, mon
         sources / "ezdic_core.py": b"core",
         sources / "ezdic_cli.py": b"cli",
         package_sources / "run_benchmark.py": b"runner",
+        package_sources / "_common.py": b"common",
         package_sources / "synthetic_cases.py": b"synthetic",
         bundle / "benchmarks" / "cases_v1.json": Path("benchmarks/cases_v1.json").read_bytes(),
     }
     for path, content in payloads.items():
         path.write_bytes(content)
+    common = importlib.import_module("benchmarks._common")
     monkeypatch.setattr(RUNNER.sys, "_MEIPASS", str(bundle), raising=False)
     monkeypatch.setattr(RUNNER, "__file__", str(bundle / "archive.pyz" / "run_benchmark.py"))
+    monkeypatch.setattr(common, "__file__", str(bundle / "archive.pyz" / "_common.py"))
     monkeypatch.setattr(CASES, "__file__", str(bundle / "archive.pyz" / "synthetic_cases.py"))
     monkeypatch.setattr(facade, "__file__", str(bundle / "archive.pyz" / "ezdic_benchmark.py"))
     monkeypatch.setattr(ezdic_core, "__file__", str(bundle / "archive.pyz" / "ezdic_core.py"))
@@ -247,6 +250,7 @@ def test_frozen_hash_resolution_covers_every_benchmark_input(tmp_path: Path, mon
     assert provenance["core_source_sha256"] == hashlib.sha256(b"core").hexdigest()
     assert provenance["cli_source_sha256"] == hashlib.sha256(b"cli").hexdigest()
     assert provenance["benchmark_runner_source_sha256"] == hashlib.sha256(b"runner").hexdigest()
+    assert provenance["benchmark_common_source_sha256"] == hashlib.sha256(b"common").hexdigest()
     assert provenance["synthetic_cases_source_sha256"] == hashlib.sha256(b"synthetic").hexdigest()
     assert provenance["cases_json_sha256"] == hashlib.sha256(payloads[bundle / "benchmarks" / "cases_v1.json"]).hexdigest()
 
@@ -351,3 +355,26 @@ def test_benchmark_cli_does_not_hijack_cases_flag_and_passes_local_init(tmp_path
     assert report["overall_pass"] is True
     assert seen_inits and all(value == "local" for value in seen_inits)
     assert report["app"]["version"] == ezdic_core.APP_VERSION
+
+
+def test_benchmarks_common_helpers_and_standalone_script_invocation(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from benchmarks import _common
+
+    assert _common.green_lagrange_components([[1.1, 0.0], [0.0, 1.0]]) == pytest.approx((0.105, 0.0, 0.0))
+    stats = _common.signed_error_stats([0.0, 1.0, float("nan")])
+    assert stats["count"] == 2 and stats["bias"] == pytest.approx(0.5)
+    json_out = _common.write_json_lf(tmp_path / "atomic.json", {"ok": True}, atomic=True)
+    assert b"\r\n" not in json_out.read_bytes()
+    assert _common.sha256_file(json_out) == _common.sha256_bytes(json_out.read_bytes())
+    csv_out = _common.write_csv_lf(tmp_path / "atomic.csv", ["a", "b"], [{"a": 1, "b": 2}], atomic=True)
+    assert b"\r\n" not in csv_out.read_bytes()
+    with pytest.raises(ValueError, match="cannot load core module"):
+        _common.load_core_module(tmp_path / "missing.py")
+
+    root = Path(__file__).resolve().parents[1]
+    for script in ("benchmarks/compare_dic_exports.py", "benchmarks/necking_search_validation.py", "benchmarks/plot_necking_study.py"):
+        res = subprocess.run([sys.executable, "-B", str(root / script), "--help"], capture_output=True, text=True, check=False)
+        assert res.returncode == 0, res.stderr

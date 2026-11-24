@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import json
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -16,6 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import ezdic_core as core  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    load_core_module,
+    set_deterministic_rng,
+    sha256_file,
+    write_json_lf,
+)
 
 ROI = (45, 30, 302, 975)
 SETTINGS = dict(subset_size=31, step=8, search_radius=16, strain_window=5,
@@ -43,20 +46,14 @@ def metrics(field):
 
 
 def validate(images: Path, output: Path, baseline_core: Path | None = None):
-    cv2.setRNGSeed(0)
+    set_deterministic_rng(0)
     paths = [images/name for name in ('ohtcfrp_00.tif', 'ohtcfrp_04.tif', 'ohtcfrp_08.tif', 'roi.tif')]
-    identities = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    identities = {path.name: sha256_file(path) for path in paths}
     reference = core.read_gray_image(paths[0])
     with Image.open(paths[-1]) as im:
         mask = np.asarray(im.convert('L')) >= 128
     output.mkdir(parents=True, exist_ok=True)
-    baseline = None
-    if baseline_core:
-        spec = importlib.util.spec_from_file_location('baseline_core', baseline_core)
-        if spec is None or spec.loader is None:
-            raise ValueError(f'cannot load baseline core: {baseline_core}')
-        baseline = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(baseline)
+    baseline = load_core_module(baseline_core, 'baseline_core') if baseline_core else None
     records = {}
     for path in paths[1:3]:
         target = core.read_gray_image(path)
@@ -89,10 +86,10 @@ def validate(images: Path, output: Path, baseline_core: Path | None = None):
         records[path.name] = record
         print(path.name, json.dumps(record, allow_nan=False), flush=True)
     report = {'source': 'https://ncorr.com/download/sample12.zip', 'input_sha256': identities,
-              'core_sha256': hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
+              'core_sha256': sha256_file(core.__file__),
               'settings': SETTINGS | {'after_reject_nonconverged': True}, 'roi_xywh': ROI, 'records': records,
               'boundary': 'Public experimental imagery; no independent strain ground truth or VIC-2D comparison.'}
-    (output/'validation.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n', encoding='utf-8', newline='\n')
+    write_json_lf(output/'validation.json', report, indent=2, allow_nan=False)
     return report
 
 

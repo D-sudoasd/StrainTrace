@@ -7,22 +7,23 @@ experimental calibration or a comparison with a commercial solver.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib.util
 import json
 import sys
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import ezdic_core as core  # noqa: E402
-
-
+from benchmarks._common import (  # noqa: E402
+    load_core_module,
+    set_deterministic_rng,
+    sha256_file,
+    write_json_lf,
+)
 from benchmarks.synthetic_cases import analytic_texture  # noqa: E402
 
 
@@ -50,7 +51,7 @@ def analytic_pair(shape=(144, 168), *, u=0.37, v=-0.24, a=0.0, b=0.0, c=0.0, noi
 
 
 def validation(strain_window=5):
-    cv2.setRNGSeed(0)
+    set_deterministic_rng(0)
     started = time.perf_counter()
     records = {}
     errors, failures, iterations = [], 0, []
@@ -102,7 +103,7 @@ def validation(strain_window=5):
             'elapsed_s': time.perf_counter() - tick,
         }
     records['elapsed_s'] = time.perf_counter() - started
-    records['code_sha256'] = hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest()
+    records['code_sha256'] = sha256_file(core.__file__)
     records['texture'] = 'continuous random Fourier texture; independent analytic inverse warp'
     records['parameters'] = {'subset_size_px':25,'step_px':8,'strain_window_poi':strain_window,
                              'strain_gauge_span_px':8*(strain_window-1),'smooth_sigma':0.0}
@@ -116,12 +117,7 @@ if __name__ == '__main__':
     parser.add_argument('--strain-window',type=int,default=5)
     args = parser.parse_args()
     if args.core_file:
-        spec = importlib.util.spec_from_file_location('archived_dic_core', args.core_file)
-        if spec is None or spec.loader is None:
-            raise ValueError(f'cannot load archived core: {args.core_file}')
-        core = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(core)
+        core = load_core_module(args.core_file, 'archived_dic_core')
     result = validation(args.strain_window)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n', encoding='utf-8', newline='\n')
+    write_json_lf(args.output, result, indent=2, allow_nan=False)
     print(json.dumps(result, indent=2, allow_nan=False))

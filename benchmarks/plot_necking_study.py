@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -12,6 +12,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks._common import sha256_file  # noqa: E402
 
 
 def _float(value):
@@ -29,7 +35,7 @@ def plot(report_path, output):
     if Path(artifact["filename"]).name != artifact["filename"]:
         raise ValueError("Expected adjacent pointwise CSV")
     points_path = report_path.parent / artifact["filename"]
-    if hashlib.sha256(points_path.read_bytes()).hexdigest() != artifact["sha256"]:
+    if sha256_file(points_path) != artifact["sha256"]:
         raise ValueError("Pointwise evidence does not match its recorded SHA-256")
     with points_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -126,7 +132,7 @@ def plot(report_path, output):
                 ax.grid(alpha=.18)
             fig.suptitle("Known-truth tests: strain-window bias and local tracking failures", fontsize=14)
             output.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(output, dpi=190, metadata={"Description": f"Source report SHA-256: {hashlib.sha256(report_path.read_bytes()).hexdigest()}"})
+            fig.savefig(output, dpi=190, metadata={"Description": f"Source report SHA-256: {sha256_file(report_path)}"})
         finally:
             plt.close(fig)
 

@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import contextlib
-import csv
 import hashlib
 import importlib
-import json
 import math
 import platform
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from ._common import (
+    green_lagrange_components,
+    sha256_file as _common_sha256_file,
+    write_csv_lf,
+    write_json_lf,
+    write_json_line as _write_json_line,
+)
 
 from .synthetic_cases import (
     CASE_DOCUMENT_VERSION,
@@ -177,14 +183,10 @@ def _json_safe(value: Any) -> Any:
 
 
 def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        return _common_sha256_file(path)
     except OSError as exc:
         raise BenchmarkIOError(f"cannot hash benchmark artifact: {path}: {exc}") from exc
-    return digest.hexdigest()
 
 
 def _runtime_root() -> Path:
@@ -220,6 +222,8 @@ def _module_hash(module: Any | None, module_name: str, *, package_name: str | No
 def _code_provenance(core: Any | None, cases_path: Path | None = None) -> dict[str, Any]:
     runner = sys.modules.get(__name__)
     runner_hash = _module_hash(runner, "run_benchmark", package_name="benchmarks")
+    common = importlib.import_module("benchmarks._common")
+    common_hash = _module_hash(common, "_common", package_name="benchmarks")
     synthetic = importlib.import_module("benchmarks.synthetic_cases")
     synthetic_hash = _module_hash(synthetic, "synthetic_cases", package_name="benchmarks")
     cases_path = default_cases_path() if cases_path is None else Path(cases_path)
@@ -242,6 +246,7 @@ def _code_provenance(core: Any | None, cases_path: Path | None = None) -> dict[s
         "module": "benchmarks.run_benchmark",
         "source_sha256": runner_hash,
         "benchmark_runner_source_sha256": runner_hash,
+        "benchmark_common_source_sha256": common_hash,
         "benchmark_source_sha256": facade_hash,
         "synthetic_cases_source_sha256": synthetic_hash,
         "cases_json_sha256": cases_hash,
@@ -476,13 +481,9 @@ def _case_hash(case: Mapping[str, Any]) -> str:
 
 
 def _oracle_strain(case: Mapping[str, Any]) -> tuple[float, float, float]:
-    import numpy as np
-
     if case["kind"] != "affine":
         return 0.0, 0.0, 0.0
-    F = np.asarray(case["F"], dtype=float).reshape(2, 2)
-    E = 0.5 * (F.T @ F - np.eye(2))
-    return float(E[0, 0]), float(E[1, 1]), float(E[0, 1])
+    return green_lagrange_components(case["F"])
 
 
 def _fit_affine(raw_u: Any, raw_v: Any, valid: Any, coordinates: Any) -> dict[str, Any]:
@@ -821,25 +822,14 @@ def _csv_value(value: Any) -> Any:
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     try:
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(_CSV_FIELDS), extrasaction="ignore", lineterminator="\n")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({field: _csv_value(row.get(field)) for field in _CSV_FIELDS})
+        write_csv_lf(
+            path,
+            _CSV_FIELDS,
+            ({field: _csv_value(row.get(field)) for field in _CSV_FIELDS} for row in rows),
+            extrasaction="ignore",
+        )
     except OSError as exc:
         raise BenchmarkIOError(f"cannot write benchmark CSV: {path}: {exc}") from exc
-
-
-def _stream_supports_utf8(stream: Any) -> bool:
-    encoding = getattr(stream, "encoding", None)
-    if not encoding:
-        return False
-    return str(encoding).lower().replace("_", "-") in {"utf-8", "utf8", "utf-8-sig"}
-
-
-def _write_json_line(stream: Any, value: Any) -> None:
-    ensure_ascii = not _stream_supports_utf8(stream)
-    stream.write(json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
 
 
 def run_benchmark(
@@ -1091,6 +1081,7 @@ def run_benchmark(
         )
         provenance = _code_provenance(core, selected_cases_path)
         provenance_keys = (
+            "benchmark_common_source_sha256",
             "synthetic_cases_source_sha256",
             "cases_json_sha256",
             "benchmark_runner_source_sha256",
@@ -1156,7 +1147,14 @@ def run_benchmark(
             report["provenance_failure"] = "CODE_PROVENANCE_UNAVAILABLE"
         safe_report = _json_safe(report)
         try:
-            (output / "benchmark_report.json").write_text(canonical_json(safe_report) + "\n", encoding="utf-8", newline="\n")
+            write_json_lf(
+                output / "benchmark_report.json",
+                safe_report,
+                indent=None,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
         except OSError as exc:
             raise BenchmarkIOError(f"cannot write benchmark report: {output / 'benchmark_report.json'}: {exc}") from exc
         return safe_report

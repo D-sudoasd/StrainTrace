@@ -433,8 +433,60 @@ def test_core_settings_copy_preserves_canonical_snapshot(tmp_path: Path) -> None
     settings = ezdic_cli.build_core_settings(normalized, StubCore)
     cloned = settings.copy()
     assert isinstance(cloned, ezdic_cli._CoreSettings)
+    assert list(settings) == list(settings.keys()) == [k for k, _ in settings.items()]
+    assert len(settings) == len(list(settings.items()))
+    assert list(cloned) == list(cloned.keys()) == [k for k, _ in cloned.items()]
     assert dict(cloned.items()) == dict(settings.items())
+    assert cloned.canonical_config == normalized
     assert ezdic_cli.config_hash(cloned) == ezdic_cli.config_hash(normalized)
+
+
+def test_resolve_code_paths_fails_closed_when_frozen_bundle_is_incomplete(tmp_path: Path, monkeypatch) -> None:
+    bundle = tmp_path / "_MEI"
+    (bundle / "sources").mkdir(parents=True)
+    (bundle / "sources" / "ezdic_core.py").write_text("# core\n", encoding="utf-8")
+    monkeypatch.setattr(ezdic_cli.sys, "_MEIPASS", str(bundle), raising=False)
+    with pytest.raises(ezdic_cli.ConfigError) as exc:
+        ezdic_cli._resolve_code_paths(bundle / "archive.pyz" / "ezdic_core.py")
+    assert exc.value.code == "CODE_FILE_SET_INCOMPLETE"
+
+
+def test_resolve_code_paths_handles_frozen_external_core_path_and_custom_checkout(tmp_path: Path, monkeypatch) -> None:
+    import ezdic_core
+
+    bundle = tmp_path / "_MEI_full"
+    (bundle / "sources").mkdir(parents=True)
+    (bundle / "schemas").mkdir(parents=True)
+    for name in ("ezdic_core.py", "ezdic_cli.py", "ezdic_benchmark.py"):
+        (bundle / "sources" / name).write_text(f"# {name}\n", encoding="utf-8")
+    (bundle / "schemas" / "run_config_v1.json").write_text("{}\n", encoding="utf-8")
+
+    # Frozen bundle with an external real core_path must resolve inside _MEIPASS.
+    monkeypatch.setattr(ezdic_cli.sys, "_MEIPASS", str(bundle), raising=False)
+    frozen_paths = ezdic_cli._resolve_code_paths(Path(ezdic_core.__file__).resolve())
+    assert [p.name for p in frozen_paths] == [
+        "ezdic_core.py",
+        "ezdic_cli.py",
+        "ezdic_benchmark.py",
+        "run_config_v1.json",
+    ]
+    assert all(bundle.resolve() in p.resolve().parents for p in frozen_paths)
+
+    # Non-frozen custom checkout root must resolve all 4 files inside that checkout.
+    monkeypatch.delattr(ezdic_cli.sys, "_MEIPASS", raising=False)
+    checkout = tmp_path / "alt_checkout"
+    (checkout / "schemas").mkdir(parents=True)
+    for name in ("ezdic_core.py", "ezdic_cli.py", "ezdic_benchmark.py"):
+        (checkout / name).write_text(f"# alt {name}\n", encoding="utf-8")
+    (checkout / "schemas" / "run_config_v1.json").write_text("{}\n", encoding="utf-8")
+    alt_paths = ezdic_cli._resolve_code_paths(checkout / "ezdic_core.py")
+    assert [p.name for p in alt_paths] == [
+        "ezdic_core.py",
+        "ezdic_cli.py",
+        "ezdic_benchmark.py",
+        "run_config_v1.json",
+    ]
+    assert all(checkout.resolve() in p.resolve().parents for p in alt_paths)
 
 
 def test_cli_json_output_is_safe_on_cp1252_stream_and_version_flag(monkeypatch) -> None:

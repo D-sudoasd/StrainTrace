@@ -8,20 +8,31 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import math
 import os
-import platform
 import shutil
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import scipy
 from scipy.spatial import cKDTree
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks._common import (  # noqa: E402
+    runtime_environment,
+    sha256_bytes as _sha256,
+    sha256_file,
+    signed_error_stats,
+    write_csv_lf,
+    write_json_lf,
+)
 
 SCHEMA = "straintrace-paired-dic-comparison-v1"
 FLOAT_FIELDS = ("x", "y", "u", "v", "strain_xx", "strain_yy", "strain_xy")
@@ -36,10 +47,6 @@ PARAMETER_FIELDS = (
     "subset_size_px", "step_px", "strain_window_points", "shape_function",
     "reference_strategy", "strain_filter", "displacement_smoothing", "quality_policy",
 )
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _digest(value) -> bool:
@@ -221,12 +228,14 @@ def _side_summary(rows, source, *, denominator=None):
 
 
 def _difference(values):
-    data = np.asarray(values, dtype=float)
-    if not data.size:
-        return {"n": 0, "bias": None, "rmse": None, "p95_abs": None, "max_abs": None}
-    return {"n": int(data.size), "bias": float(data.mean()),
-            "rmse": float(np.sqrt(np.mean(data ** 2))),
-            "p95_abs": float(np.percentile(np.abs(data), 95)), "max_abs": float(np.max(np.abs(data)))}
+    stats = signed_error_stats(values)
+    return {
+        "n": stats["count"],
+        "bias": stats["bias"],
+        "rmse": stats["rmse"],
+        "p95_abs": stats["p95_abs"],
+        "max_abs": stats["max_abs"],
+    }
 
 
 def _status(row):
@@ -339,8 +348,8 @@ def compare(manifest: Path, output: Path):
         "schema": SCHEMA, "kind": "agreement_not_ground_truth", "equivalence_claim": False,
         "identity_verification": "Image identities and processing settings are supplied by the manifest; export and grid bytes are SHA-256 recorded.",
         "manifest": {"path": str(manifest), "sha256": _sha256(manifest_bytes)},
-        "script_sha256": _sha256(Path(__file__).read_bytes()), "comparison_grid": grid_identity,
-        "environment": {"python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__},
+        "script_sha256": sha256_file(__file__), "comparison_grid": grid_identity,
+        "environment": runtime_environment(include_opencv=False),
         "fixed_domain_n": len(domain), "coordinate_tolerance_px": tolerance,
         "roi_membership": {
             "native_roi": "Reported coordinates inside the closed ROI; no boundary expansion.",
@@ -380,26 +389,25 @@ def compare(manifest: Path, output: Path):
             common_peaks = _compare_extrema(common_left, common_right, kind="maximum")
             common_minima = _compare_extrema(common_left, common_right, kind="minimum")
             point_file = f"frame_{ordinal:04d}_points.csv"
-            with (staging / point_file).open("w", newline="", encoding="utf-8") as stream:
-                fieldnames = ["x", "y", "straintrace_status", "comparison_status"]
-                for label in ("straintrace", "comparison"):
-                    fieldnames += [f"{label}_{key}" for key in FLOAT_FIELDS[2:] + ("quality", "invalid_reason", "strain_invalid_reason")]
-                fieldnames += [f"difference_{key}" for key in FLOAT_FIELDS[2:]]
-                writer = csv.DictWriter(stream, fieldnames=fieldnames, lineterminator="\n")
-                writer.writeheader()
-                for point, (a, b) in zip(domain, pairs):
-                    record = {"x": point["x"], "y": point["y"], "straintrace_status": _status(a), "comparison_status": _status(b)}
-                    for label, row in (("straintrace", a), ("comparison", b)):
-                        for key in FLOAT_FIELDS[2:]:
-                            gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
-                            record[f"{label}_{key}"] = row[key] if row is not None and row[gate] else None
-                        for key in ("quality", "invalid_reason", "strain_invalid_reason"):
-                            value = row.get(key) if row else None
-                            record[f"{label}_{key}"] = value if not isinstance(value, float) or math.isfinite(value) else None
+            fieldnames = ["x", "y", "straintrace_status", "comparison_status"]
+            for label in ("straintrace", "comparison"):
+                fieldnames += [f"{label}_{key}" for key in FLOAT_FIELDS[2:] + ("quality", "invalid_reason", "strain_invalid_reason")]
+            fieldnames += [f"difference_{key}" for key in FLOAT_FIELDS[2:]]
+            point_rows = []
+            for point, (a, b) in zip(domain, pairs):
+                record = {"x": point["x"], "y": point["y"], "straintrace_status": _status(a), "comparison_status": _status(b)}
+                for label, row in (("straintrace", a), ("comparison", b)):
                     for key in FLOAT_FIELDS[2:]:
                         gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
-                        record[f"difference_{key}"] = a[key] - b[key] if a is not None and b is not None and a[gate] and b[gate] else None
-                    writer.writerow(record)
+                        record[f"{label}_{key}"] = row[key] if row is not None and row[gate] else None
+                    for key in ("quality", "invalid_reason", "strain_invalid_reason"):
+                        value = row.get(key) if row else None
+                        record[f"{label}_{key}"] = value if not isinstance(value, float) or math.isfinite(value) else None
+                for key in FLOAT_FIELDS[2:]:
+                    gate = "displacement_available" if key in {"u", "v"} else "strain_valid"
+                    record[f"difference_{key}"] = a[key] - b[key] if a is not None and b is not None and a[gate] and b[gate] else None
+                point_rows.append(record)
+            write_csv_lf(staging / point_file, fieldnames, point_rows)
             report["frames"].append({
                 "frame_id": frame["frame_id"], "stage": frame["stage"], "image_sha256": frame["image_sha256"],
                 "exports": identities, "status": "no_common_displacement" if not common_displacement else "no_common_strain" if not common_strain else "compared",
@@ -419,13 +427,13 @@ def compare(manifest: Path, output: Path):
                 "displacement_vector_rmse_px": math.sqrt(sum(v*v for v in vectors)/len(vectors)) if vectors else None,
                 "common_domain_peaks": common_peaks,
                 "common_domain_minima": common_minima,
-                "point_table": {"path": point_file, "sha256": _sha256((staging / point_file).read_bytes())},
+                "point_table": {"path": point_file, "sha256": sha256_file(staging / point_file)},
             })
         count_strain = sum(frame["common_strain_n"] > 0 for frame in report["frames"])
         count_displacement = sum(frame["common_displacement_n"] > 0 for frame in report["frames"])
         report["comparison_status"] = "compared_all_frames" if count_strain == len(report["frames"]) else "partial_comparison" if count_displacement else "no_common_measurements"
         report["frames_with_common_strain"] = count_strain
-        (staging / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+        write_json_lf(staging / "report.json", report, indent=2, ensure_ascii=False, allow_nan=False)
         if output.exists():
             raise FileExistsError(f"Output already exists: {output}")
         os.rename(staging, output)

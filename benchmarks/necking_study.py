@@ -9,17 +9,11 @@ padding merely compensates for the changed subset half-width.
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
-import importlib.util
 import json
-import platform
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
-import scipy
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +22,15 @@ if str(ROOT) not in sys.path:
 import ezdic_core as core  # noqa: E402
 from benchmarks import necking_validation as bench  # noqa: E402
 from benchmarks import synthetic_cases  # noqa: E402
+from benchmarks._common import (  # noqa: E402
+    load_core_module,
+    runtime_environment,
+    set_deterministic_rng,
+    sha256_bytes,
+    sha256_file as sha256,
+    write_csv_lf,
+    write_json_lf,
+)
 
 SCHEMA = "straintrace-necking-study-v1"
 ERROR_DIAGNOSTIC_PX = 0.5  # Descriptive, never passed to a solver quality gate.
@@ -41,17 +44,8 @@ POINT_COLUMNS = (
 )
 
 
-def sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
 def load_core(path):
-    spec = importlib.util.spec_from_file_location("necking_study_core", path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot load core module: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_core_module(path, "necking_study_core")
 
 
 def locked_roi(subset_size):
@@ -188,7 +182,7 @@ def summarize_field(field, params, settings, solver_core):
     ]
     result = {
         "locked_poi_domain_xy_px": domain_bounds,
-        "grid_sha256": hashlib.sha256(X.tobytes()+Y.tobytes()).hexdigest(),
+        "grid_sha256": sha256_bytes(X.tobytes()+Y.tobytes()),
         "strain_gauge_center_span_px": (settings["strain_window"]-1)*settings["step"],
         "nominal_image_support_width_px": settings["subset_size"]+(settings["strain_window"]-1)*settings["step"],
         "neck_band_definition": "abs(y - 80 px) <= Gaussian width parameter",
@@ -272,7 +266,7 @@ def reference_strategy_diagnostic(solver_core):
             record = {"case": name, "original_material_point_xy_px": [x, y],
                       "known_middle_point_xy_px": [float(x+um), float(y+vm)],
                       "true_final_displacement_uv_px": final_displacement.tolist(),
-                      "input_sha256": hashlib.sha256(reference.tobytes()+middle_image.tobytes()+final_image.tobytes()).hexdigest()}
+                      "input_sha256": sha256_bytes(reference.tobytes()+middle_image.tobytes()+final_image.tobytes())}
             for key, fit, offset in (("fixed", fixed, np.zeros(2)),
                                      ("oracle_middle", middle, middle_displacement)):
                 if fit is None:
@@ -362,8 +356,7 @@ def run(output, core_file=None, selected_cases=None, *, experimental_full_search
         "schema": SCHEMA, "core_sha256": source_hash,
         "benchmark_sha256": sha256(__file__), "generator_sha256": sha256(bench.__file__),
         "texture_source_sha256": sha256(synthetic_cases.__file__),
-        "environment": {"python": platform.python_version(), "numpy": np.__version__,
-                        "scipy": scipy.__version__, "opencv": cv2.__version__},
+        "environment": runtime_environment(include_opencv=True),
         "deformation_reference": "fixed initial image; x right, y down; lengths in px",
         "strain_definition": "Green-Lagrange Eyy, dimensionless; tensor strain in reference coordinates",
         "diagnostic_error_cutoff_px": ERROR_DIAGNOSTIC_PX,
@@ -384,7 +377,7 @@ def run(output, core_file=None, selected_cases=None, *, experimental_full_search
     }
     all_points = []
     points_by_case = {}
-    cv2.setRNGSeed(0)
+    set_deterministic_rng(0)
     for name, deformation, overrides, degradation in cases():
         if selected is not None and name not in selected:
             continue
@@ -417,17 +410,16 @@ def run(output, core_file=None, selected_cases=None, *, experimental_full_search
     report["matched_sensitivity_comparisons"] = matched_case_comparisons(report["cases"], points_by_case)
     if sha256(core_path) != source_hash:
         raise RuntimeError("Core changed during the run; repeat with a frozen core")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with points_path.open("x", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=POINT_COLUMNS, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows({key: _csv_value(value) for key, value in row.items()} for row in all_points)
+    write_csv_lf(
+        points_path,
+        POINT_COLUMNS,
+        ({key: _csv_value(value) for key, value in row.items()} for row in all_points),
+        exclusive=True,
+    )
     report["pointwise_csv"] = {"filename": points_path.name, "sha256": sha256(points_path),
                                "row_count": len(all_points), "missing_numeric_values": "empty cells"}
     try:
-        with output.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(report, stream, indent=2, allow_nan=False)
-            stream.write("\n")
+        write_json_lf(output, report, exclusive=True, indent=2, allow_nan=False)
     except Exception:
         try:
             points_path.unlink(missing_ok=True)

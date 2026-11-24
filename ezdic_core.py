@@ -558,6 +558,7 @@ def resolve_code_paths(
     include_gui=False,
     include_benchmark=False,
     include_schema=True,
+    root=None,
 ):
     """Resolve the portable source set for a source or frozen execution.
 
@@ -568,7 +569,7 @@ def resolve_code_paths(
     corresponding flag is true; missing files fail closed with ``CoreError``.
     The core source is always included.
     """
-    root = _runtime_code_root()
+    root = Path(root).resolve() if root is not None else _runtime_code_root()
     selected = []
     if paths is not None:
         if not isinstance(paths, (list, tuple)):
@@ -6228,32 +6229,6 @@ def _is_ezdic_output_pattern(relative, mode=None):
     if mode in (None, ANALYSIS_MODE_FULLFIELD) and relative.startswith("dic/"):
         return relative == "dic/specimen_mask.png" or bool(re.fullmatch(r"dic/frame_\d{4,}(?:_(?:u|v|zncc|Exx|Eyy|Exy|exx|eyy|exy|exx_infinitesimal|eyy_infinitesimal|exy_infinitesimal|overlay)|_parameters)?\.(?:txt|csv|png|npz)", relative, flags=re.IGNORECASE))
     return False
-
-
-def _legacy_owned_output_paths(output_root):
-    """Return conservative, known legacy output paths when no ledger exists."""
-    root = Path(output_root)
-    result = []
-    exact_names = {
-        "qc/qc_summary.txt",
-        "core/strain_all_groups.txt",
-        "core/strain_mean_groups.txt",
-        "core/poisson_ratio.txt",
-        f"core/{ORIGIN_OPJU_FILENAME}",
-        "core/engineering_strain_all_groups.png",
-        "core/poisson_ratio.png",
-        "optional/full_csv/strain_results_all_groups.csv",
-        "optional/parameters/tracking_parameters.txt",
-        "optional/parameters/acceptance_summary.txt",
-    }
-    for relative in exact_names:
-        path = root / Path(relative)
-        if path.is_file():
-            result.append((relative, path))
-    # Do not guess per-group or per-frame ownership without a manifest.  A
-    # collision is safer than moving a similarly named user file; successful
-    # v0.2 runs always create a manifest for the next transaction to trust.
-    return sorted({relative: path for relative, path in result}.items(), key=lambda item: item[0])
 
 
 def _current_owned_output_paths(output_root, *, mode=None, allowed_paths=None):
