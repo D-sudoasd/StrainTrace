@@ -270,6 +270,19 @@ Warranty Disclaimer:
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 """
 
+USAGE_NOTICE_ZH = f"""开发者  {APP_DEVELOPER}
+版本  {APP_VERSION}    DOI  {APP_DOI}
+
+StrainTrace（原 ezDIC）可从图像序列计算虚拟引伸计应变和全场二维数字图像相关结果。
+
+推荐引用
+{CITATION_TEXT.strip().splitlines()[-1]}
+
+本软件采用 MIT 许可证，允许修改、商用和再分发。软件的副本或实质性部分须保留版权声明和许可声明。鼓励在论文、报告等学术成果中引用，引用并非许可条款。
+
+软件按现状提供，不附带任何明示或默示保证。完整条款见 LICENSE.txt 与 NOTICE_Attribution_and_Usage.txt。
+"""
+
 
 IMAGE_EXTENSIONS = [
     "*.tif", "*.tiff", "*.TIF", "*.TIFF",
@@ -801,7 +814,7 @@ def validate_fullfield_snapshot(settings, *, check_sequence_dimensions=True):
 class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
     def __init__(self, root):
         self.root = root
-        self.root.title("分析控制台 · " + APP_TITLE)
+        self.root.title(f"StrainTrace · 分析控制台 · v{APP_VERSION} · 开发者 {APP_DEVELOPER} · DOI: {APP_DOI}")
         self.configure_initial_window()
 
         self.image_folder = tk.StringVar()
@@ -954,7 +967,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
 
         self.preflight_summary_var = tk.StringVar(value="")
         self.current_roi_summary_var = tk.StringVar(value="尚未绘制 ROI。")
-        self.qc_overview_var = tk.StringVar(value="分析完成后显示 QC 总览。")
+        self.qc_overview_var = tk.StringVar(value="分析完成后显示质量概览。")
         self.recent_image_dir = ""
         self.recent_output_dir = ""
         self._recent_config_path = self.default_recent_config_path()
@@ -1154,11 +1167,12 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
 
     # ---------- UI ----------
 
-    def add_tooltip(self, widget, text, choices=None):
+    def add_tooltip(self, widget, text, choices=None, *, title=None):
         def provider(event):
             return self._control_help(widget, text, event)
 
-        tip = ChoiceToolTip(widget, provider, choices) if choices is not None else ToolTip(widget, provider)
+        tip = (ChoiceToolTip(widget, provider, choices, title=title) if choices is not None
+               else ToolTip(widget, provider, title=title))
         tip.owner = self.root
         widget._tooltip_text = tip.resolve_text()
         self.tooltips.append(tip)
@@ -1167,12 +1181,13 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
 
     def _control_help(self, widget, text, event=None):
         explanation = text(event) if callable(text) else text
-        if not explanation or not isinstance(widget, ttk.Widget) or not widget.instate(["disabled"]):
+        if (not explanation or "\n暂不可用：" in explanation
+                or not isinstance(widget, ttk.Widget) or not widget.instate(["disabled"])):
             return explanation
-        if self.is_processing or self._completion_pending:
-            reason = "正在计算或保存结果，请等本次分析完成后再操作。"
-        elif widget == getattr(self, "start_button", None):
+        if widget == getattr(self, "start_button", None):
             reason = self._start_prerequisite_help()
+        elif self.is_processing or self._completion_pending:
+            reason = "正在计算或保存结果，请等本次分析完成后再操作。"
         elif widget == getattr(self, "prev_frame_button", None) and self.image_paths:
             reason = "当前已是第一张图片。"
         elif widget == getattr(self, "next_frame_button", None) and self.image_paths:
@@ -1200,8 +1215,11 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                            if widget == getattr(self, name, None)), "")
         return explanation + (f"\n暂不可用：{reason}" if reason else "")
 
-    def _start_prerequisite_help(self):
-        hint = self.workflow_hint_var.get()
+    def _start_prerequisite_help(self, hint=None):
+        if self.is_processing or self._completion_pending:
+            return "正在计算或保存结果，请等本次分析完成后再操作。"
+        if hint is None:
+            return self.workflow_hint_var.get()
         label, _, message = hint.partition("：")
         reasons = {
             "图像序列": "先选择存放图片的文件夹，再点“加载序列”。",
@@ -1209,7 +1227,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             "全场 ROI": "先在第一张要分析的图片上拖出矩形分析区域；整个矩形都要落在图片内。",
             "参考帧": (
                 "先显示第一张要分析的图片，再重新画分析区域。"
-                if self.is_fullfield_mode() else
+                 if self.is_fullfield_mode() else
                 "测量框必须画在第一张要分析的图片上；请载入需要修改的分组，重画后点“更新选中”保存。"
             ),
             "纹理": "测量区域的明暗纹理无法同时确定左右和上下位置。请换一块纹理更清楚的区域，或画大一些再检查。",
@@ -1232,21 +1250,13 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         return reasons.get(label, hint.replace("ROI", "测量框").replace("参考帧", "参考图片"))
 
     def _workspace_help(self, event=None):
-        if event is not None and getattr(event, "keysym", "") != "F1":
-            try:
-                index = self.workspace_notebook.index(f"@{event.x},{event.y}")
-            except tk.TclError:
-                return ""
-        else:
-            index = self.workspace_notebook.index("current")
-        help_text = (
+        return notebook_help(self.workspace_notebook, (
             "点击查看图片并画测量框。ROI 就是要追踪或计算的图片区域；先选参考图片，再按住左键拖出矩形。",
             "点击查看分析得到的曲线或彩色结果图。完成分析后，可在这里放大、移动或保存图表。",
-            "点击查看 campaign 项目的首、中、末参考帧、自由段和引伸计取点；编辑仍在控制台批次项目页进行。",
-            "查看当前批次的 frame-strain 曲线及已生成的图像叠图。",
-            "查看自动分析项目的固定参考图；拖动绘制计算区域、统计 ROI、排除区和虚拟标距端点。",
-        )
-        return help_text[index] if 0 <= index < len(help_text) else ""
+            "查看批次的首帧、中间帧和末帧，以及试样自由段和测量框。回到“批次项目”页编辑取点。",
+            "查看当前批次的逐帧应变曲线和已保存的图像叠图。",
+            "查看自动分析项目的参考图。拖出计算区、统计区、排除区或标距端点的矩形。",
+        ), event)
 
     def _group_table_help(self, event=None):
         action = "单击选中一组，双击载入编辑；右键可载入、更新或删除。"
@@ -1289,11 +1299,20 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             window.bind("<Control-l>", lambda _event: self.load_first_image() or "break")
             window.bind("<Control-f>", lambda _event: self.fit_image_to_view() or "break")
             window.bind("<Control-Return>", lambda _event: self.start_processing() or "break")
-            window.bind("<Escape>", lambda _event: self.clear_current_rois() or "break")
+            window.bind("<Escape>", self._on_escape)
+            window.bind("<F1>", lambda _event: self.show_beginner_guide() or "break")
             window.bind("<Control-plus>", lambda _event: self.zoom_image(1.25) or "break")
             window.bind("<Control-equal>", lambda _event: self.zoom_image(1.25) or "break")
             window.bind("<Control-minus>", lambda _event: self.zoom_image(1 / 1.25) or "break")
             window.bind("<Control-i>", lambda _event: self.show_visual_window() or "break")
+
+    def _on_escape(self, _event=None):
+        tip = getattr(self.root, "_active_tooltip", None)
+        if tip is not None:
+            tip.hide()
+        else:
+            self.clear_current_rois()
+        return "break"
 
     def default_recent_config_path(self):
         configured = os.environ.get(RECENT_CONFIG_ENV_VAR)
@@ -1825,8 +1844,12 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="StrainTrace", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="分析控制台 · 序列、参数与质量", style="AppHint.TLabel").grid(
+        ttk.Label(header, text="悬停或按 F1 查看当前控件说明", style="AppHint.TLabel").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.beginner_guide_button = ttk.Button(header, text="新手指南", command=self.show_beginner_guide,
+                                                style="Secondary.TButton")
+        self.beginner_guide_button.grid(row=1, column=3, columnspan=2, sticky="e", pady=(4, 0))
+        self.add_tooltip(self.beginner_guide_button, "根据手头的图像选择一种分析流程，并查看从导入到结果的步骤。")
         self.open_visual_button = ttk.Button(
             header, text="图像与结果 ↗", command=self.show_visual_window, style="Secondary.TButton")
         self.open_visual_button.grid(row=0, column=1, sticky="e", padx=(8, 6))
@@ -1842,6 +1865,47 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.add_tooltip(self.dark_mode_btn, "点击切换浅色或深色界面，结果图也会换色。")
         self.add_tooltip(self.open_recent_output_button, "点击在文件管理器中打开最近选择的结果文件夹，查看已保存的表格和图片。")
         self.update_recent_output_button_state()
+
+    def show_beginner_guide(self):
+        window = getattr(self, "_beginner_guide", None)
+        if window is not None and window.winfo_exists():
+            window.lift()
+            return
+        window = self._beginner_guide = tk.Toplevel(self.root)
+        window.title("StrainTrace · 新手指南")
+        window.transient(self.root)
+        pane = ttk.Frame(window, padding=16, style="App.TFrame")
+        pane.pack(fill=tk.BOTH, expand=True)
+        pane.columnconfigure(0, weight=1)
+        ttk.Label(pane, text="选择分析流程", style="Brand.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
+        paths = (
+            ("手动分析一组图像", "进入分析设置", self.settings_page,
+             "适合第一次处理一组图像。加载图像，选参考图片，再画两个测量框计算标距应变，或画一个区域计算全场位移与应变。分析后查看图表和输出文件。"),
+            ("建立自动分析项目", "进入自动分析", self.agent_page,
+             "适合需要重复分析或断点续算的项目。发现输入，检查参考图与测量区域，生成计划并运行，然后查看质量和报告。"),
+            ("管理多个采集批次", "进入批次项目", self.campaign_page,
+             "适合多个批次需要分别审核的实验。扫描数据，确认试样和测量位置后运行分析。有载荷记录时可预览对齐，再导出数据包。"),
+        )
+
+        def select(page):
+            self.control_notebook.select(page)
+            window.destroy()
+            self.show_control_window()
+            self.control_notebook.focus_set()
+
+        for row, (title, action, page, description) in enumerate(paths, start=1):
+            card = ttk.LabelFrame(pane, text=title, padding=(10, 7))
+            card.grid(row=row, column=0, sticky="ew", pady=(0, 7))
+            ttk.Label(card, text=description, wraplength=410, justify=tk.LEFT).pack(anchor="w")
+            button = ttk.Button(card, text=action, style="Secondary.TButton",
+                                command=lambda target=page: select(target))
+            button.pack(anchor="e", pady=(4, 0))
+            self.add_tooltip(button, description)
+        done = ttk.Button(pane, text="关闭", command=window.destroy, style="Compact.TButton")
+        done.grid(row=4, column=0, sticky="e")
+        self.add_tooltip(done, "关闭指南，回到当前工作区。")
+        window.bind("<Escape>", lambda _event: window.destroy())
+        done.focus_set()
 
     def _build_project_section(self, parent):
         self.project_frame = ttk.LabelFrame(parent, text="01  图像序列", padding=(12, 8))
@@ -1870,7 +1934,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.add_tooltip(self.select_image_button, "点击选择存放连续拍摄图片的文件夹，再点“加载序列”显示图片。")
 
         output_folder_tip = (
-            "填写结果文件夹路径，分析后的表格和图片会保存在这里。开始分析前必须设置；也可点击“选择输出”设置保存位置。"
+            "结果文件夹必须设置。选择图像文件夹时会填入默认路径，也可点击“选择输出”更改。分析后的表格和图片会保存在这里。"
         )
         self.output_folder_label = ttk.Label(self.project_frame, text="输出文件夹：")
         self.output_folder_label.grid(row=1, column=0, sticky="w", pady=1)
@@ -1980,11 +2044,11 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.campaign_result_visual_page = ttk.Frame(self.workspace_notebook, style="Card.TFrame")
         self.campaign_result_visual_page.columnconfigure(0, weight=1)
         self.campaign_result_visual_page.rowconfigure(1, weight=1)
-        ttk.Label(self.campaign_result_visual_page, text="已对齐的 Frame-strain 曲线与结果叠图").grid(
+        ttk.Label(self.campaign_result_visual_page, text="批次分析曲线与结果叠图").grid(
             row=0, column=0, sticky="w", padx=10, pady=(8, 2))
         campaign_results = ttk.Panedwindow(self.campaign_result_visual_page, orient=tk.HORIZONTAL)
         campaign_results.grid(row=1, column=0, sticky="nsew", padx=6)
-        campaign_plot_frame = ttk.LabelFrame(campaign_results, text="Frame-strain")
+        campaign_plot_frame = ttk.LabelFrame(campaign_results, text="应变与应力曲线")
         campaign_overlay_frame = ttk.LabelFrame(campaign_results, text="DIC 叠图附件")
         campaign_results.add(campaign_plot_frame, weight=2)
         campaign_results.add(campaign_overlay_frame, weight=1)
@@ -1994,7 +2058,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                                                 highlightthickness=0)
         self.campaign_result_canvas.grid(row=0, column=0, sticky="nsew")
         self.add_tooltip(self.campaign_result_canvas,
-                         "查看所选批次的 Frame 应变曲线；只绘制有效有限值，完整逐帧数据和质量原因见项目结果文件。")
+                         "查看所选批次的逐帧应变或应力曲线。完整数值和缺失结果的原因可在项目文件中查看。")
         self.campaign_result_canvas.bind(
             "<Configure>", lambda _event: self.campaign_page._draw_result_curve()
             if hasattr(self, "campaign_page") else None)
@@ -2018,8 +2082,9 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self._build_image_section(self.image_page)
         self._build_scrollable_controls(self.settings_page)
         self.control_notebook.bind("<<NotebookTabChanged>>", self._on_control_tab_changed)
-        ttk.Label(visual_frame, textvariable=self.status_var, style="AppHint.TLabel",
-                  wraplength=700, justify=tk.LEFT).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.visual_status_label = ttk.Label(visual_frame, textvariable=self.status_var, style="AppHint.TLabel",
+                                             wraplength=700, justify=tk.LEFT)
+        self.visual_status_label.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
     def _on_control_tab_changed(self, _event=None):
         """The automatic and campaign tabs own their own source and run controls."""
@@ -2029,19 +2094,12 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             frame.grid_remove() if standalone else frame.grid()
 
     def _control_workspace_help(self, event=None):
-        try:
-            index = (self.control_notebook.index(f"@{event.x},{event.y}")
-                     if event is not None and getattr(event, "keysym", "") != "F1"
-                     else self.control_notebook.index("current"))
-        except tk.TclError:
-            return ""
-        help_text = (
-            "点击设置分析模式、参考图片、ROI 和计算参数；绘图操作在独立的图像窗口中进行。",
+        return notebook_help(self.control_notebook, (
+            "手动分析一组图像。先设置参考图片和分析范围，再到“图像与结果”窗口画测量区域。",
             "点击查看分析前缺少什么、哪些图片未能算出结果，以及运行中的详细记录。",
-            "管理多个采集批次的身份、ROI 审核、时间与载荷对齐，以及可恢复的项目运行。",
-            "发现实验输入，人工编辑多个统计 ROI、虚拟标距与参数，生成计划并运行；查看质量状态和报告。",
-        )
-        return help_text[index] if 0 <= index < len(help_text) else ""
+            "扫描多个采集批次，确认每个试样和测量位置，运行分析并按时间匹配载荷。",
+            "将一组图像建成可恢复的项目，检查试算计划，运行后在“计划与结果”打开报告。",
+        ), event)
 
     def show_control_window(self):
         self.root.deiconify()
@@ -2072,6 +2130,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.visual_window.geometry(f"{visual_w}x{height}+{visual_x}+30")
         self.root.deiconify()
         self.visual_window.deiconify()
+        self.root.lift()
 
     def _build_scrollable_controls(self, parent):
         sidebar_width = round(370 * max(1.0, self.ui_scaling / (96 / 72)))
@@ -2127,13 +2186,16 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.controls_canvas.itemconfigure(self.controls_window, width=event.width)
         wrap = max(180, event.width - 52)
         for label_name in ("preset_status_label", "current_roi_summary_label", "dic_field_summary_label",
-                           "export_hint_label", "fullfield_export_info_label", "workflow_hint_label", "status_label"):
+                           "export_hint_label", "fullfield_export_info_label", "status_label"):
             label = getattr(self, label_name, None)
             if label is not None:
                 label.configure(wraplength=wrap)
 
     def _on_workspace_tab_changed(self, _event=None):
-        if self.workspace_notebook.select() == str(self.image_page):
+        showing_image = self.workspace_notebook.select() == str(self.image_page)
+        if hasattr(self, "visual_status_label"):
+            self.visual_status_label.grid() if showing_image else self.visual_status_label.grid_remove()
+        if showing_image:
             self.root.after_idle(self._rescale_display_to_current_size)
 
     def _show_image_workspace(self):
@@ -2153,6 +2215,9 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             widget.bind("<MouseWheel>", self._on_workflow_mouse_wheel, add="+")
             widget.bind("<Button-4>", self._on_workflow_mouse_wheel, add="+")
             widget.bind("<Button-5>", self._on_workflow_mouse_wheel, add="+")
+            if isinstance(widget, (ttk.Button, ttk.Combobox, ttk.Entry, ttk.Checkbutton, ttk.Radiobutton, ttk.Treeview)):
+                widget.bind("<FocusIn>", lambda event: focus_canvas_child(
+                    event.widget, self.controls_canvas, self.controls_panel), add="+")
 
             for child in widget.winfo_children():
                 bind_tree(child)
@@ -2188,13 +2253,6 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.workflow_guide_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.workflow_guide_frame.columnconfigure(0, weight=1)
 
-        self.workflow_step_texts = [
-            "1. 选择图像文件夹和输出文件夹，加载序列",
-            "2. 设置参考帧、分析范围和测量方向",
-            "3. 画 ROI1/ROI2，添加 ROI 组",
-            "4. 确认导出内容，点击开始分析",
-        ]
-        self.workflow_labels = []
         self.workflow_steps_label = ttk.Label(
             self.workflow_guide_frame,
             text=self._visible_workflow_steps_text(),
@@ -2204,7 +2262,6 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             wraplength=430,
         )
         self.workflow_steps_label.grid(row=0, column=0, sticky="ew")
-        self.workflow_labels.append(self.workflow_steps_label)
         self.add_tooltip(
             self.workflow_steps_label,
             lambda _event: ("先加载图片，选一张作为比较基准，再画要分析的矩形区域，最后开始计算整片区域的移动和伸缩。"
@@ -2226,8 +2283,8 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
     def _visible_workflow_steps_text(self):
         """Keep the current workflow visible without repeating the instructions."""
         if str(self.analysis_mode.get()) == ANALYSIS_MODE_FULLFIELD:
-            return "选参考图片 → 在图像窗口画分析区域 → 开始分析 · 悬停或按 F1 查看说明"
-        return "选参考图片 → 在图像窗口画两个测量框 → 开始分析 · 悬停或按 F1 查看说明"
+            return "加载图像 → 选参考图片并画分析区域 → 开始分析 → 查看结果"
+        return "加载图像 → 画两个测量框并添加为一组 → 开始分析 → 查看结果"
 
     def _build_measure_section(self, parent):
         mode_bar = ttk.Frame(parent, style="Card.TFrame")
@@ -2696,7 +2753,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         ):
             self.last_qc_summary = None
             if hasattr(self, "qc_overview_var"):
-                self.qc_overview_var.set("分析完成后显示 QC 总览。")
+                self.qc_overview_var.set("分析完成后显示质量概览。")
             if hasattr(self, "clear_viewer"):
                 self.clear_viewer(keep_placeholder=True)
             self._restore_sequence_preview()
@@ -3062,6 +3119,13 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.zoom_label = ttk.Label(toolbar, textvariable=self.zoom_label_var, style="Hint.TLabel", width=7, anchor="center")
         self.zoom_label.grid(row=0, column=4, padx=(2, 4))
         self.add_tooltip(self.zoom_label, "显示图片相对原始像素大小的比例。100% 是原始大小，200% 是放大到两倍；可用加减按钮或滚轮调整。")
+        self.image_action_button = ttk.Button(toolbar, text="选择并加载图像", command=self._image_workspace_action,
+                                              style="Secondary.TButton")
+        self.image_action_button.grid(row=0, column=6, sticky="e")
+        self.add_tooltip(self.image_action_button, lambda _event: (
+            "显示本次分析的起始图片。可以在这张图上检查或绘制测量区域。"
+            if self.image_paths else "选择存放图像序列的文件夹，确认后加载并显示第一张图像。"
+        ))
         self.canvas = tk.Canvas(self.image_frame, bg="#111827", cursor="crosshair", highlightthickness=0,
                                 width=400, height=260, xscrollincrement=1, yscrollincrement=1)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -3084,12 +3148,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                                              style="Hint.TLabel", wraplength=600, justify=tk.LEFT)
         self.image_context_label.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.image_frame.bind("<Configure>", lambda event: self.image_context_label.configure(wraplength=max(240, event.width - 24)))
-        self.add_tooltip(self.canvas, lambda _event: (
-            "按住左键拖出不想计算的矩形区域，松开后会添加一个排除框。滚轮缩放图片；红色区域表示被排除的位置。"
-            if self._drawing_mask_exclusion else
-            "在参考图片上按住左键拖出要分析的矩形区域，松开后保存范围。滚轮缩放图片，滚动条移动视图。"
-            if self.is_fullfield_mode() else
-            f"在参考图片上按住左键拖出第 {self.current_roi_index} 个测量框，松开后保存。两个框画好后点“添加 ROI 组”；滚轮可缩放图片。"))
+        self.add_tooltip(self.canvas, self._image_canvas_help, title="绘制测量区域")
         self.add_tooltip(self.image_context_label, "显示当前图片名称、序号和尺寸，以及用来比较变形的参考图片。px 表示像素；绘制提示说明现在要画哪个测量框。")
 
     def _build_analysis_section(self, parent):
@@ -3156,7 +3215,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.add_tooltip(self.run_state_label, "显示当前是否可以分析、是否正在计算或需要补充设置。具体下一步操作在下方；失败后可按提示修正并重试。")
         ttk.Label(self.run_frame, text="Ctrl + Enter", style="Hint.TLabel").grid(row=0, column=1, sticky="e")
         self.workflow_hint_label = ttk.Label(self.run_frame, textvariable=self.workflow_hint_var,
-                                             style="Hint.TLabel", wraplength=360, justify=tk.LEFT)
+                                             style="NextStep.TLabel", wraplength=520, justify=tk.LEFT)
         self.workflow_hint_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 6))
         self.add_tooltip(self.workflow_hint_label, "这里告诉你下一步需要做什么。出现质量提醒时，点击“质量与日志”查看具体图片或参数需要检查的原因。")
         self.start_button = ttk.Button(self.run_frame, text="开始分析", command=self.start_processing, style="Primary.TButton")
@@ -3175,6 +3234,8 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                                        wraplength=360, justify=tk.LEFT)
         self.status_label.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.add_tooltip(self.status_label, "显示最近的操作、计算进度或错误原因。需要查看更完整的记录时，点击“质量与日志”。")
+        self.run_frame.bind("<Configure>", lambda event: self.workflow_hint_label.configure(
+            wraplength=max(220, event.width - 48)), add="+")
 
     def _build_quality_section(self, parent):
         parent.rowconfigure(0, weight=0)
@@ -3187,7 +3248,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                                            style="Hint.TLabel", wraplength=500, justify=tk.LEFT)
         self.qc_overview_label.grid(row=0, column=1, sticky="ew")
         self.add_tooltip(self.qc_overview_label, "分析后显示多少张图片、多少个测量点通过了检查。找到纹理和算出伸缩是两项检查；未通过的位置留空，数值仍需结合原图核对。")
-        self.quality_notebook = ttk.Notebook(parent)
+        self.quality_notebook = ttk.Notebook(parent, style="Detail.TNotebook")
         self.quality_notebook.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         self.preflight_page = ttk.Frame(self.quality_notebook, style="Card.TFrame", padding=8)
         self.log_page = ttk.Frame(self.quality_notebook, style="Card.TFrame", padding=8)
@@ -3196,7 +3257,10 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             page.rowconfigure(0, weight=1)
         self.quality_notebook.add(self.preflight_page, text="运行前检查")
         self.quality_notebook.add(self.log_page, text="运行日志")
-        self.add_tooltip(self.quality_notebook, "点击“运行前检查”查看开始分析需要补充什么；点击“运行日志”查看加载、计算、保存和错误的详细记录。两项均可滚动查看和复制。")
+        self.add_tooltip(self.quality_notebook, lambda event: notebook_help(self.quality_notebook, (
+            "查看哪些设置正在阻止分析，以及需要复核的质量提示。可选择文字并复制。",
+            "查看加载、计算、保存和失败的详细记录。可选择文字并复制。",
+        ), event))
         self.preflight_summary_label = tk.Text(self.preflight_page, height=5, width=30, wrap=tk.WORD,
                                                font=self.ui_base_font, relief=tk.FLAT, bg=self.panel_bg,
                                                fg=self.text_color, padx=10, pady=8, state=tk.DISABLED)
@@ -3251,7 +3315,6 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         viewer_btns = ttk.Frame(self.viewer_frame, style="Card.TFrame")
         viewer_btns.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         viewer_btns.columnconfigure(0, weight=1)
-        ttk.Label(viewer_btns, text="分析结果", style="StepTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.viewer_export_btn = ttk.Button(viewer_btns, text="导出当前图", command=self.export_viewer_figure,
                                              style="Secondary.TButton", state=tk.DISABLED)
         self.viewer_export_btn.grid(row=0, column=1, padx=(0, 6))
@@ -3329,7 +3392,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             self.preset_status_label.grid()
 
     def show_usage_notice(self):
-        messagebox.showinfo("About / Citation / Usage Notice", USAGE_NOTICE)
+        messagebox.showinfo("关于与引用", USAGE_NOTICE_ZH)
 
     # ---------- 日志和文件 ----------
 
@@ -3415,77 +3478,35 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                 self.output_folder.set(os.path.join(folder, default_name))
             self.remember_recent_paths(image_dir=folder, output_dir=self.output_folder.get())
             self.log(f"图像文件夹：{folder}")
+        return folder
 
-    def _choose_capture_experiment(self, *, live=False):
-        folder = filedialog.askdirectory(parent=self.root, title="选择 StrainTrace Capture 实验")
-        if not folder:
-            return
-        try:
-            from straintrace_capture import ExperimentReader
-            from straintrace_capture.handoff import launch_analysis
-
-            with ExperimentReader(folder) as reader:
-                cameras = [row["device"] for row in reader.cameras()]
-            camera = None
-            if len(cameras) > 1 and not live:
-                options = "\n".join(f"{item['model']} · {item['id']}" for item in cameras)
-                camera = simpledialog.askstring("选择相机", f"输入相机 ID\n{options}", parent=self.root,
-                                               initialvalue=cameras[0]["id"])
-                if not camera:
-                    return
-            if live:
-                launch_analysis(folder, camera_id=camera, live=True)
-            else:
-                self.open_capture_experiment(folder, camera)
-        except Exception as exc:
-            messagebox.showerror("无法打开采集实验", str(exc), parent=self.root)
-
-    def _open_capture_workbench(self):
-        from straintrace_capture.handoff import launch_capture
-
-        selection = getattr(self, "_capture_selection", None)
-        try:
-            launch_capture(selection[0] if selection else None)
-        except OSError as exc:
-            messagebox.showerror("无法启动 Capture", str(exc), parent=self.root)
-
-    def open_capture_experiment(self, folder, camera_id=None, reference_sequence=None):
-        from straintrace_capture import CaptureError
-        from straintrace_capture.handoff import analysis_paths, analysis_snapshot, derive_analysis_inputs, write_snapshot
-
+    def _image_workspace_action(self):
         if self.is_processing or self._completion_pending:
-            messagebox.showinfo("正在处理", "当前分析完成后可打开采集实验。", parent=self.root)
+            return
+        if not self.image_paths:
+            if self.select_image_folder():
+                self.load_first_image()
             return
         try:
-            binding = analysis_snapshot(folder, camera_id, reference_sequence)
-        except CaptureError as exc:
-            if exc.code != "CHOOSE_REFERENCE" or reference_sequence is not None:
-                raise
-            reference_sequence = simpledialog.askinteger("选择参考图像", "输入已提交参考帧的采集序号",
-                                                         minvalue=1, parent=self.root)
-            if reference_sequence is None:
-                return
-            binding = analysis_snapshot(folder, camera_id, reference_sequence)
-        root = binding["experiment_root"]
-        prepared = None
-        try:
-            analysis_paths(binding)
-        except CaptureError as exc:
-            if exc.code not in {"BAYER_DERIVATION_REQUIRED", "ALPHA_DERIVATION_REQUIRED"}:
-                raise
-            if not messagebox.askyesno("转换分析输入", "按相机像素格式生成独立的亮度图像序列并载入分析？", parent=self.root):
-                return
-            from uuid import uuid4
+            start = self.get_int_setting(self.start_frame_1based, "起始帧")
+            if not 1 <= start <= len(self.image_paths):
+                raise ValueError(f"起始帧须在 1 至 {len(self.image_paths)} 之间。")
+            self.load_preview_frame(start - 1)
+        except Exception as exc:
+            messagebox.showerror("无法显示参考图", str(exc))
+            self.log_user_error("显示参考图", exc)
 
-            derived = Path(root) / "analysis-inputs" / str(uuid4())
-            prepared = derive_analysis_inputs(binding, derived, debayer=True, drop_alpha=True)
-            write_snapshot(prepared, derived / "capture_binding.json")
-        self._capture_selection = (root, binding["camera_id"], binding["frames"][0]["sequence"])
-        self._capture_prepared = prepared
-        self.image_folder.set(root)
-        self.output_folder.set(str(Path(root) / "analysis" / "offline"))
-        self.load_first_image()
-        self.log(f"Capture 实验 {binding['experiment_id']} · {binding['camera_id']}")
+    def _image_canvas_help(self, _event=None):
+        if not self.image_paths:
+            return "点击上方“选择并加载图像”，打开存放连续拍摄图片的文件夹。"
+        start, _ = self._safe_int_var(self.start_frame_1based)
+        if self._canvas_shows_field_overlay or self.current_preview_index + 1 != start:
+            return "点击“回到参考图”，在分析起始图片上绘制。当前图片可用于检查外观和变形。"
+        if self._drawing_mask_exclusion:
+            return "按住左键拖出要排除的位置。松开即添加排除框，该区域不参与计算。"
+        if self.is_fullfield_mode():
+            return "按住左键拖出要计算位移和应变的矩形区域。滚轮缩放，滚动条移动视图。"
+        return f"按住左键拖出第 {self.current_roi_index} 个测量框。两个框画好后，在控制台点“添加 ROI 组”。"
 
     def _choose_capture_experiment(self, *, live=False):
         folder = filedialog.askdirectory(parent=self.root, title="选择 StrainTrace Capture 实验")
@@ -4074,13 +4095,16 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                 hint = "正在保存结果并更新预览，请稍候。"
             elif blocking_items:
                 first = blocking_items[0]
-                hint = f"{first['label']}：{first['message']}"
+                raw_hint = f"{first['label']}：{first['message']}"
+                hint = self._start_prerequisite_help(raw_hint)
             elif not has_sequence:
                 hint = "请选择图像文件夹并加载序列。"
             elif is_ff and not has_field_roi:
                 hint = "请在参考帧绘制全场 ROI。"
             elif not is_ff and not has_groups:
                 hint = "请绘制 ROI 1 和 ROI 2，并添加 ROI 组。"
+            elif self.viewer_figure is not None and self.status_var.get().startswith("处理完成"):
+                hint = "到“图像与结果”查看图表，或点击“打开输出”查看已保存的文件。"
             elif warning_items:
                 hint = f"可分析；请复核{warning_items[0]['label']}。详情见“质量与日志”。"
             else:

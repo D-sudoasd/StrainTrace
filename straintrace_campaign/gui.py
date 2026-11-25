@@ -16,12 +16,28 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from ezdic_gui.controls import focus_canvas_child, localized_combobox, notebook_help
+from ezdic_gui.tooltips import ChoiceToolTip, ToolTip
+
 
 _CONFIRMED_DIMENSION_STATUSES = frozenset({
     "confirmed",
     "verified_recorded_dimensions",
     "verified_recorded_area",
 })
+ADAPTER_LABELS = {"generic": "通用图像目录", "desy": "DESY 采集目录"}
+CAMPAIGN_MODE_LABELS = {"extensometer": "虚拟引伸计", "fullfield": "全场二维 DIC"}
+TIME_FIELD_LABELS = {
+    "timestamp_unix_s": "记录的绝对时间",
+    "estimated_timestamp_unix_s": "推算的绝对时间",
+    "time_s": "相对时间",
+}
+ALIGNMENT_MODE_LABELS = {"instantaneous": "测量时刻的载荷", "exposure_mean": "曝光期间的平均载荷"}
+CURVE_LABELS = {
+    "frame": "帧号", "value": "测量值", "engineering_strain": "工程应变",
+    "engineering_strain_mean": "平均工程应变", "true_strain": "真应变",
+    "stress_MPa": "应力（MPa）", "force_N": "载荷（N）",
+}
 
 
 class CampaignPage(ttk.Frame):
@@ -49,6 +65,8 @@ class CampaignPage(ttk.Frame):
         self._busy = False
         self._build()
         self._register_control_help()
+        self._update_action_states()
+        self.apply_theme()
         self._poll_after_id = self._scheduler.after(100, self._poll_queue)
 
     def destroy(self):
@@ -119,16 +137,25 @@ class CampaignPage(ttk.Frame):
             self._workflow = importlib.import_module("straintrace_campaign.workflow")
         return self._workflow
 
-    def _add_control_help(self, widget, text, choices=None):
-        if self.app is None or not hasattr(self.app, "add_tooltip"):
-            return None
-        return self.app.add_tooltip(widget, text, choices) if choices is not None else self.app.add_tooltip(widget, text)
+    def _add_control_help(self, widget, text, choices=None, *, title=None):
+        def contextual(event):
+            description = text(event) if callable(text) else text
+            if isinstance(widget, ttk.Widget) and widget.instate(["disabled"]):
+                reason = self._disabled_help(widget)
+                if reason:
+                    return f"{description}\n暂不可用：{reason}"
+            return description
+
+        if self.app is not None and hasattr(self.app, "add_tooltip"):
+            self.app.add_tooltip(widget, contextual, choices, title=title)
+        elif choices is None:
+            ToolTip(widget, contextual, title=title)
+        else:
+            ChoiceToolTip(widget, contextual, choices, title=title)
+        return widget
 
     def _register_control_help(self):
         """Keep every campaign widget in the desktop's shared F1/hover help system."""
-        if self.app is None or not hasattr(self.app, "add_tooltip"):
-            return
-
         def visit(widget):
             yield widget
             for child in widget.winfo_children():
@@ -141,11 +168,36 @@ class CampaignPage(ttk.Frame):
             if not isinstance(widget, controls) or hasattr(widget, "_tooltip"):
                 continue
             text = self._control_help_text(widget)
+            title = self._associated_label(widget) if isinstance(widget, (ttk.Entry, ttk.Combobox)) else None
             if isinstance(widget, ttk.Combobox):
                 choices = self._combobox_help_choices(widget)
-                self._add_control_help(widget, text, choices)
+                self._add_control_help(widget, text, choices, title=title)
             else:
-                self._add_control_help(widget, text)
+                self._add_control_help(widget, text, title=title)
+
+    def _disabled_help(self, widget):
+        if widget is self.cancel_button:
+            return "只有正在运行或对齐批次时才可请求停止。"
+        if self._busy:
+            return "请等待当前后台操作完成。"
+        if self.project_dir is None:
+            return "先新建或打开批次项目。"
+        if widget is self.run_pending_button:
+            return "需有已通过人工审核且尚未计算或需要重算的批次。"
+        acq = self._selected_acquisition()
+        if acq is None:
+            return "先从列表选择一个采集批次。"
+        if widget in (self.propose_roi_button, self.visualize_roi_button):
+            return "所选批次缺少图像。请选择包含 DIC 图像的批次。"
+        if widget in (self.approve_roi_button, self.save_roi_button) and not self._proposal:
+            return "先点“建议 ROI”生成候选区域，检查自由段和端点。"
+        if widget is self.approve_roi_button:
+            return "先保存当前取点、填写审核人，并勾选已核实试样。"
+        if widget is self.run_button:
+            return "先在“ROI 审核”确认取点和试样身份。"
+        if widget is self.align_button:
+            return "选择载荷文件和时间来源，再点击“预览（不写入）”。参数变化后需要重新预览。"
+        return ""
 
     def _control_help_text(self, widget):
         if widget is self._viewport:
@@ -155,7 +207,7 @@ class CampaignPage(ttk.Frame):
         if widget is self.roi_editor_canvas:
             return "编辑自由段、排除区及每条虚拟引伸计的两个端点矩形；坐标为参考帧像素整数。"
         if widget is self.result_canvas:
-            return "显示当前结果文件中可用的 Frame-strain 曲线；曲线只绘制有限应变值。"
+            return "横轴是图像帧号，纵轴由结果文件中的应变、应力或载荷数据确定。"
         if widget is self.overlay_canvas:
             return "显示当前分析阶段附带的首帧、关键帧或结果叠图；没有附件时会明确提示。"
         if widget is self.alignment_preview:
@@ -163,9 +215,14 @@ class CampaignPage(ttk.Frame):
         if widget is self.result_text:
             return "查看当前批次身份、运行和对齐阶段记录，以及质量异常帧的原因。"
         if widget is self.acquisition_tree:
-            return "单击选择一个采集批次；列表状态区分待审核、待分析、已分析和已对齐。"
+            return self._acquisition_table_help
         if widget is self.detail_notebook:
-            return "切换当前批次的身份尺寸、ROI 审核、时间载荷和结果异常信息。"
+            return lambda event: notebook_help(self.detail_notebook, (
+                "核对试样编号、尺寸与来源。确认截面积后可计算应力。",
+                "检查计算区、排除区和端点位置。保存取点后由审核人确认试样。",
+                "从载荷文件选时间列和载荷列，预览匹配效果后再写入对齐结果。",
+                "运行或恢复已审核的批次。完成后查看应变及应力曲线、关键帧叠图和异常原因。",
+            ), event)
         if widget is getattr(self, "_viewport_scrollbar", None):
             return "滚动查看批次项目页面中被视口收起的内容。"
         if isinstance(widget, ttk.Notebook):
@@ -179,8 +236,14 @@ class CampaignPage(ttk.Frame):
         if isinstance(widget, tk.Text):
             return "查看本页生成的预览、结果或质量说明；文本可选择并复制。"
         if isinstance(widget, ttk.Combobox):
+            if widget is self.root_alias_box:
+                return "选择新建项目时登记的数据根目录。“扫描并登记”只扫描这个目录。"
+            if widget in (self.time_column_box, self.force_column_box):
+                return "选择载荷文件后，从列表中选择对应表头。请核对该列含义与单位。"
+            if widget is self.adapter_box:
+                return "按采集目录的组织方式选择规则。普通图片使用“通用图像目录”。"
             label = self._associated_label(widget) or "选项"
-            return f"选择{label}；请根据采集记录和时间来源选择匹配值。"
+            return f"选择{label}。悬停到某一项可查看其用途。"
         if isinstance(widget, (ttk.Entry, tk.Entry)):
             label = self._associated_label(widget)
             if label:
@@ -191,29 +254,43 @@ class CampaignPage(ttk.Frame):
         if isinstance(widget, (ttk.Button, tk.Button)):
             label = str(widget.cget("text"))
             help_by_button = {
-                "新建项目": "创建一个 campaign 项目并登记至少一个数据根目录。",
+                "新建项目": "创建批次项目。先选项目保存位置，再选存放原始采集数据的目录。",
                 "打开项目": "打开已有 project.json，继续使用其来源、审核和恢复记录。",
                 "导入 Keystone": "只读导入 Keystone 正式版本文件夹，或含 CURRENT.json 的版本根目录；保留 acquisition ID 和原始结果。",
-                "导出": "将当前项目生成经过校验的版本化数据包。",
-                "核验": "检查项目、阶段文件、校验和及逐帧数据的一致性。",
+                "导出数据包": "选择保存位置，生成带版本记录的项目数据包，便于交付或复查。",
+                "核验项目": "检查项目来源、计算文件和逐帧表格是否完整一致。",
                 "取消运行": "向当前后台运行发送取消请求；安全检查点完成后停止。",
                 "扫描并登记": "按所选根目录别名和适配器发现批次；帧号使用文件名或显式映射。",
                 "建议 ROI": "为当前批次生成自由段和端点候选；候选需要人工复核。",
                 "图像窗口查看": "在独立图像窗口查看当前 DIC 帧和 ROI 叠加。",
                 "保存身份与尺寸来源": "保存当前批次的身份、尺寸值和来源；只有确认尺寸可用于新应力计算。",
                 "保存当前取点": "重新校验参考图和整数矩形并保存 ROI；已有审核将被清除。",
-                "确认 ROI 与试样身份": "用审核人和试样身份确认绑定当前 proposal 与参考图哈希。",
+                "确认 ROI 与试样身份": "将已保存的取点、参考图和审核人写入审核记录。审核后可运行本批。",
                 "选择…": "选择载荷文件；读取列名以配置帧时间和载荷映射。",
-                "预览（不写入）": "只读检查时钟域、载荷支撑点、无效值和最大间隔；此操作不写项目。",
+                "预览（不写入）": "查看每帧时间能否在载荷记录中找到匹配点。预览供检查，确认后才保存。",
                 "确认并对齐": "按已预览的时间来源、载荷列和最大间隔执行正式对齐。",
                 "运行 / 恢复本批": "运行或从检查点恢复当前已审核批次；未审核 ROI 无法开始。",
                 "运行待处理批次": "依次处理已有人工 ROI 审核且尚无结果的批次。",
             }
             return help_by_button.get(label, f"执行“{label}”操作；结果和错误会显示在本页。")
-        return "当前 campaign 控件用于查看或编辑所选批次的来源、审核、对齐或结果信息。"
+        return "用于查看或编辑所选批次的数据来源、审核、对齐或结果。"
+
+    def _acquisition_table_help(self, event=None):
+        help_text = "请从列表选一个采集批次。可用上方名称和状态过滤列表。"
+        if event is None or getattr(event, "keysym", "") == "F1":
+            return help_text
+        return {
+            "#0": "采集批次名称。单击一行会更新下方或右侧的详细信息。",
+            "#1": "处理状态：待审核需确认取点，待分析可开始计算，已分析可查看结果，已对齐已匹配载荷。",
+            "#2": "这个批次包含的图像帧数。",
+            "#3": "是否发现可用于数字图像相关（DIC）的图片。",
+            "#4": "试样截面积，单位 mm²。只有确认后的面积才用于新应力计算。",
+        }.get(self.acquisition_tree.identify_column(event.x), help_text)
 
     @staticmethod
     def _associated_label(widget):
+        caption = ""
+        closest = -1
         try:
             info = widget.grid_info()
             row = info.get("row")
@@ -222,32 +299,46 @@ class CampaignPage(ttk.Frame):
                 if sibling is widget or not isinstance(sibling, (ttk.Label, tk.Label)):
                     continue
                 other = sibling.grid_info()
-                if other.get("row") == row and int(other.get("column", 0)) < column:
-                    return str(sibling.cget("text")).strip()
+                position = int(other.get("column", 0))
+                if other.get("row") == row and closest < position < column:
+                    caption = str(sibling.cget("text")).strip()
+                    closest = position
         except (tk.TclError, TypeError, ValueError):
             pass
-        return ""
+        return caption
 
     def _combobox_help_choices(self, widget):
         values = [str(value) for value in widget.cget("values")]
         if widget is self.adapter_box:
-            descriptions = {"generic": "按通用图像和显式表格规则发现批次。", "desy": "使用 DESY 采集目录适配规则。"}
+            descriptions = {ADAPTER_LABELS["generic"]: "从普通图像文件夹和显式帧映射表发现采集批次。",
+                            ADAPTER_LABELS["desy"]: "按 DESY 数据目录识别采集批次和来源记录。"}
         elif widget is self.state_filter_box:
-            descriptions = {value: f"只显示状态为“{value}”的采集批次。" for value in values}
+            descriptions = {
+                "全部": "显示所有采集批次。若填写了批次筛选，只显示名称匹配的批次。",
+                "待审核": "显示需要确认测量区域与试样身份的批次。",
+                "待分析": "显示已经确认取点、可以开始计算的批次。",
+                "已分析": "显示已有应变或位移结果的批次。",
+                "已对齐": "显示已将图像帧和载荷记录按时间匹配的批次。",
+                "异常": "显示出现失败、无效测量或需要复核的批次。",
+            }
         elif widget is self.preview_position_box:
             descriptions = {"首帧": "预览序列的第一张图。", "中帧": "预览序列中间位置的图。", "末帧": "预览序列的最后一张图。"}
         elif widget is self.measurement_time_field_box:
             descriptions = {
-                "timestamp_unix_s": "使用记录为绝对时间的 DIC/测量时间；推算字段不能冒充此列。",
-                "estimated_timestamp_unix_s": "明确使用单独保存的推算绝对时间。",
-                "time_s": "使用相对秒；必须与载荷文件具有相同 clock_id。",
+                TIME_FIELD_LABELS["timestamp_unix_s"]: "用采集设备实际记录的时间戳匹配载荷。",
+                TIME_FIELD_LABELS["estimated_timestamp_unix_s"]: "用单独保存的推算时间匹配载荷。先核查载荷的时间基准。",
+                TIME_FIELD_LABELS["time_s"]: "使用相对于采集起点的秒数。图像与载荷必须共享同一个时钟标识。",
             }
         elif widget is self.alignment_mode_box:
-            descriptions = {"instantaneous": "在选定测量时刻作有界精确匹配或线性插值。",
-                            "exposure_mean": "对曝光时间窗内的分段载荷信号求均值。"}
+            descriptions = {
+                ALIGNMENT_MODE_LABELS["instantaneous"]: "以每帧的测量时刻匹配载荷。位于两个读数之间时按时间线性插值。",
+                ALIGNMENT_MODE_LABELS["exposure_mean"]: "对每帧曝光起止时刻之间的载荷取平均。需要曝光时间窗记录。",
+            }
         elif widget is self.analysis_mode_box:
-            descriptions = {"extensometer": "使用多条独立虚拟引伸计测量标距变化。",
-                            "fullfield": "使用独立的二维全场 DIC 输出。"}
+            descriptions = {
+                CAMPAIGN_MODE_LABELS["extensometer"]: "追踪一条或多条标距，计算两端间距的逐帧变化。",
+                CAMPAIGN_MODE_LABELS["fullfield"]: "计算指定区域内的二维位移和应变分布。",
+            }
         elif widget is self.root_alias_box:
             descriptions = {value: f"项目中登记的数据根目录别名“{value}”。" for value in values}
         elif widget in (self.time_column_box, self.force_column_box):
@@ -259,15 +350,13 @@ class CampaignPage(ttk.Frame):
 
     def _refresh_combobox_help(self, widget, choices):
         tooltip = getattr(widget, "_tooltip", None)
-        mapping = {str(key): str(value) for key, value in choices.items()}
-        if tooltip is not None and hasattr(tooltip, "choices"):
-            tooltip.choices = mapping
-            widget._tooltip_choices = mapping
+        if isinstance(tooltip, ChoiceToolTip):
+            tooltip.set_choices(choices)
 
     def _build(self):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        self._viewport = tk.Canvas(self, width=600, height=410, highlightthickness=0)
+        self._viewport = tk.Canvas(self, width=600, height=360, highlightthickness=0)
         self._viewport.grid(row=0, column=0, sticky="nsew")
         self._add_control_help(self._viewport, "批次项目工作区包含来源、批次列表、身份尺寸、ROI、时间载荷和结果页；页面可滚动。")
         self._viewport_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._viewport.yview)
@@ -278,49 +367,51 @@ class CampaignPage(ttk.Frame):
         self.content.bind("<Configure>", self._update_content_scrollregion)
         self._viewport.bind("<Configure>", self._resize_content_window)
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(2, weight=1)
 
         bar = ttk.Frame(self.content)
         bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        for col in range(9):
-            bar.columnconfigure(col, weight=0)
-        bar.columnconfigure(8, weight=1)
-        self.new_button = ttk.Button(bar, text="新建项目", command=self.new_project)
-        self.open_button = ttk.Button(bar, text="打开项目", command=self.open_project_dialog)
-        self.import_button = ttk.Button(bar, text="导入 Keystone", command=self.import_keystone_dialog)
-        self.export_button = ttk.Button(bar, text="导出", command=self.export_dialog)
-        self.verify_button = ttk.Button(bar, text="核验", command=self.verify_project)
-        self.cancel_button = ttk.Button(bar, text="取消运行", command=self.cancel_operation, state=tk.DISABLED)
+        for col in range(5):
+            bar.columnconfigure(col, weight=1)
+        self.new_button = ttk.Button(bar, text="新建项目", command=self.new_project, style="Compact.TButton")
+        self.open_button = ttk.Button(bar, text="打开项目", command=self.open_project_dialog, style="Compact.TButton")
+        self.import_button = ttk.Button(bar, text="导入 Keystone", command=self.import_keystone_dialog, style="Compact.TButton")
+        self.export_button = ttk.Button(bar, text="导出数据包", command=self.export_dialog, style="Compact.TButton")
+        self.verify_button = ttk.Button(bar, text="核验项目", command=self.verify_project, style="Compact.TButton")
         for i, button in enumerate((self.new_button, self.open_button, self.import_button,
-                                    self.export_button, self.verify_button, self.cancel_button)):
-            button.grid(row=0, column=i, padx=(0, 5), sticky="w")
-        self.project_label_var = tk.StringVar(value="尚未打开 campaign 项目")
-        ttk.Label(bar, textvariable=self.project_label_var).grid(row=0, column=8, sticky="e")
+                                    self.export_button, self.verify_button)):
+            button.grid(row=0, column=i, padx=(0, 4), sticky="ew")
+        self.project_label_var = tk.StringVar(value="尚未打开批次项目")
+        self.project_label = ttk.Label(bar, textvariable=self.project_label_var, style="Hint.TLabel",
+                                       justify="left", wraplength=520)
+        self.project_label.grid(row=1, column=0, columnspan=5, sticky="w", pady=(5, 0))
 
         source = ttk.LabelFrame(self.content, text="数据来源与批次发现", padding=(8, 5))
         source.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        source.columnconfigure(1, weight=1)
         source.columnconfigure(3, weight=1)
         ttk.Label(source, text="根目录别名").grid(row=0, column=0, sticky="w")
         self.root_alias_var = tk.StringVar(value="data")
-        self.root_alias_box = ttk.Combobox(source, textvariable=self.root_alias_var, width=14)
-        self.root_alias_box.grid(row=0, column=1, padx=(4, 12), sticky="w")
-        ttk.Label(source, text="适配器").grid(row=0, column=2, sticky="w")
+        self.root_alias_box = ttk.Combobox(source, textvariable=self.root_alias_var, width=10)
+        self.root_alias_box.grid(row=0, column=1, padx=(4, 8), sticky="ew")
+        ttk.Label(source, text="目录类型").grid(row=0, column=2, sticky="w")
         self.adapter_var = tk.StringVar(value="generic")
-        self.adapter_box = ttk.Combobox(source, textvariable=self.adapter_var,
-                                        values=("generic", "desy"), width=12, state="readonly")
-        self.adapter_box.grid(row=0, column=3, padx=(4, 12), sticky="w")
+        self.adapter_box = localized_combobox(source, self.adapter_var, ADAPTER_LABELS, width=13)
+        self.adapter_box.grid(row=0, column=3, padx=(4, 0), sticky="ew")
         self.pattern_var = tk.StringVar()
-        ttk.Label(source, text="名称筛选").grid(row=0, column=4, sticky="w")
-        ttk.Entry(source, textvariable=self.pattern_var, width=22).grid(row=0, column=5, padx=(4, 8))
-        self.scan_button = ttk.Button(source, text="扫描并登记", command=self.scan_root)
-        self.scan_button.grid(row=0, column=6, sticky="w")
+        ttk.Label(source, text="图像筛选").grid(row=1, column=0, sticky="w")
+        pattern_entry = ttk.Entry(source, textvariable=self.pattern_var, width=14)
+        pattern_entry.grid(row=1, column=1, columnspan=2, padx=(4, 8), pady=(4, 0), sticky="ew")
+        self._add_control_help(pattern_entry, "留空按目录类型使用默认规则。可填写通配符，例如 **/*.tif，扫描各层目录中的 TIFF 图像。",
+                               title="图像筛选")
+        self.scan_button = ttk.Button(source, text="扫描并登记", command=self.scan_root, style="Secondary.TButton")
+        self.scan_button.grid(row=1, column=3, sticky="e", pady=(4, 0))
 
-        split = ttk.Panedwindow(self.content, orient=tk.HORIZONTAL)
-        split.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
-        left = ttk.Frame(split, padding=(0, 0, 5, 0))
-        right = ttk.Frame(split, padding=(5, 0, 0, 0))
-        split.add(left, weight=1)
-        split.add(right, weight=3)
+        split = ttk.Frame(self.content)
+        split.grid(row=2, column=0, sticky="ew")
+        split.columnconfigure(0, weight=1)
+        self._batch_list = left = ttk.Frame(split)
+        self._batch_details = right = ttk.Frame(split)
+        self._compact_content = None
         left.columnconfigure(0, weight=1)
         left.rowconfigure(2, weight=1)
         filter_row = ttk.Frame(left)
@@ -328,8 +419,10 @@ class CampaignPage(ttk.Frame):
         filter_row.columnconfigure(1, weight=1)
         ttk.Label(filter_row, text="批次筛选").grid(row=0, column=0, sticky="w")
         self.filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_row, textvariable=self.filter_var)
+        filter_entry = ttk.Entry(filter_row, textvariable=self.filter_var, width=12)
         filter_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        self._add_control_help(filter_entry, "输入试样或采集批次名称中的文字。仅筛选下面的列表，清空即可恢复显示。",
+                               title="批次筛选")
         filter_entry.bind("<KeyRelease>", lambda _event: self.refresh_table())
         self.state_filter_var = tk.StringVar(value="全部")
         self.state_filter_box = ttk.Combobox(filter_row, textvariable=self.state_filter_var,
@@ -338,27 +431,29 @@ class CampaignPage(ttk.Frame):
         self.state_filter_box.grid(row=0, column=2, sticky="e")
         self.state_filter_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_table())
         self.acquisition_tree = ttk.Treeview(
-            left, columns=("status", "frames", "dic", "area"), show="tree headings", selectmode="browse"
+            left, columns=("status", "frames", "dic", "area"), show="tree headings", selectmode="browse", height=5
         )
         self.acquisition_tree.heading("#0", text="采集批次")
         self.acquisition_tree.heading("status", text="状态")
         self.acquisition_tree.heading("frames", text="帧")
         self.acquisition_tree.heading("dic", text="DIC")
         self.acquisition_tree.heading("area", text="面积")
-        self.acquisition_tree.column("#0", width=245, minwidth=140, stretch=True)
+        self.acquisition_tree.column("#0", width=175, minwidth=120, stretch=True)
         self.acquisition_tree.column("status", width=80, anchor="center")
         self.acquisition_tree.column("frames", width=58, anchor="e")
         self.acquisition_tree.column("dic", width=55, anchor="center")
         self.acquisition_tree.column("area", width=65, anchor="e")
         tree_scroll = ttk.Scrollbar(left, orient="vertical", command=self.acquisition_tree.yview)
-        self.acquisition_tree.configure(yscrollcommand=tree_scroll.set)
+        tree_xscroll = ttk.Scrollbar(left, orient="horizontal", command=self.acquisition_tree.xview)
+        self.acquisition_tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_xscroll.set)
         self.acquisition_tree.grid(row=2, column=0, sticky="nsew")
         tree_scroll.grid(row=2, column=1, sticky="ns")
+        tree_xscroll.grid(row=3, column=0, sticky="ew")
         self.acquisition_tree.bind("<<TreeviewSelect>>", self._on_select_acquisition)
         self.batch_count_var = tk.StringVar(value="0 批次")
-        ttk.Label(left, textvariable=self.batch_count_var).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(left, textvariable=self.batch_count_var).grid(row=4, column=0, sticky="w", pady=(4, 0))
 
-        self.detail_notebook = ttk.Notebook(right)
+        self.detail_notebook = ttk.Notebook(right, style="Detail.TNotebook")
         self.detail_notebook.grid(row=0, column=0, sticky="nsew")
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
@@ -375,13 +470,24 @@ class CampaignPage(ttk.Frame):
         self._build_alignment_tab()
         self._build_results_tab()
 
-        footer = ttk.Frame(self.content)
-        footer.grid(row=3, column=0, sticky="ew")
-        footer.columnconfigure(1, weight=1)
+        footer = ttk.Frame(self)
+        footer.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
+        footer.columnconfigure(0, weight=1)
+        self.cancel_button = ttk.Button(footer, text="取消运行", command=self.cancel_operation,
+                                        state=tk.DISABLED, style="Compact.TButton")
+        self.cancel_button.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(6, 0))
         self.progress = ttk.Progressbar(footer, mode="determinate", maximum=100, length=150)
-        self.progress.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(footer, textvariable=self.status_var).grid(row=0, column=1, sticky="ew")
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        self.status_var = tk.StringVar(value="新建批次项目，或打开已有项目继续处理。")
+        self.status_label = ttk.Label(footer, textvariable=self.status_var, style="NextStep.TLabel",
+                                      wraplength=420, justify="left")
+        self.status_label.grid(row=0, column=0, sticky="ew")
+        self.status_label.bind("<Configure>", lambda event: self.status_label.configure(
+            wraplength=max(160, event.width - 24)), add="+")
+        self._add_control_help(self.status_label, "显示当前操作的进度、结果和错误。详细的质量记录在“结果与异常”页。")
+        self._add_control_help(self.progress, "显示当前后台操作的完成比例。等待扫描或核验时显示运行状态。")
+        self._add_control_help(self.project_label, "显示当前批次项目的名称和保存位置。")
+        self._bind_content_scrolling(self.content)
 
     def _update_content_scrollregion(self, _event=None):
         bounds = self._viewport.bbox("all")
@@ -390,6 +496,33 @@ class CampaignPage(ttk.Frame):
 
     def _resize_content_window(self, event):
         self._viewport.itemconfigure(self._viewport_window, width=event.width)
+        self.project_label.configure(wraplength=max(180, event.width - 14))
+        compact = event.width < round(690 * float(self.tk.call("tk", "scaling")))
+        if compact == self._compact_content:
+            return
+        self._compact_content = compact
+        self._batch_list.grid(row=0, column=0, sticky="nsew", pady=(0, 6) if compact else 0)
+        self._batch_details.grid(row=1 if compact else 0, column=0 if compact else 1, sticky="nsew",
+                                 padx=0 if compact else (8, 0))
+        self._batch_list.master.columnconfigure(1, weight=0 if compact else 2)
+
+    def _bind_content_scrolling(self, widget):
+        if widget is not self.content:
+            widget.bind("<FocusIn>", lambda _event: focus_canvas_child(widget, self._viewport, self.content), add="+")
+        if widget is self.roi_editor_canvas:
+            return
+        if not isinstance(widget, (tk.Text, ttk.Treeview)):
+            def scroll(event):
+                tip = getattr(widget, "_tooltip", None)
+                if tip is not None:
+                    tip.hide()
+                upward = getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0
+                self._viewport.yview_scroll(-3 if upward else 3, "units")
+                return "break"
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(sequence, scroll, add="+")
+        for child in widget.winfo_children():
+            self._bind_content_scrolling(child)
 
     def _build_identity_tab(self):
         tab = self.identity_tab
@@ -404,14 +537,23 @@ class CampaignPage(ttk.Frame):
                   ("宽度 mm", "width_mm"),
                   ("厚度 mm", "thickness_mm"), ("确认面积 mm²", "area_mm2"),
                   ("尺寸来源", "dimension_source"))
+        help_by_field = {
+            "physical_specimen_id": "填写试样记录中的编号。若无法确认此批图像对应哪个试样，请留空。",
+            "width_mm": "填写试样平行段的实测宽度，单位 mm。用小数点，例如 2.5。",
+            "thickness_mm": "填写试样平行段的实测厚度，单位 mm。用小数点，例如 0.8。",
+            "area_mm2": "填写已记录的截面积，单位 mm²。矩形截面也可由已确认的宽度和厚度计算。",
+            "dimension_source": "注明尺寸来自哪份记录，例如“拉伸记录 2026-11-25，第 3 页”。",
+        }
         for field_row, (label, key) in enumerate(fields, start=1):
-            ttk.Label(tab, text=label).grid(row=field_row, column=0, sticky="w", padx=(0, 10), pady=3)
+            caption = ttk.Label(tab, text=label)
+            caption.grid(row=field_row, column=0, sticky="w", padx=(0, 10), pady=3)
             if key == "analysis_mode":
-                widget = self.analysis_mode_box = ttk.Combobox(
-                    tab, textvariable=self.identity_vars[key],
-                    values=("extensometer", "fullfield"), state="readonly", width=24)
+                widget = self.analysis_mode_box = localized_combobox(
+                    tab, self.identity_vars[key], CAMPAIGN_MODE_LABELS, width=15)
             else:
-                widget = ttk.Entry(tab, textvariable=self.identity_vars[key], width=36)
+                widget = ttk.Entry(tab, textvariable=self.identity_vars[key], width=16)
+                self._add_control_help(caption, help_by_field[key])
+                self._add_control_help(widget, help_by_field[key], title=label)
             widget.grid(row=field_row, column=1, sticky="ew", pady=3)
         self.dimension_confirmed_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(tab, text="尺寸已由记录确认；允许新计算使用面积",
@@ -439,20 +581,23 @@ class CampaignPage(ttk.Frame):
         self.preview_position_box.grid(row=0, column=3)
         self.preview_position_box.bind("<<ComboboxSelected>>", lambda _event: self.render_roi_preview())
         self.roi_preview_var = tk.StringVar(value="先选择批次并生成候选区域。")
-        ttk.Label(controls, textvariable=self.roi_preview_var).grid(row=0, column=4, sticky="w", padx=8)
+        ttk.Label(controls, textvariable=self.roi_preview_var, style="Hint.TLabel", wraplength=420).grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         free_seed = ttk.Frame(tab)
         free_seed.grid(row=1, column=0, sticky="ew", pady=(0, 5))
-        ttk.Label(free_seed, text="手工自由段候选 [x,y,w,h]").pack(side=tk.LEFT, padx=(0, 4))
+        seed_label = ttk.Label(free_seed, text="自由段（像素）")
+        seed_label.pack(side=tk.LEFT, padx=(0, 4))
+        self._add_control_help(seed_label, "自由段是试样两端夹具之间可测量的部分。留空可自动建议。候选不合适时填写首帧上的矩形。")
         self.free_region_seed_vars = []
-        for label in ("x", "y", "w", "h"):
+        for label, name in zip(("x", "y", "宽", "高"), ("左边缘 x", "上边缘 y", "宽度", "高度")):
             ttk.Label(free_seed, text=label).pack(side=tk.LEFT, padx=(3, 1))
             var = tk.StringVar()
-            entry = ttk.Entry(free_seed, textvariable=var, width=6)
+            entry = ttk.Entry(free_seed, textvariable=var, width=5)
             entry.pack(side=tk.LEFT)
+            self._add_control_help(entry, f"填写首帧中自由段的{name}，单位像素。四项填写整数后点“建议 ROI”，全部留空则使用自动候选。",
+                                   title=f"自由段{name}")
             entry.bind("<KeyRelease>", lambda _event: self.render_roi_preview())
             self.free_region_seed_vars.append(var)
-        ttk.Label(free_seed, text="留空则使用自动候选；尺寸不足或候选不可靠时，在首帧上填写后重新建议。",
-                  wraplength=420).pack(side=tk.LEFT, padx=8)
         body = ttk.Panedwindow(tab, orient=tk.HORIZONTAL)
         body.grid(row=2, column=0, sticky="nsew")
         tab.rowconfigure(2, weight=1)
@@ -465,7 +610,7 @@ class CampaignPage(ttk.Frame):
         self.roi_canvas = tk.Canvas(canvas_frame, background="#18212b", height=300, highlightthickness=0)
         self.roi_canvas.grid(row=0, column=0, sticky="nsew")
         self.roi_canvas.bind("<Configure>", lambda _event: self.render_roi_preview())
-        edit_frame.columnconfigure(1, weight=1)
+        edit_frame.columnconfigure(0, weight=1)
         self.roi_entries: dict[tuple[str, int | None, str], list[tk.StringVar]] = {}
         edit_frame.rowconfigure(0, weight=1)
         self.roi_editor_canvas = tk.Canvas(edit_frame, height=245, highlightthickness=0)
@@ -479,14 +624,18 @@ class CampaignPage(ttk.Frame):
         self.roi_editor_frame.bind("<Configure>", self._resize_roi_editor_scroll)
         self.roi_editor_canvas.bind("<Configure>", self._resize_roi_editor_window)
         self.roi_diagnostics_var = tk.StringVar(value="")
-        ttk.Label(edit_frame, textvariable=self.roi_diagnostics_var, wraplength=280, justify="left").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+        diagnostics = ttk.Label(edit_frame, textvariable=self.roi_diagnostics_var, wraplength=230, justify="left")
+        diagnostics.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+        diagnostics.bind("<Configure>", lambda event: diagnostics.configure(wraplength=max(130, event.width - 8)), add="+")
         self.save_roi_button = ttk.Button(edit_frame, text="保存当前取点", command=self.save_roi_edits, state=tk.DISABLED)
         self.save_roi_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(3, 4))
         ttk.Separator(edit_frame).grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
         self.reviewer_var = tk.StringVar()
         ttk.Label(edit_frame, text="审核人").grid(row=4, column=0, sticky="w")
-        ttk.Entry(edit_frame, textvariable=self.reviewer_var, width=24).grid(row=4, column=1, sticky="ew")
+        reviewer_entry = ttk.Entry(edit_frame, textvariable=self.reviewer_var, width=12)
+        reviewer_entry.grid(row=4, column=1, sticky="ew")
+        self._add_control_help(reviewer_entry, "填写实际核对试样身份和取点的人名。确认后，此姓名会写入审核记录。",
+                               title="审核人")
         self.specimen_confirm_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(edit_frame, text="已核实自由段属于此物理试样", variable=self.specimen_confirm_var).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=4)
@@ -497,44 +646,50 @@ class CampaignPage(ttk.Frame):
     def _build_alignment_tab(self):
         tab = self.alignment_tab
         tab.columnconfigure(1, weight=1)
-        tab.columnconfigure(3, weight=1)
         ttk.Label(tab, text="载荷文件").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.load_path_var = tk.StringVar()
-        ttk.Entry(tab, textvariable=self.load_path_var).grid(row=0, column=1, sticky="ew", pady=4)
+        load_entry = ttk.Entry(tab, textvariable=self.load_path_var, width=12)
+        load_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        self._add_control_help(load_entry, "选择试验机导出的载荷 CSV 或文本文件。读取表头后，再指定时间列和载荷列。",
+                               title="载荷文件")
         ttk.Button(tab, text="选择…", command=self.choose_load_file).grid(row=0, column=2, padx=(6, 0))
         self.time_column_var = tk.StringVar(value="timestamp_unix_s")
         self.force_column_var = tk.StringVar(value="force_N")
         ttk.Label(tab, text="载荷时间列").grid(row=1, column=0, sticky="w", pady=4)
-        self.time_column_box = ttk.Combobox(tab, textvariable=self.time_column_var, width=28)
-        self.time_column_box.grid(row=1, column=1, sticky="w", pady=4)
-        ttk.Label(tab, text="DIC 时间来源").grid(row=1, column=2, sticky="w", padx=(8, 4), pady=4)
+        self.time_column_box = ttk.Combobox(tab, textvariable=self.time_column_var, width=18)
+        self.time_column_box.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(tab, text="图像测量时间").grid(row=3, column=0, sticky="w", pady=4)
         self.measurement_time_field_var = tk.StringVar(value="timestamp_unix_s")
-        self.measurement_time_field_box = ttk.Combobox(
-            tab, textvariable=self.measurement_time_field_var,
-            values=("timestamp_unix_s", "estimated_timestamp_unix_s", "time_s"),
-            state="readonly", width=28)
-        self.measurement_time_field_box.grid(row=1, column=3, sticky="w", pady=4)
-        ttk.Label(tab, text="载荷列").grid(row=2, column=0, sticky="w", pady=4)
-        self.force_column_box = ttk.Combobox(tab, textvariable=self.force_column_var, width=28)
-        self.force_column_box.grid(row=2, column=1, sticky="w", pady=4)
-        ttk.Label(tab, text="对齐方式").grid(row=3, column=0, sticky="w", pady=4)
+        self.measurement_time_field_box = localized_combobox(
+            tab, self.measurement_time_field_var, TIME_FIELD_LABELS, width=18)
+        self.measurement_time_field_box.grid(row=3, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(tab, text="载荷数值列").grid(row=2, column=0, sticky="w", pady=4)
+        self.force_column_box = ttk.Combobox(tab, textvariable=self.force_column_var, width=18)
+        self.force_column_box.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(tab, text="对齐方式").grid(row=4, column=0, sticky="w", pady=4)
         self.alignment_mode_var = tk.StringVar(value="instantaneous")
-        self.alignment_mode_box = ttk.Combobox(
-            tab, textvariable=self.alignment_mode_var, values=("instantaneous", "exposure_mean"),
-            state="readonly", width=26)
-        self.alignment_mode_box.grid(row=3, column=1, sticky="w", pady=4)
-        ttk.Label(tab, text="最大插值间隔 s").grid(row=4, column=0, sticky="w", pady=4)
+        self.alignment_mode_box = localized_combobox(tab, self.alignment_mode_var, ALIGNMENT_MODE_LABELS, width=18)
+        self.alignment_mode_box.grid(row=4, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(tab, text="最大插值间隔（秒）").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=4)
         self.max_gap_var = tk.StringVar(value="2.5")
-        ttk.Entry(tab, textvariable=self.max_gap_var, width=12).grid(row=4, column=1, sticky="w", pady=4)
+        gap_entry = ttk.Entry(tab, textvariable=self.max_gap_var, width=12)
+        gap_entry.grid(row=5, column=1, sticky="w", pady=4)
+        self._add_control_help(gap_entry, "填写允许插值的两个载荷读数之间的最大间隔，单位秒。间隔过大时该帧保留为未匹配。",
+                               title="最大插值间隔")
         action_row = ttk.Frame(tab)
-        action_row.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 3))
+        action_row.grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 3))
         self.preview_alignment_button = ttk.Button(action_row, text="预览（不写入）", command=self.preview_alignment)
         self.preview_alignment_button.pack(side=tk.LEFT, padx=(0, 6))
         self.align_button = ttk.Button(action_row, text="确认并对齐", command=self.align, state=tk.DISABLED)
         self.align_button.pack(side=tk.LEFT)
-        self.alignment_preview = tk.Text(tab, height=12, wrap="none", state=tk.DISABLED)
-        self.alignment_preview.grid(row=6, column=0, columnspan=4, sticky="nsew", pady=(5, 0))
-        tab.rowconfigure(6, weight=1)
+        self.alignment_preview = tk.Text(tab, height=9, width=24, wrap="none", state=tk.DISABLED)
+        self.alignment_preview.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
+        preview_y = ttk.Scrollbar(tab, orient="vertical", command=self.alignment_preview.yview)
+        preview_x = ttk.Scrollbar(tab, orient="horizontal", command=self.alignment_preview.xview)
+        self.alignment_preview.configure(yscrollcommand=preview_y.set, xscrollcommand=preview_x.set)
+        preview_y.grid(row=7, column=3, sticky="ns", pady=(5, 0))
+        preview_x.grid(row=8, column=0, columnspan=3, sticky="ew")
+        tab.rowconfigure(7, weight=1)
         self._alignment_preview_key = None
         for variable in (self.load_path_var, self.time_column_var, self.force_column_var,
                          self.measurement_time_field_var, self.alignment_mode_var, self.max_gap_var):
@@ -552,7 +707,8 @@ class CampaignPage(ttk.Frame):
         tab.rowconfigure(2, weight=1)
         actions = ttk.Frame(tab)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        self.run_button = ttk.Button(actions, text="运行 / 恢复本批", command=self.run_selected, state=tk.DISABLED)
+        self.run_button = ttk.Button(actions, text="运行 / 恢复本批", command=self.run_selected,
+                                     state=tk.DISABLED, style="Primary.TButton")
         self.run_button.pack(side=tk.LEFT, padx=(0, 5))
         self.run_pending_button = ttk.Button(actions, text="运行待处理批次", command=self.run_pending, state=tk.DISABLED)
         self.run_pending_button.pack(side=tk.LEFT)
@@ -560,7 +716,7 @@ class CampaignPage(ttk.Frame):
         self.view_campaign_results_button.pack(side=tk.LEFT, padx=(6, 0))
         visual = ttk.Panedwindow(tab, orient=tk.HORIZONTAL)
         visual.grid(row=1, column=0, sticky="nsew", pady=(0, 5))
-        plot_frame = ttk.LabelFrame(visual, text="Frame 应变 / 应力曲线")
+        plot_frame = ttk.LabelFrame(visual, text="逐帧应变 / 应力曲线")
         overlay_frame = ttk.LabelFrame(visual, text="关键帧叠图")
         visual.add(plot_frame, weight=2)
         visual.add(overlay_frame, weight=1)
@@ -578,7 +734,7 @@ class CampaignPage(ttk.Frame):
         self._result_plot_labels = ("frame", "value")
         self._result_overlay_photo = None
         self._result_overlay_source = None
-        self.result_text = tk.Text(tab, height=8, wrap="word", state=tk.DISABLED)
+        self.result_text = tk.Text(tab, height=8, width=24, wrap="word", state=tk.DISABLED)
         self.result_text.grid(row=2, column=0, sticky="nsew")
         self.result_scroll = ttk.Scrollbar(tab, orient="vertical", command=self.result_text.yview)
         self.result_text.configure(yscrollcommand=self.result_scroll.set)
@@ -586,7 +742,7 @@ class CampaignPage(ttk.Frame):
 
     # ---- project lifecycle -------------------------------------------------
     def new_project(self):
-        parent = filedialog.askdirectory(title="选择 campaign 项目保存位置")
+        parent = filedialog.askdirectory(title="选择批次项目保存位置")
         if not parent:
             return
         name = simpledialog.askstring("新建 campaign", "项目名称：", parent=self.winfo_toplevel())
@@ -610,7 +766,7 @@ class CampaignPage(ttk.Frame):
                               on_success=lambda _result: self.open_project_at(path))
 
     def open_project_dialog(self):
-        chosen = filedialog.askdirectory(title="选择含 project.json 的 campaign 项目目录")
+        chosen = filedialog.askdirectory(title="选择含 project.json 的批次项目目录")
         if chosen:
             self.open_project_at(chosen)
 
@@ -636,7 +792,9 @@ class CampaignPage(ttk.Frame):
         self._proposal = None
         self.refresh_table()
         self._set_current_acquisition(None)
-        self._set_status(f"已打开项目：{len(self.project['acquisitions'])} 批次")
+        count = len(self.project["acquisitions"])
+        self._set_status(f"已打开 {count} 个采集批次，请从列表选择。" if count else
+                         "选择数据根目录和目录类型，然后点“扫描并登记”。")
         self._update_action_states()
 
     def import_keystone_dialog(self):
@@ -755,8 +913,20 @@ class CampaignPage(ttk.Frame):
         if aid == self.current_acquisition_id:
             return
         self.current_acquisition_id = aid
-        self._set_current_acquisition(self._find_acquisition(aid))
+        acquisition = self._find_acquisition(aid)
+        self._set_current_acquisition(acquisition)
         self._update_action_states()
+        if not self._busy and acquisition is not None:
+            state = self._acquisition_state(acquisition)
+            hint = {
+                "待审核": "在“ROI 审核”建议或核对取点，保存后确认试样身份。",
+                "待分析": "在“结果与异常”运行本批，或从已保存的进度恢复。",
+                "已分析": "在“结果与异常”查看曲线。有载荷文件时，可在“时间与载荷”预览对齐。",
+                "已对齐": "在“结果与异常”查看对齐后的结果，可在页面顶部导出数据包。",
+                "异常": "在“结果与异常”查看失败帧和原因，再检查图像或参数。",
+            }.get(state)
+            if hint:
+                self._set_status(hint)
 
     def _find_acquisition(self, aid):
         if aid is None:
@@ -901,8 +1071,14 @@ class CampaignPage(ttk.Frame):
             var = tk.StringVar(value=self._fmt(values[j]) if j < len(values) else "")
             entry = ttk.Entry(self.roi_editor_frame, textvariable=var, width=6)
             entry.grid(row=row, column=j + 1, sticky="ew", padx=(0, 2))
-            self._add_control_help(entry, f"{label} ROI 的 {('x', 'y', 'width', 'height')[j]} 像素坐标；必须填写非负整数，宽高为正数。")
+            name = ("左边缘 x", "上边缘 y", "宽度", "高度")[j]
+            help_text = "从原图左上角起算，填写非负整数像素。" if j < 2 else "填写大于零的整数像素。"
+            self._add_control_help(entry, f"设置{label}的{name}。{help_text}修改后需保存取点，再重新审核。",
+                                   title=f"{label} · {name}")
             entry.bind("<KeyRelease>", lambda _event, k=kind, i=index, s=subkey: self._on_roi_rect_edited(k, i, s))
+            entry.bind("<FocusIn>", lambda _event, widget=entry: focus_canvas_child(
+                widget, self.roi_editor_canvas, self.roi_editor_frame), add="+")
+            self._bind_content_scrolling(entry)
             vars_.append(var)
         self.roi_entries[(kind, index, subkey)] = vars_
 
@@ -1410,7 +1586,7 @@ class CampaignPage(ttk.Frame):
         try:
             wf = self._get_workflow()
         except Exception as exc:
-            messagebox.showerror("Campaign 工作流不可用", str(exc))
+            messagebox.showerror("批次工作流不可用", str(exc))
             return
         self._busy = True
         self._cancel_event = threading.Event() if cancellable else None
@@ -1648,11 +1824,10 @@ class CampaignPage(ttk.Frame):
         self._set_result_overlay(overlay_path)
         info_var = getattr(self.app, "campaign_result_info_var", None) if self.app is not None else None
         if info_var is not None:
-            status = stage.get("status", "无阶段结果")
+            status = self._acquisition_state(acq)
             overlay_text = overlay_path.name if overlay_path else "无叠图附件"
-            info_var.set(f"{acq.get('name', acq.get('acquisition_id'))} · 阶段={status} · "
-                         f"Frame 行={len(rows)} · 有限绘图点={len(points)} · "
-                         f"y={y_label} · {overlay_text}")
+            info_var.set(f"{acq.get('name', acq.get('acquisition_id'))} · {status} · "
+                         f"有效绘图点 {len(points)}/{len(rows)} · {CURVE_LABELS[y_label]} · {overlay_text}")
         exceptions = []
         for row in rows:
             quality = str(row.get("quality_status", ""))
@@ -1723,6 +1898,8 @@ class CampaignPage(ttk.Frame):
         canvas.create_line(left, bottom, right, bottom, fill=muted_fg, width=1)
         canvas.create_line(left, bottom, left, top, fill=muted_fg, width=1)
         x_label, y_label = self._result_plot_labels
+        x_label = CURVE_LABELS.get(x_label, x_label)
+        y_label = CURVE_LABELS.get(y_label, y_label)
         canvas.create_text((left + right) / 2, height - 10, text=x_label, fill=axis_fg)
         canvas.create_text(12, (top + bottom) / 2, text=y_label, angle=90, fill=axis_fg)
         points = self._result_plot_points
@@ -1792,7 +1969,7 @@ class CampaignPage(ttk.Frame):
 
     def _require_project(self):
         if self.project_dir is None:
-            messagebox.showwarning("尚未打开项目", "请先新建或打开 campaign 项目。")
+            messagebox.showwarning("尚未打开项目", "请先新建或打开批次项目。")
             return False
         return True
 

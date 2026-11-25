@@ -8,32 +8,35 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import ezdic_core as _core
+from .controls import localized_combobox
 from .tooltips import HelpNavigationToolbar
 
 DIC_COMPONENT_LABELS = {
-    "u": "u (px)",
-    "v": "v (px)",
-    "zncc": "ZNCC",
-    "Exx": "Exx (Green-Lagrange)",
-    "Eyy": "Eyy (Green-Lagrange)",
-    "Exy": "Exy (Green-Lagrange)",
-    "exx": "exx (infinitesimal)",
-    "eyy": "eyy (infinitesimal)",
-    "exy": "exy (infinitesimal)",
+    "u": "水平位移 u",
+    "v": "竖直位移 v",
+    "zncc": "纹理相关系数 ZNCC",
+    "Exx": "水平应变 Exx",
+    "Eyy": "竖直应变 Eyy",
+    "Exy": "剪切应变 Exy",
+    "exx": "水平小应变 exx",
+    "eyy": "竖直小应变 eyy",
+    "exy": "剪切小应变 exy",
 }
+COLORMAP_LABELS = {"RdBu_r": "蓝白红", "viridis": "紫绿黄", "cividis": "深蓝至黄", "turbo": "蓝至红"}
 DIC_COMPONENT_HELP = {
-    "u": "左右移动了多少个像素；正值向右，负值向左。选择后立即更新图。",
-    "v": "上下移动了多少个像素；正值向下，负值向上。选择后立即更新图。",
-    "zncc": "两个图片块的纹理相似程度，越接近 1 越相似；用于核对追踪质量。选择后立即更新图。",
-    "Exx": "左右方向相对参考图片的伸缩，包含较大变形时的修正；正值伸长、负值缩短。选择后立即更新图。",
-    "Eyy": "上下方向相对参考图片的伸缩，包含较大变形时的修正；正值伸长、负值缩短。选择后立即更新图。",
-    "Exy": "剪切变形，即原本垂直的两个方向变斜的程度，包含较大变形时的修正；工程剪切值是此值的两倍。选择后立即更新图。",
-    "exx": "按小变形近似计算的左右伸缩；与大写 Exx 使用不同计算方式。选择后立即更新图。",
-    "eyy": "按小变形近似计算的上下伸缩；与大写 Eyy 使用不同计算方式。选择后立即更新图。",
-    "exy": "按小变形近似计算的剪切变化，即两个垂直方向变斜的程度；工程剪切值是此值的两倍。选择后立即更新图。",
+    "u": "水平方向移动的像素数。正值向右，负值向左。",
+    "v": "竖直方向移动的像素数。正值向下，负值向上。",
+    "zncc": "两个图片块的纹理相似程度。越接近 1 越相似，可用于核对追踪质量。",
+    "Exx": "水平方向的格林–拉格朗日应变，适用于较大变形。正值伸长，负值缩短。",
+    "Eyy": "竖直方向的格林–拉格朗日应变，适用于较大变形。正值伸长，负值缩短。",
+    "Exy": "格林–拉格朗日剪切应变，表示原本垂直的两个方向发生角度变化。对应工程形式为 2Exy。",
+    "exx": "按小变形近似计算水平方向的伸长或缩短。",
+    "eyy": "按小变形近似计算竖直方向的伸长或缩短。",
+    "exy": "按小变形近似计算的剪切应变。工程剪切应变为 2exy。",
 }
 
 
@@ -116,12 +119,15 @@ class ViewersMixin:
 
     def _update_field_viewer_context(self):
         frame = self.dic_last_frame_1based
-        filename = self.dic_last_filename or "未知文件"
+        filename = self.dic_last_filename
         ref_frame = self.dic_last_reference_frame_1based
-        ref_filename = self.dic_last_reference_filename or "未知文件"
-        frame_text = f"第 {frame} 帧" if frame is not None else "帧未知"
-        ref_text = f"参考帧 {ref_frame}" if ref_frame is not None else "参考帧未知"
-        self.field_viewer_context_var.set(f"{frame_text}：{filename}；{ref_text}：{ref_filename}")
+        ref_filename = self.dic_last_reference_filename
+        parts = []
+        if frame is not None or filename:
+            parts.append(" ".join(filter(None, (f"第 {frame} 帧" if frame is not None else "", filename))))
+        if ref_frame is not None or ref_filename:
+            parts.append(" ".join(filter(None, (f"参考帧 {ref_frame}" if ref_frame is not None else "参考图", ref_filename))))
+        self.field_viewer_context_var.set(" · ".join(parts))
 
     def _resolved_field_display_options(self, component):
         """Return one consistent display-options dict shared by plot, colorbar, and overlay."""
@@ -202,6 +208,8 @@ class ViewersMixin:
         cax = make_axes_locatable(ax).append_axes("right", size=0.18, pad=0.24)
         cbar = fig.colorbar(mesh, cax=cax)
         _core.style_dic_colorbar(cbar, _core.get_plot_preset("raw_inspection"), f"{component} ({unit})")
+        cbar.locator = MaxNLocator(nbins="auto", min_n_ticks=2)
+        cbar.update_ticks()
         ax.set_title(f"全场 {DIC_COMPONENT_LABELS.get(component, component)}")
         self._style_viewer_plot_fonts(ax)
         self._style_viewer_axes_dark(ax)
@@ -217,17 +225,11 @@ class ViewersMixin:
         ctrl.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         ctrl.columnconfigure(1, weight=1)
         self._viewer_controls = ctrl
-        ttk.Label(ctrl, text="场分量", style="Hint.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.dic_component_box = ttk.Combobox(
-            ctrl,
-            textvariable=self.dic_field_component,
-            values=list(_core.DIC_FIELD_COMPONENTS),
-            width=8,
-            state="readonly",
-        )
+        ttk.Label(ctrl, text="查看分量", style="Hint.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.dic_component_box = localized_combobox(ctrl, self.dic_field_component, DIC_COMPONENT_LABELS, width=20)
         self.dic_component_box.grid(row=0, column=1, sticky="w")
         toolbar = ttk.Frame(ctrl, style="Card.TFrame")
-        toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=4)
+        toolbar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=4)
         display_controls = (
             (self.dic_view_background, 8, "选择结果颜色下方显示哪张图片，再点“应用”更新。", {
                 "无底图": "只显示测量结果颜色，便于看清数值分布。",
@@ -250,23 +252,32 @@ class ViewersMixin:
                 "turbo": "从深蓝经青、绿、黄到红，色彩变化较多，需对照刻度读取数值。",
             }),
         )
-        for column, (variable, width, tip, choices) in enumerate(display_controls):
-            combo = ttk.Combobox(toolbar, textvariable=variable, values=list(choices), width=width, state="readonly")
+        for column, (title, (variable, width, tip, choices)) in enumerate(zip(
+            ("结果底图", "色标范围", "绘制方式", "色带"), display_controls,
+        )):
+            if variable is self.dic_colormap:
+                combo = localized_combobox(toolbar, variable, COLORMAP_LABELS, width=width)
+                choices = {COLORMAP_LABELS[value]: detail for value, detail in choices.items()}
+            else:
+                combo = ttk.Combobox(toolbar, textvariable=variable, values=list(choices), width=width, state="readonly")
             combo.grid(row=0, column=column, padx=(0, 5), sticky="w")
-            self.add_tooltip(combo, tip, choices=choices)
+            self.add_tooltip(combo, tip, choices=choices, title=title)
+            if variable is self.dic_color_mode:
+                color_mode_box = combo
         scales = ttk.Frame(ctrl, style="Card.TFrame")
-        scales.grid(row=2, column=0, columnspan=2, sticky="ew")
-        ttk.Label(scales, text="色标").grid(row=0, column=0, sticky="w", padx=(0, 5))
-        for column, variable in enumerate((self.dic_color_min, self.dic_color_max), start=1):
+        scales.grid(row=2, column=0, columnspan=3, sticky="ew")
+        for column, (limit, variable) in enumerate((
+            ("最小值", self.dic_color_min), ("最大值", self.dic_color_max),
+        )):
+            ttk.Label(scales, text=limit).grid(row=0, column=2 * column, sticky="w", padx=(0, 5))
             entry = ttk.Entry(scales, textvariable=variable, width=9)
-            entry.grid(row=0, column=column, padx=(0, 5))
-            limit = "最小" if column == 1 else "最大"
-            self.add_tooltip(entry, f"填写颜色刻度的{limit}值，只在“手动范围”下生效，填好后点“应用”。最小值必须小于最大值；移动量用像素，伸缩值勾选“应变 %”后用百分数。")
-        percent_check = ttk.Checkbutton(scales, text="应变 %", variable=self.dic_percent)
-        percent_check.grid(row=0, column=3, padx=(0, 6))
+            entry.grid(row=0, column=2 * column + 1, padx=(0, 5))
+            self.add_tooltip(entry, f"选择“手动范围”后，填写色标{limit}，再点“应用”。最小值须小于最大值。位移用像素，勾选“应变 %”时应变用百分数。")
+        percent_check = ttk.Checkbutton(toolbar, text="应变 %", variable=self.dic_percent)
+        percent_check.grid(row=0, column=4, padx=(2, 6))
         self.add_tooltip(percent_check, "勾选后，伸缩值按百分数显示，例如 0.01 显示为 1%。取消后显示原始比例；点击“应用”更新，移动量仍以像素计。")
-        apply_button = ttk.Button(scales, text="应用", command=self.apply_dic_display_options, style="Compact.TButton")
-        apply_button.grid(row=0, column=4)
+        apply_button = ttk.Button(toolbar, text="应用", command=self.apply_dic_display_options, style="Compact.TButton")
+        apply_button.grid(row=0, column=5)
         self.add_tooltip(apply_button, "点击用所选底图、颜色范围、绘图方式和单位重新显示当前结果，同时更新图像页面的叠加预览。这里只调整显示，不重新计算数据。")
         display_button = ttk.Button(ctrl, style="Compact.TButton")
         display_button.grid(row=0, column=2, sticky="e")
@@ -278,32 +289,37 @@ class ViewersMixin:
         def update_display_settings():
             expanded = getattr(self, "_dic_display_expanded", False)
             display_button.configure(text="收起显示设置" if expanded else "显示设置")
-            for frame in (toolbar, scales):
-                frame.grid() if expanded else frame.grid_remove()
+            toolbar.grid() if expanded else toolbar.grid_remove()
+            if expanded and self.dic_color_mode.get() == "手动范围":
+                scales.grid()
+            else:
+                scales.grid_remove()
 
         display_button.configure(command=toggle_display_settings)
+        color_mode_box.bind("<<ComboboxSelected>>", lambda _event: update_display_settings(), add="+")
         self.add_tooltip(display_button, "展开或收起底图、颜色刻度、百分数和绘图方式的设置，给结果图留出更多查看空间。")
         update_display_settings()
-        ttk.Label(
-            ctrl,
-            textvariable=self.field_viewer_context_var,
-            style="Hint.TLabel",
-            wraplength=360,
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        if self.field_viewer_context_var.get():
+            context_label = ttk.Label(ctrl, textvariable=self.field_viewer_context_var, style="Hint.TLabel", wraplength=360)
+            context_label.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+            self.add_tooltip(context_label, "显示生成当前结果的图像及固定参考图的帧号和文件名。")
         valid = np.asarray(self.dic_last_field.get("valid", []), dtype=bool)
         strain_valid = np.asarray(self.dic_last_field.get("strain_valid", []), dtype=bool)
         eligible_count = int(np.count_nonzero(self.dic_last_field.get("eligible", np.ones(valid.size))))
-        gauge = self.dic_last_field.get("strain_gauge_span_px", "未知")
-        summary = f"位移有效 {np.count_nonzero(valid)}/{eligible_count} · 应变有效 {np.count_nonzero(strain_valid)}/{eligible_count} · 应变窗口跨度 {gauge} px · 空白表示无有效结果"
+        gauge = self.dic_last_field.get("strain_gauge_span_px")
+        summary = f"有效点 · 位移 {np.count_nonzero(valid)}/{eligible_count} · 应变 {np.count_nonzero(strain_valid)}/{eligible_count}"
+        if gauge is not None:
+            summary += f" · 应变窗口跨度 {gauge} px"
         summary_label = ttk.Label(ctrl, text=summary, style="Hint.TLabel", wraplength=580)
-        summary_label.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        summary_label.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         self.add_tooltip(summary_label, "找到对应纹理后，还要利用周围足够多、分布合适的测量点计算伸缩，所以移动量与伸缩量的有效数量可能不同。空白或 NaN 表示没有有效数值，不能当作零。")
         ctrl.bind("<Configure>", lambda event: self._wrap_result_labels(ctrl, event.width))
-        self.dic_component_box.bind("<<ComboboxSelected>>", self._on_field_component_change)
+        self.dic_component_box.bind("<<ComboboxSelected>>", self._on_field_component_change, add="+")
         self.add_tooltip(
             self.dic_component_box,
             "选择要查看哪一种移动、伸缩或纹理相似程度，选择后立即更新结果图和图像页面的叠加预览。",
-            choices=DIC_COMPONENT_HELP,
+            choices={DIC_COMPONENT_LABELS[value]: detail for value, detail in DIC_COMPONENT_HELP.items()},
+            title="结果分量",
         )
 
     def _on_field_component_change(self, _event=None):
@@ -458,9 +474,13 @@ class ViewersMixin:
             "Subplots": "点击打开图表边距和图间距调节窗口。当前结果图使用自动布局，手动间距设置可能不生效。",
             "Save": "点击选择位置和文件格式，保存当前结果图，包含现在的坐标范围和颜色刻度。",
         }
+        toolbar_titles = {
+            "Home": "恢复全图", "Back": "返回上一视图", "Forward": "前进到下一视图",
+            "Pan": "平移图表", "Zoom": "框选放大", "Subplots": "调整边距", "Save": "保存图表",
+        }
         for name, button in self.viewer_toolbar._buttons.items():
             button.configure(takefocus=True)
-            self.add_tooltip(button, toolbar_help[name])
+            self.add_tooltip(button, toolbar_help[name], title=toolbar_titles[name])
         self.add_tooltip(self.viewer_canvas.get_tk_widget(), self._result_plot_help)
         self.add_tooltip(self.viewer_toolbar._message_label, "鼠标移到图中时，这里显示当前位置的坐标或数值；可对照坐标轴和颜色刻度读取。")
         self._style_viewer_toolbar()
@@ -473,7 +493,7 @@ class ViewersMixin:
         if mode == "ZOOM":
             return "框选模式：按住左键拖出要放大的范围，右键拖框缩小。再次点击放大镜图标退出，房子图标恢复全图。"
         return (
-            "这是移动量或伸缩量的彩色结果图，数值与单位在图旁的颜色刻度上。空白表示未算出有效结果；用下方图标移动、放大或保存。"
+            "颜色刻度显示位移、应变或相关系数。px 表示像素，(1) 表示无量纲，% 表示百分数。图内空白处没有有效数值。"
             if self._viewer_kind == "fullfield" else
             "横轴是图片序号，纵轴是伸缩比例或泊松比（横向收缩与纵向伸长的比值）。曲线断开表示没有有效结果；用下方图标移动、放大或保存。"
         )
