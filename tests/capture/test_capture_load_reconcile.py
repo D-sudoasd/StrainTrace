@@ -121,6 +121,39 @@ def test_absolute_header_only_can_be_completed_from_the_original_source(tmp_path
     assert float(_table(result)[1]["载荷 (N)"]) == 150
 
 
+@pytest.mark.parametrize(("time_unit", "encoding"), [("ms", "utf-8"), ("s", "utf-16")])
+def test_inferred_load_format_keeps_units_and_encoding_for_backfill(tmp_path, time_unit, encoding):
+    from straintrace_capture.synchronization import load_alignment_settings
+
+    experiment = capture_with_known_receipts(tmp_path / "run")
+    source = tmp_path / "load.csv"
+    scale = 1000 if time_unit == "ms" else 1
+    source.write_text(
+        f"timestamp,force_N\n{1_800_000_000 * scale},100\n{1_800_000_000.5 * scale},150\n",
+        encoding=encoding,
+    )
+    channel = load_alignment_settings({
+        "source": source.name, "time_column": "timestamp", "force_column": "force_N",
+        "basis": "host-receive", "time_unit": time_unit, "encoding": encoding,
+    }, base_dir=tmp_path)
+    log = LiveResultLog(experiment)
+    with LiveAnalysis(experiment, gauges=_GAUGES, latest=False, load_alignment=channel) as follower:
+        while row := follower.poll():
+            log.append(row, follower, "ordered")
+    assert log.error is None
+    recorded = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+    assert [row["mechanics"]["force_N"] for row in recorded] == [100, 150, None, None]
+    original_log = log.path.read_bytes()
+    with source.open("a", encoding=encoding) as stream:
+        stream.write(f"{1_800_000_001.5 * scale},250\n")
+
+    result = tmp_path / "backfilled.csv"
+    summary = export_live_csv(log.path, result, fill_load=True)
+    assert summary["filled_force_frames"] == 1
+    assert [float(row["载荷 (N)"]) if row["载荷 (N)"] else None for row in _table(result)] == [100, 150, 200, None]
+    assert log.path.read_bytes() == original_log
+
+
 def test_cli_exports_a_late_load_and_reports_coverage(tmp_path, archived_relative):
     _, source, log = archived_relative
     with source.open("a", encoding="utf-8") as stream:

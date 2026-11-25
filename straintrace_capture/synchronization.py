@@ -261,10 +261,9 @@ class LoadAlignment:
             "force_column": self.force_column, "force_unit_override": self.force_unit,
             "max_gap_s": self.max_gap_s, "time_basis": self.basis, "mode": self.mode,
             "displacement_column": self.displacement_column, "displacement_unit": self.displacement_unit,
+            "time_format": self.time_format, "time_unit": self.time_unit, "encoding": self.encoding,
+            "load_clock_origin": asdict(self.load_origin) if self.load_origin else None,
         }
-        if self.time_format is not None:
-            settings.update(time_format=self.time_format, time_unit=self.time_unit, encoding=self.encoding,
-                            load_clock_origin=asdict(self.load_origin) if self.load_origin else None)
         return settings
 
     def at(self, frame: dict, *, refresh=True) -> dict:

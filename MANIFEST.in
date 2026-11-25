@@ -15,6 +15,7 @@ include scripts/check_joss_artifacts.py
 include scripts/validate_campaign_baseline.py
 include scripts/validate_agent_upgrade.py
 include scripts/benchmark_capture.py scripts/validate_capture_desktop.py
+include scripts/validate_capture_industrial.py scripts/pyinstaller/hook-pypylon.py
 include examples/paired_dic_comparison.json
 recursive-include examples/campaign *.py
 recursive-include examples/agent *.py *.json *.csv

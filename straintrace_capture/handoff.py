@@ -369,7 +369,10 @@ def _workbench_command(executable: str, module: str) -> list[str]:
 
 def _launch_workbench(command: list[str]) -> subprocess.Popen:
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    return subprocess.Popen(command, creationflags=flags)
+    # An absolute source-script launch adds its directory to the parent's
+    # import path only. The sibling process must also be able to resolve -m.
+    directory = None if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+    return subprocess.Popen(command, creationflags=flags, cwd=directory)
 
 
 def launch_analysis(root: str | Path, *, camera_id: str | None = None, live: bool = False,
