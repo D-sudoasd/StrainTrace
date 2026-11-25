@@ -304,7 +304,9 @@ def test_window_title_contains_developer(gui_app):
     root, _app = gui_app
     title = root.title()
 
-    assert title == "分析控制台 · ezDIC v0.1.4 - Developed by Dr. Delun Gong - DOI: 10.5281/zenodo.20222465"
+    assert title.startswith("StrainTrace · 分析控制台")
+    assert "开发者 Dr. Delun Gong" in title
+    assert DOI in title
 
 
 def test_gui_initializes_poisson_role_selection(gui_app):
@@ -634,9 +636,9 @@ def test_auto_fit_shrinks_when_canvas_becomes_smaller(gui_app, tmp_path):
 def test_gui_beginner_workflow_and_key_button_tooltips_are_available(gui_app):
     _root, app = gui_app
 
-    workflow_text = "\n".join(getattr(app, "workflow_step_texts", []))
-    assert "图像文件夹" in workflow_text
-    assert "ROI" in workflow_text
+    workflow_text = str(app.workflow_steps_label.cget("text"))
+    assert "加载图像" in workflow_text
+    assert "查看结果" in workflow_text
     assert "开始分析" in workflow_text
 
     tooltip_targets = [
@@ -855,7 +857,7 @@ def test_preflight_panel_blocks_missing_inputs_and_export_options(gui_app, tmp_p
     no_export_items = app.build_preflight_items()
     assert any(item["level"] == "block" and item["label"] == "导出选项" for item in no_export_items)
     assert str(app.start_button.cget("state")) == "disabled"
-    assert "导出选项" in app.workflow_hint_var.get()
+    assert "勾选至少一种" in app.workflow_hint_var.get()
 
 
 def test_preflight_reports_small_l0_as_warning_not_blocking(gui_app, tmp_path, monkeypatch):

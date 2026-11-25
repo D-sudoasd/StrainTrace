@@ -21,7 +21,7 @@ class CanvasMixin:
         cx, cy = self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2
         self.canvas.create_text(cx, cy - 24, text="加载图像序列", fill="#e2e8f0",
                                 font=(self.ui_font_family, 16, "bold"), tags="empty_state")
-        self.canvas.create_text(cx, cy + 24, text="选择图像文件夹，然后点击“加载序列”\n支持 TIFF、PNG、JPEG 和 BMP",
+        self.canvas.create_text(cx, cy + 24, text="点击上方“选择并加载图像”，打开一组连续拍摄的图片。\n支持 TIFF、PNG、JPEG 和 BMP",
                                 fill="#b0bfd2", justify=tk.CENTER, font=self.ui_base_font,
                                 width=max(200, self.canvas.winfo_width() - 50), tags="empty_state")
 
@@ -54,10 +54,15 @@ class CanvasMixin:
             start, _ = self._safe_int_var(self.start_frame_1based)
             filename = os.path.basename(self.image_paths[self.current_preview_index])
             h, w = self.preview_img8.shape[:2]
-            label = "全场 ROI" if self.is_fullfield_mode() else f"ROI {self.current_roi_index}"
+            if self.current_preview_index + 1 != start:
+                action = "画测量区域前请回到参考图"
+            elif self._drawing_mask_exclusion:
+                action = "正在绘制排除区"
+            else:
+                action = "绘制分析区域" if self.is_fullfield_mode() else f"绘制测量框 {self.current_roi_index}"
             text = (
                 f"{filename} · 第 {self.current_preview_index + 1}/{len(self.image_paths)} 帧 · "
-                f"{w} × {h} px · 参考帧 {start if start is not None else '待校验'} · 绘制 {label}"
+                f"{w} × {h} px · 参考帧 {start if start is not None else '待校验'} · {action}"
             )
         self.image_context_var.set(text)
 
@@ -380,6 +385,11 @@ class CanvasMixin:
         with self._state_lock_ctx():
             busy = bool(getattr(self, "is_processing", False) or getattr(self, "_completion_pending", False))
         can_use = has_image and not busy
+        if hasattr(self, "image_action_button"):
+            self.image_action_button.configure(
+                text="回到参考图" if self.image_paths else "选择并加载图像",
+                state=tk.DISABLED if busy else tk.NORMAL,
+            )
         for attr in ("btn_zoom_in", "btn_zoom_out", "btn_fit", "btn_1to1"):
             if hasattr(self, attr):
                 try:

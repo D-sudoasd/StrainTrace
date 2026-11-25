@@ -1,9 +1,11 @@
 """Hover/F1 tooltips, combobox choice help, and Matplotlib navigation toolbar."""
 
 import os
+from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
+from matplotlib import rcParams
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
@@ -39,10 +41,11 @@ def _get_win32_monitor_api():
 
 
 class ToolTip:
-    def __init__(self, widget, text, wraplength=360, delay_ms=450):
+    def __init__(self, widget, text, wraplength=360, delay_ms=380, *, title=None):
         self.widget = widget
         self.owner = widget.winfo_toplevel()
         self.text = text
+        self.title = title
         self.wraplength = wraplength
         self.delay_ms = delay_ms
         self.after_id = None
@@ -57,6 +60,8 @@ class ToolTip:
         self.widget.bind("<Motion>", self.schedule, add="+")
         self.widget.bind("<Leave>", self.hide, add="+")
         self.widget.bind("<ButtonPress>", self.hide, add="+")
+        self.widget.bind("<MouseWheel>", self.hide, add="+")
+        self.widget.bind("<KeyPress>", self.hide, add="+")
         self.widget.bind("<FocusOut>", self.hide, add="+")
         self.widget.bind("<Unmap>", self.hide, add="+")
         self.widget.bind("<Destroy>", self.dispose, add="+")
@@ -86,7 +91,8 @@ class ToolTip:
         self.hide()
         self.event = event
         self.show()
-        return "break"
+        if self.tip_window is not None:
+            return "break"
 
     def dismiss(self, event=None):
         visible = self.tip_window is not None
@@ -135,17 +141,14 @@ class ToolTip:
                 anchor_y = self.event.y_root if pointer else wy + wh
             screen_x, screen_y, screen_w, screen_h = self.screen_bounds(anchor_x, anchor_y)
 
+            previous = getattr(self.owner, "_active_tooltip", None)
+            if previous is not None and previous is not self:
+                previous.hide()
             self.tip_window = tk.Toplevel(self.widget)
             self.tip_window.withdraw()
             self.tip_window.wm_overrideredirect(True)
             self.tip_window.wm_attributes("-topmost", True)
-            label = ttk.Label(
-                self.tip_window, text=text, justify=tk.LEFT,
-                wraplength=min(self.wraplength, screen_w - 40),
-                background="#fff8dc", foreground="#1f2937",
-                relief=tk.SOLID, borderwidth=1, padding=(8, 5),
-            )
-            label.pack()
+            self._build_card(text, min(self.wraplength, screen_w - 40))
             self.tip_window.update_idletasks()
             width = self.tip_window.winfo_reqwidth()
             height = self.tip_window.winfo_reqheight()
@@ -165,12 +168,36 @@ class ToolTip:
             self.tip_window.wm_geometry(f"+{x}+{y}")
             self.tip_window.deiconify()
             self.shown_text = text
+            self.owner._active_tooltip = self
         except tk.TclError:
             self.hide()
             return
 
+    def _build_card(self, text, wraplength):
+        style = ttk.Style(self.widget)
+        background = style.lookup("Help.TLabel", "background") or "#f0f6ff"
+        foreground = style.lookup("Help.TLabel", "foreground") or "#18263c"
+        border = style.lookup("Help.TLabel", "bordercolor") or "#a8bedc"
+        frame = tk.Frame(self.tip_window, background=background,
+                         highlightbackground=border, highlightthickness=1, padx=11, pady=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+        title = self.title
+        if title is None and "text" in self.widget.keys() and not (
+            "textvariable" in self.widget.keys() and self.widget.cget("textvariable")
+        ):
+            caption = str(self.widget.cget("text"))
+            title = caption if 1 < len(caption) <= 20 and "\n" not in caption else ""
+        if title:
+            ttk.Label(frame, text=title, style="HelpTitle.TLabel", background=background,
+                      foreground=foreground, wraplength=wraplength).pack(anchor="w", pady=(0, 3))
+        ttk.Label(frame, text=text, style="Help.TLabel", background=background, foreground=foreground,
+                  justify=tk.LEFT, wraplength=wraplength).pack(anchor="w")
+        ttk.Label(frame, text="Esc 关闭", style="HelpKey.TLabel", background=background).pack(anchor="w", pady=(5, 0))
+
     def hide(self, event=None):
         self.unschedule()
+        if getattr(self.owner, "_active_tooltip", None) is self:
+            self.owner._active_tooltip = None
         self.pending_text = None
         self.shown_text = None
         if self.tip_window is not None:
@@ -192,22 +219,27 @@ class ToolTip:
 class ChoiceToolTip(ToolTip):
     """Explain both the selected value and each native combobox list item."""
 
-    def __init__(self, widget, text, choices):
+    def __init__(self, widget, text, choices, *, title=None):
         self.summary = text
-        self.choices = {str(value): explanation for value, explanation in choices.items()}
         self.popup_choice = None
         self.listbox = None
         self._disposed = False
-        super().__init__(widget, self.choice_text)
-        widget._tooltip_choices = self.choices
+        super().__init__(widget, self.choice_text, title=title)
+        self.set_choices(choices)
         self.previous_postcommand = widget.cget("postcommand")
         widget.configure(postcommand=self.prepare_choices)
         self.motion_command = widget.register(self.on_choice_motion)
         self.selection_command = widget.register(self.on_choice_selection)
+        self.help_command = widget.register(self.show_choice_help)
         self.hide_command = widget.register(self.hide_choices)
 
+    def set_choices(self, choices):
+        self.hide_choices()
+        self.choices = {str(value): explanation for value, explanation in choices.items()}
+        self.widget._tooltip_choices = self.choices
+
     def choice_text(self, event=None):
-        if self.popup_choice is not None:
+        if self.popup_choice in self.choices:
             return f"{self.popup_choice}：{self.choices[self.popup_choice]}\n点击或按回车选择。"
         summary = self.summary(event) if callable(self.summary) else self.summary
         value = str(self.widget.get())
@@ -225,6 +257,7 @@ class ChoiceToolTip(ToolTip):
             ("<Motion>", f"{self.motion_command} %y %X %Y"),
             ("<Map>", self.selection_command),
             ("<KeyRelease>", self.selection_command),
+            ("<F1>", f"{self.help_command}; break"),
             ("<<ListboxSelect>>", self.selection_command),
             ("<Leave>", self.hide_command),
             ("<Unmap>", self.hide_command),
@@ -262,9 +295,15 @@ class ChoiceToolTip(ToolTip):
                 y = int(self.widget.tk.call("winfo", "rooty", self.listbox)) + int(box[1])
                 self.schedule_choice(index, x, y)
 
+    def show_choice_help(self):
+        self.on_choice_selection()
+        if self.popup_choice in self.choices:
+            self.unschedule()
+            self.show()
+
     def schedule_choice(self, index, x_root, y_root):
         values = self.widget.cget("values")
-        value = str(values[index])
+        value = str(values[index]) if 0 <= index < len(values) else None
         if value not in self.choices:
             self.hide_choices()
             return
@@ -282,7 +321,7 @@ class ChoiceToolTip(ToolTip):
     def dispose(self, event=None):
         self._disposed = True
         super().dispose(event)
-        for attr in ("motion_command", "selection_command", "hide_command"):
+        for attr in ("motion_command", "selection_command", "help_command", "hide_command"):
             cmd = getattr(self, attr, None)
             if cmd:
                 try:
@@ -303,6 +342,30 @@ class HelpNavigationToolbar(NavigationToolbar2Tk):
     # immediate English tooltips from Matplotlib's default toolbar.
     toolitems = tuple((name, None, icon, action)
                       for name, _tip, icon, action in NavigationToolbar2Tk.toolitems)
+
+    def set_message(self, message):
+        super().set_message({"pan/zoom": "平移与缩放", "zoom rect": "框选放大"}.get(message, message))
+
+    def save_figure(self, *args):
+        types = {f"{extension.upper()} 文件": extension for extension in self.canvas.get_supported_filetypes()}
+        selected = tk.StringVar(self, f"{self.canvas.get_default_filetype().upper()} 文件")
+        directory = os.path.expanduser(rcParams["savefig.directory"])
+        filename = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(), title="保存结果图", initialdir=directory,
+            initialfile=Path(self.canvas.get_default_filename()).stem,
+            filetypes=[(label, f"*.{ext}") for label, ext in types.items()], typevariable=selected,
+        )
+        if not filename:
+            return None
+        if directory:
+            rcParams["savefig.directory"] = str(Path(filename).parent)
+        extension = None if Path(filename).suffix else types.get(selected.get())
+        try:
+            self.canvas.figure.savefig(filename, format=extension)
+        except Exception as exc:
+            messagebox.showerror("无法保存图表", str(exc), parent=self.winfo_toplevel())
+            return None
+        return filename
 
     def configure_subplots(self, *args):
         if hasattr(self, "subplot_tool"):

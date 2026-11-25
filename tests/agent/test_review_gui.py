@@ -305,7 +305,7 @@ def assert_in_view(widget, canvas):
 def test_keyboard_traversal_reveals_controls_in_short_page(page):
     canvas = page.input_page._canvas
     assert canvas.winfo_height() > 20
-    assert page.create_button.winfo_rooty() > canvas.winfo_rooty() + canvas.winfo_height()
+    assert page.preview_button.winfo_rooty() > canvas.winfo_rooty() + canvas.winfo_height()
     # Tk normally excludes withdrawn widgets from traversal. Custom takefocus
     # callbacks enable the real Tk traversal algorithm without mapping a window.
     source_entry = next(widget for widget in page.input_page.winfo_children()
@@ -314,26 +314,23 @@ def test_keyboard_traversal_reveals_controls_in_short_page(page):
     for widget in targets:
         widget.configure(takefocus=lambda *_args: True)
     page.update()
-    assert page.preview_button.tk_focusNext() == page.create_button
-    page.tk.call("tk::TabToWindow", str(page.preview_button.tk_focusNext()))
+    assert page.auto_button.tk_focusNext() == page.preview_button
+    page.tk.call("tk::TabToWindow", str(page.auto_button.tk_focusNext()))
     page.update()
     assert canvas.yview()[0] > 0
-    assert_in_view(page.create_button, canvas)
-    page.tk.call("tk::TabToWindow", str(page.create_button.tk_focusNext()))
+    assert_in_view(page.preview_button, canvas)
+    assert page.preview_button.tk_focusPrev() == page.auto_button
+    page.tk.call("tk::TabToWindow", str(page.preview_button.tk_focusPrev()))
     page.update()
     assert_in_view(page.auto_button, canvas)
     assert page.auto_button.tk_focusPrev() == page.create_button
     page.tk.call("tk::TabToWindow", str(page.auto_button.tk_focusPrev()))
     page.update()
     assert_in_view(page.create_button, canvas)
-    assert page.create_button.tk_focusPrev() == page.preview_button
-    page.tk.call("tk::TabToWindow", str(page.create_button.tk_focusPrev()))
-    page.update()
-    assert_in_view(page.preview_button, canvas)
-    assert page.preview_button.tk_focusPrev() == source_entry
+    assert page.create_button.tk_focusPrev() == source_entry
     canvas.yview_moveto(1)
     bottom = canvas.yview()[0]
-    page.tk.call("tk::TabToWindow", str(page.preview_button.tk_focusPrev()))
+    page.tk.call("tk::TabToWindow", str(page.create_button.tk_focusPrev()))
     page.update()
     assert canvas.yview()[0] < bottom
     assert_in_view(source_entry, canvas)

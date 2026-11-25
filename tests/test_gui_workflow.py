@@ -61,7 +61,7 @@ def desktop():
     root.destroy()
 
 
-def load_sequence(app, tmp_path):
+def load_sequence(app, tmp_path, *, from_image_window=False):
     image_dir = tmp_path / "images"
     image_dir.mkdir()
     reference = gui.generate_synthetic_speckle(160, 200, seed=48)
@@ -70,7 +70,7 @@ def load_sequence(app, tmp_path):
         gui.write_image_checked(image_dir / f"frame_{index:03d}.png", np.clip(image, 0, 255).astype(np.uint8))
     app.image_folder.set(str(image_dir))
     app.output_folder.set(str(tmp_path / "output"))
-    app.load_images_button.invoke()
+    (app.image_action_button if from_image_window else app.load_images_button).invoke()
     app.root.update()
     assert len(app.image_paths) == 3
     assert not app._test_dialogs
@@ -561,6 +561,87 @@ def test_disabled_button_hover_and_keyboard_help_close_without_action(workbench,
     assert escaped == [True]
 
 
+def test_beginner_guide_opens_the_selected_workflow_and_esc_closes_hover_help(workbench, monkeypatch):
+    app = workbench
+    app.beginner_guide_button.invoke()
+    guide = app._beginner_guide
+    app.root.update()
+    assert "新手指南" in guide.title()
+    automatic = next(widget for widget in widgets_under(guide)
+                     if isinstance(widget, ttk.Button) and widget.cget("text") == "进入自动分析")
+    automatic.invoke()
+    app.root.update()
+    assert not guide.winfo_exists()
+    assert app.control_notebook.select() == str(app.agent_page)
+    assert "先新建或打开" in app.agent_page.run_button._tooltip.resolve_text()
+
+    app.open_visual_button.focus_force()
+    tip = app.agent_page.run_button._tooltip
+    tip.show_help()
+    app.root.update()
+    assert tip.tip_window is not None
+    monkeypatch.setattr(app, "clear_current_rois", lambda: pytest.fail("Esc cleared an ROI while help was open"))
+    app.open_visual_button.event_generate("<Escape>")
+    app.root.update()
+    assert tip.tip_window is None
+
+
+def test_image_workspace_can_load_and_return_to_reference(workbench, tmp_path, monkeypatch):
+    app = workbench
+    assert app.image_action_button.cget("text") == "选择并加载图像"
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_kwargs: str(tmp_path / "images"))
+    load_sequence(app, tmp_path, from_image_window=True)
+    app.load_preview_frame(2)
+    assert "回到参考图" in app.canvas._tooltip.resolve_text()
+    app.image_action_button.invoke()
+    assert app.current_preview_index + 1 == app.start_frame_1based.get()
+    assert "按住左键" in app.canvas._tooltip.resolve_text()
+
+
+def test_localized_choices_keep_the_underlying_values_and_explain_each_option(workbench):
+    app = workbench
+    agent = app.agent_page
+    app.control_notebook.select(agent)
+    agent.tabs.select(agent.geometry_page._outer)
+    app.root.update()
+    assert agent.axis_box.get() == "端点直线距离"
+    agent.axis_box.current(1)
+    agent.axis_box.event_generate("<<ComboboxSelected>>")
+    assert agent.axis_var.get() == "x"
+    assert "图像水平方向" in agent.axis_box._tooltip.resolve_text()
+
+    campaign = app.campaign_page
+    campaign.measurement_time_field_var.set("time_s")
+    assert campaign.measurement_time_field_box.get() == "相对时间"
+    assert "时钟标识" in campaign.measurement_time_field_box._tooltip.resolve_text()
+
+    show_result(app, "field")
+    assert app.dic_component_box.get() == "水平应变 Exx"
+    app.dic_component_box.current(1)
+    app.dic_component_box.event_generate("<<ComboboxSelected>>")
+    assert app.dic_field_component.get() == "v"
+    assert app.viewer_figure.axes[0].get_title() == "全场 竖直位移 v"
+
+
+def test_campaign_stacks_details_and_keeps_status_visible_in_a_short_console(workbench):
+    app = workbench
+    app.root.geometry("620x680")
+    app.root.update()
+    page = app.campaign_page
+    app.control_notebook.select(page)
+    page.detail_notebook.select(page.alignment_tab)
+    app.root.update()
+    assert int(page._batch_details.grid_info()["row"]) > int(page._batch_list.grid_info()["row"])
+    box = page.measurement_time_field_box
+    assert box.winfo_rootx() + box.winfo_width() <= page._viewport.winfo_rootx() + page._viewport.winfo_width()
+    page._viewport.yview_moveto(1.0)
+    app.root.update()
+    assert page.status_label.winfo_rooty() + page.status_label.winfo_height() <= (
+        app.root.winfo_rooty() + app.root.winfo_height()
+    )
+    assert page.cancel_button.winfo_ismapped()
+
+
 def test_start_help_explains_actual_preflight_failures_in_plain_language(workbench, tmp_path):
     app = workbench
     assert "必须设置" in app.output_folder_entry._tooltip.resolve_text()
@@ -623,8 +704,10 @@ def test_tooltip_measured_geometry_and_colors_at_screen_edge(workbench, dark):
     assert window.winfo_rootx() >= 0 and window.winfo_rooty() >= 0
     assert window.winfo_rootx() + window.winfo_width() <= app.root.winfo_screenwidth()
     assert window.winfo_rooty() + window.winfo_height() <= app.root.winfo_screenheight()
-    label = window.winfo_children()[0]
-    assert str(label.cget("foreground")) == "#1f2937" and str(label.cget("background")) == "#fff8dc"
+    labels = window.winfo_children()[0].winfo_children()
+    body = next(label for label in labels if str(label.cget("text")) == tip.shown_text)
+    assert str(body.cget("foreground")) == ("#f1f5f9" if dark else "#18263c")
+    assert str(body.cget("background")) == ("#263750" if dark else "#f0f6ff")
     tip.hide()
 
 

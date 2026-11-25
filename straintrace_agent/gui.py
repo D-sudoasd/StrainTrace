@@ -20,6 +20,9 @@ from tkinter import filedialog, ttk
 
 from PIL import Image, ImageTk
 
+from ezdic_gui.controls import localized_combobox, notebook_help
+from ezdic_gui.tooltips import ChoiceToolTip, ToolTip
+
 from ._io import _read_json
 
 
@@ -27,6 +30,20 @@ OBJECTIVES = {"全场位移与应变": "full_field", "虚拟标距应变": "virt
 KINDS = ("统计 ROI", "虚拟标距", "排除区")
 GEOMETRY_KEYS = dict(zip(KINDS, ("regions", "gauges", "exclusions_px")))
 DRAW_TARGETS = ("计算区域", "统计 ROI", "排除区", "标距 A", "标距 B")
+AXIS_LABELS = {"distance": "端点直线距离", "x": "水平距离（x）", "y": "竖直距离（y）"}
+COORDINATE_LABELS = {"image": "图像坐标（像素）", "calibrated": "标定坐标"}
+PROGRESS_LABELS = {
+    "plan_complete": "试算完成，已生成计划",
+    "plan_reused": "已读取现有计划",
+    "run_started": "开始逐帧分析",
+    "frame_reused": "已复用此前保存的结果",
+    "frame_started": "正在分析",
+    "dic_progress": "正在计算位移与应变",
+    "frame_complete": "已完成计算",
+    "frame_failed": "该帧计算失败",
+    "run_cancelled": "已停止分析",
+    "run_finished": "逐帧计算结束，正在读取结果",
+}
 
 
 def _project_file(project, relative):
@@ -116,30 +133,48 @@ class AgentPage(ttk.Frame):
         variable.trace_add("write", lambda *_: self._mark_dirty(editor))
         return variable
 
-    def _help(self, widget, text, choices=None):
+    def _help(self, widget, text, choices=None, *, title=None):
+        def contextual(event):
+            description = text(event) if callable(text) else text
+            if isinstance(widget, ttk.Widget) and widget.instate(["disabled"]):
+                reason = self._disabled_help(widget)
+                if reason:
+                    return f"{description}\n暂不可用：{reason}"
+            return description
+
         if self.app is not None:
-            self.app.add_tooltip(widget, text, choices) if choices is not None else self.app.add_tooltip(widget, text)
+            self.app.add_tooltip(widget, contextual, choices, title=title)
+        elif choices is None:
+            ToolTip(widget, contextual, title=title)
+        else:
+            ChoiceToolTip(widget, contextual, choices, title=title)
         return widget
 
-    def _button(self, parent, text, command, help_text, row, column, **kwargs):
-        widget = ttk.Button(parent, text=text, command=command)
+    def _button(self, parent, text, command, help_text, row, column, *, style="Compact.TButton", **kwargs):
+        widget = ttk.Button(parent, text=text, command=command, style=style)
         widget.grid(row=row, column=column, sticky="ew", padx=3, pady=3, **kwargs)
         self._help(widget, help_text)
         self._controls.append((widget, "normal"))
         return widget
 
     def _entry(self, parent, label, variable, row, help_text):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=3, pady=3)
+        caption = ttk.Label(parent, text=label)
+        caption.grid(row=row, column=0, sticky="w", padx=3, pady=3)
         widget = ttk.Entry(parent, textvariable=variable, width=18)
         widget.grid(row=row, column=1, sticky="ew", padx=3, pady=3)
-        self._help(widget, help_text)
+        self._help(caption, help_text)
+        self._help(widget, help_text, title=label)
         self._controls.append((widget, "normal"))
         return widget
 
-    def _combo(self, parent, variable, values, row, column, help_text):
-        widget = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", width=15)
+    def _combo(self, parent, variable, choices, row, column, title, help_text, *, labels=None):
+        if labels is None:
+            widget = ttk.Combobox(parent, textvariable=variable, values=tuple(choices), state="readonly", width=15)
+        else:
+            widget = localized_combobox(parent, variable, labels, width=15)
+            choices = {labels[value]: detail for value, detail in choices.items()}
         widget.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
-        self._help(widget, help_text, {v: f"选择“{v}”。{help_text}" for v in values})
+        self._help(widget, help_text, choices, title=title)
         self._controls.append((widget, "readonly"))
         return widget
 
@@ -149,17 +184,25 @@ class AgentPage(ttk.Frame):
         self.project_var = self._var()
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew")
-        bar.columnconfigure(0, weight=1)
-        self.project_entry = ttk.Entry(bar, textvariable=self.project_var, width=15)
-        self.project_entry.grid(row=0, column=0, sticky="ew", padx=3)
-        self._help(self.project_entry, "自动分析项目目录。新建时使用空目录，必须位于原始图像目录之外。")
+        bar.columnconfigure(1, weight=1)
+        project_label = ttk.Label(bar, text="项目目录", style="Key.TLabel")
+        project_label.grid(row=0, column=0, sticky="w", padx=3)
+        self.project_entry = ttk.Entry(bar, textvariable=self.project_var, width=8)
+        self.project_entry.grid(row=0, column=1, sticky="ew", padx=3)
+        project_help = "项目设置、检查点和结果的保存位置。新建时选原始图像目录以外的空文件夹。"
+        self._help(project_label, project_help)
+        self._help(self.project_entry, project_help, title="项目目录")
         self._controls.append((self.project_entry, "normal"))
-        self.open_button = self._button(bar, "打开项目", self.open_dialog, "打开已有自动分析项目，恢复配置、计划和结果。", 0, 1)
-        self._button(bar, "选择新目录", self.choose_project, "选择保存新项目的目录；不会覆盖已有项目。", 0, 2)
+        self.open_button = self._button(bar, "打开项目", self.open_dialog, "打开已有自动分析项目，恢复配置、计划和结果。", 0, 2)
+        self._button(bar, "选择新目录", self.choose_project, "为新项目选择一个空文件夹。原始图像仍从实验目录读取。", 0, 3)
 
-        self.tabs = ttk.Notebook(self)
+        self.tabs = ttk.Notebook(self, style="Detail.TNotebook")
         self.tabs.grid(row=1, column=0, sticky="nsew", pady=5)
-        self._help(self.tabs, "依次检查输入与参数、编辑 ROI 与标距、查看计划和运行结果。")
+        self._help(self.tabs, lambda event: notebook_help(self.tabs, (
+            "选择保存原始图像的实验目录，再点“发现输入”查看可用的图片、时间和载荷信息。",
+            "检查或编辑用于统计应变的区域、排除区和标距端点。可在图像窗口拖出矩形。",
+            "查看试算质量，运行后打开报告、逐帧表格或结果目录。",
+        ), event))
         self.input_page = self._scroll_page("输入与参数")
         self.geometry_page = self._scroll_page("ROI 与标距")
         self.results_page = self._scroll_page("计划与结果")
@@ -175,16 +218,19 @@ class AgentPage(ttk.Frame):
             footer.columnconfigure(col, weight=1)
         self.save_button = self._button(footer, "保存设置", self.save_project, "保存参数和已应用到列表的 ROI/标距。旧计算结果保留；需重新生成计划。", 0, 0)
         self.plan_button = self._button(footer, "生成计划", self.make_plan, "保存当前设置，试算有限参数候选；计算区域和候选标距仍可人工修改。", 0, 1)
-        self.run_button = self._button(footer, "运行 / 恢复", self.run_project, "按当前已保存且可运行的计划计算；相同输入和设置可复用逐帧检查点。", 0, 2)
-        self.cancel_button = ttk.Button(footer, text="停止", command=self.cancel, state="disabled")
+        self.run_button = self._button(footer, "运行 / 恢复", self.run_project, "按当前计划计算。输入和设置相同时，可从已保存的进度继续。", 0, 2, style="Primary.TButton")
+        self.cancel_button = ttk.Button(footer, text="停止", command=self.cancel, state="disabled", style="Compact.TButton")
         self.cancel_button.grid(row=0, column=3, sticky="ew", padx=3, pady=3)
         self._help(self.cancel_button, "请求停止逐帧计算；在安全检查点结束后停止，已保存检查点保留。")
         self.progress = ttk.Progressbar(footer, mode="determinate")
         self.progress.grid(row=1, column=0, columnspan=4, sticky="ew", padx=3, pady=3)
-        self.status_var = tk.StringVar(self, value="选择实验文件夹；先发现输入或打开已有项目。")
-        self.status_label = ttk.Label(footer, textvariable=self.status_var, wraplength=500, justify="left")
+        self._help(self.progress, "运行当前任务时显示进度。某些准备和核验操作没有可预估的完成比例。")
+        self.status_var = tk.StringVar(self, value="处理新数据时，先选择实验目录并发现输入。已有项目可直接打开。")
+        self.status_label = ttk.Label(footer, textvariable=self.status_var, style="NextStep.TLabel",
+                                      wraplength=500, justify="left")
         self.status_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=3)
-        self.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(220, event.width - 20)))
+        self.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(220, event.width - 34)))
+        self._help(self.status_label, "显示当前操作结果和下一步。详细输入信息和运行记录可在上方对应页面查看。")
         self._update_actions()
 
     def _scroll_page(self, title):
@@ -272,21 +318,27 @@ class AgentPage(ttk.Frame):
         self._button(p, "选择目录", self.choose_source, "选择原始实验或图像文件夹。", 1, 0)
         self.discover_button = self._button(p, "发现输入", self.discover, "只读检查图像、时间来源和实验元数据；缺少信息时明确显示需要填写的字段。", 1, 1)
         ttk.Label(p, text="分析目标").grid(row=2, column=0, sticky="w", padx=3)
-        self._combo(p, self.objective_var, tuple(OBJECTIVES), 2, 1, "按目标检查所需的标距、时间或载荷信息；不会补造物理标定。")
-        self._entry(p, "帧间隔 (s)", self.interval_var, 3, "相邻原生帧号之间的秒数；来自采集记录。帧映射有时间时可留空；均未知时按帧号分析，不能同步载荷或计算应变率。")
-        self._entry(p, "帧映射 CSV", self.map_var, 4, "可选：包含图像文件、原生帧号和时间的显式映射表。")
-        self._button(p, "选择映射", lambda: self._choose_file(self.map_var), "选择带原生帧身份和时间信息的 CSV。", 5, 0)
-        self._button(p, "使用控制台路径", self.use_legacy_source, "复制上方图像路径；不会改变手动分析的 ROI 或结果。", 5, 1)
-        self._entry(p, "参考原生帧号", self.reference_var, 6, "留空自动选择；填写文件中的原生帧号。改变参考帧后请重新检查所有 ROI 与端点。")
-        self._entry(p, "网格步长 (px)", self.step_var, 7, "可选正整数。留空由候选比较选择；改变步长会改变测量点和端点支持。")
-        self._entry(p, "计算区域 (px)", self.analysis_roi_var, 8, "填写 x,y,宽,高，或在图像窗口拖出矩形；留空使用自动候选。")
-        self._entry(p, "试样遮罩文件", self.mask_var, 9, "可选遮罩；排除区也可在 ROI 页逐个添加。不会自动确认试样物理边界。")
-        self._button(p, "选择遮罩", lambda: self._choose_file(self.mask_var), "选择与参考图像同尺寸的遮罩。", 10, 0)
-        self.preview_button = self._button(p, "图像中编辑 ↗", self.show_image, "在独立图像窗口查看参考图，绘制计算区域、统计 ROI、排除区或标距端点。", 10, 1)
-        self.create_button = self._button(p, "新建项目", self.create_project, "只建立图像索引和项目；之后可编辑 ROI、标距和参数，再生成计划。", 11, 0)
-        self.auto_button = self._button(p, "自动建项并分析", self.auto_analyze, "对新项目发现输入、建立计划并计算。缺少必要输入或候选不通过时停止并显示原因。", 11, 1)
+        self._combo(p, self.objective_var, {
+            "全场位移与应变": "得到整个计算区域的位移和应变图。只有图像时，可按帧号查看。",
+            "虚拟标距应变": "追踪两端点的距离变化。请检查自动候选，或自行添加一条标距。",
+            "应力与应变": "把应变与载荷换算得到的应力配对。需要可信时间、载荷和已确认的试样截面积。",
+        }, 2, 1, "分析目标", "按需要的结果选择。点击“发现输入”后会列出需要补充的数据。")
+        self.create_button = self._button(p, "新建项目", self.create_project, "建立项目并记录图像来源。随后可编辑测量区域和标距，再生成计划。", 3, 0)
+        self.auto_button = self._button(p, "自动建项并分析", self.auto_analyze, "从新项目直接试算并运行。必要输入不足或试算未通过时会停下并提示原因。", 3, 1)
+        ttk.Label(p, text="可选参数", style="StepTitle.TLabel").grid(
+            row=4, column=0, columnspan=2, padx=3, pady=(8, 3), sticky="w")
+        self._entry(p, "帧间隔（秒）", self.interval_var, 5, "填写相邻原生帧号之间的采集时间间隔，单位秒。已有带时间的帧映射或只按帧号分析时可留空。")
+        self._entry(p, "帧映射 CSV", self.map_var, 6, "可选：包含图像文件、原生帧号和时间的显式映射表。")
+        self._button(p, "选择映射", lambda: self._choose_file(self.map_var), "选择带原生帧身份和时间信息的 CSV。", 7, 0)
+        self._button(p, "使用控制台路径", self.use_legacy_source, "复制手动分析已设置的图像路径。原来的测量区域和结果保留在手动分析页。", 7, 1)
+        self._entry(p, "参考原生帧号", self.reference_var, 8, "填写文件中的原生帧号，或留空自动选择。改变参考帧后请重新检查所有测量区域与端点。")
+        self._entry(p, "网格步长（像素）", self.step_var, 9, "填写相邻测量点的间距，如 5 像素。步长越小，测量点越密。留空由试算选择。")
+        self._entry(p, "计算区域（像素）", self.analysis_roi_var, 10, "填写 x,y,宽,高，或在图像窗口拖出矩形。留空使用自动候选。")
+        self._entry(p, "试样遮罩文件", self.mask_var, 11, "可选遮罩。选择与参考图同尺寸的图片，白色表示保留。也可在“ROI 与标距”逐个添加排除区。")
+        self._button(p, "选择遮罩", lambda: self._choose_file(self.mask_var), "选择与参考图像同尺寸的遮罩。", 12, 0)
+        self.preview_button = self._button(p, "图像中编辑 ↗", self.show_image, "在独立图像窗口查看参考图，绘制计算区域、统计 ROI、排除区或标距端点。", 12, 1)
         self.discovery_text = tk.Text(p, height=6, width=24, wrap="word", state="disabled")
-        self.discovery_text.grid(row=12, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
+        self.discovery_text.grid(row=13, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
         self._help(self.discovery_text, "输入发现结果与所需补充信息。文字可选取复制，原始数据不会被修改。")
 
     def _build_geometry(self):
@@ -298,20 +350,31 @@ class AgentPage(ttk.Frame):
         self.geometry_tree.column("name", width=180)
         self.geometry_tree.grid(row=0, column=0, columnspan=2, sticky="ew", padx=3)
         self.geometry_tree.bind("<<TreeviewSelect>>", self._select_item)
-        self._help(self.geometry_tree, "选择已有 ROI 或标距编辑。每项可改名、修改坐标或删除；修改后点“应用到列表”，再保存设置。")
+        self._help(self.geometry_tree, self._geometry_table_help, title="测量区域与标距")
         self.kind_var, self.name_var = self._var(KINDS[0], editor=True), self._var(editor=True)
         self.a_var, self.b_var, self.axis_var = self._var(editor=True), self._var(editor=True), self._var("distance", editor=True)
         self.coordinate_var = self._var("image", editor=True)
         self.fraction_var, self.count_var = self._var("0.5", editor=True), self._var("3", editor=True)
-        self._combo(p, self.kind_var, KINDS, 1, 0, "统计 ROI 提取全场应变；虚拟标距使用固定参考端点；排除区禁止参与相关。")
+        self._combo(p, self.kind_var, {
+            "统计 ROI": "在指定区域内汇总有效应变点。结果按区域名称导出。",
+            "虚拟标距": "指定两个端点，计算它们之间的距离或投影距离变化。",
+            "排除区": "圈出夹具、反光或缺少纹理的位置，计算时跳过该区域。",
+        }, 1, 0, "测量类型", "选择要编辑的类型。切换后按下方格式填写坐标，再点“应用到列表”。")
         self._button(p, "新建一项", self.new_item, "清空当前编辑器，新建独立统计 ROI、标距或排除区。", 1, 1)
         self._entry(p, "名称", self.name_var, 2, "ROI 和标距名称应唯一；名称会保留在导出结果中。")
         self._entry(p, "区域 / 端点 A", self.a_var, 3, "ROI、排除区：x,y,宽,高。标距端点：x,y 点，或 x,y,宽,高矩形。图像坐标单位 px。")
         self._entry(p, "标距端点 B", self.b_var, 4, "仅标距使用；格式与端点 A 相同。两个端点在固定参考图中定义。")
         ttk.Label(p, text="标距方向").grid(row=5, column=0, sticky="w", padx=3)
-        self._combo(p, self.axis_var, ("x", "y", "distance"), 5, 1, "x/y 使用该方向投影标距；distance 使用两端点的直线距离。")
+        self.axis_box = self._combo(p, self.axis_var, {
+            "distance": "使用两个端点之间的直线长度，适合标距与图像横竖轴不平行时。",
+            "x": "只计算端点在图像水平方向的间距变化。",
+            "y": "只计算端点在图像竖直方向的间距变化。",
+        }, 5, 1, "标距方向", "为当前标距选择用什么距离计算应变。", labels=AXIS_LABELS)
         ttk.Label(p, text="统计 ROI 坐标").grid(row=6, column=0, sticky="w", padx=3)
-        self._combo(p, self.coordinate_var, ("image", "calibrated"), 6, 1, "image 使用原图 px；calibrated 使用显式标定坐标，需有完整物理标定；后者仅用数值编辑。")
+        self._combo(p, self.coordinate_var, {
+            "image": "以原图左上角为原点，用像素记录位置和大小。可在图像窗口直接画出。",
+            "calibrated": "使用已保存标定定义的坐标。请在输入框填写对应标定坐标，图像窗口只支持像素绘制。",
+        }, 6, 1, "统计区域的坐标", "选择用原图像素还是实验标定后的坐标填写统计区域。", labels=COORDINATE_LABELS)
         self._entry(p, "ROI 最低有效比例", self.fraction_var, 7, "统计 ROI 内有效应变点比例阈值，范围 0–1。")
         self._entry(p, "ROI 最低有效点数", self.count_var, 8, "统计 ROI 至少需多少有效测量点；不满足则保留质量失败状态。")
         self.apply_button = self._button(p, "应用到列表", self.apply_item, "把当前坐标和名称保存到编辑列表；此时尚未写入项目。", 9, 0)
@@ -347,7 +410,13 @@ class AgentPage(ttk.Frame):
         bar.columnconfigure(1, weight=1)
         ttk.Label(bar, text="绘制目标").grid(row=0, column=0, padx=4)
         self.draw_var = tk.StringVar(self, value=DRAW_TARGETS[0])
-        self._combo(bar, self.draw_var, DRAW_TARGETS, 0, 1, "按住左键拖出矩形，松开后填入对应坐标。统计 ROI/标距需再点应用到列表。")
+        self._combo(bar, self.draw_var, dict(zip(DRAW_TARGETS, (
+            "画出供位移和应变计算的矩形范围。画完后保存设置，再生成计划。",
+            "画出要统计应变的区域。返回编辑器命名，再点“应用到列表”。",
+            "画出不参与计算的位置，如夹具或反光。返回编辑器点“应用到列表”。",
+            "画出第一端的测量窗口。再绘制标距 B，并在编辑器应用。",
+            "画出第二端的测量窗口。检查两个端点和标距方向，再在编辑器应用。",
+        ))), 0, 1, "绘制目标", "按住左键在参考图上拖出矩形，松开后把坐标填入对应字段。")
         self._button(bar, "返回编辑器", self.show_editor, "回到控制台 ROI 与标距编辑页，调整名称、方向与坐标。", 0, 2)
         self.image_canvas = tk.Canvas(self.visual_page, background="#111827", highlightthickness=0, cursor="crosshair")
         self.image_canvas.grid(row=1, column=0, sticky="nsew", pady=5)
@@ -355,7 +424,10 @@ class AgentPage(ttk.Frame):
         self.image_canvas.bind("<ButtonPress-1>", self._draw_start)
         self.image_canvas.bind("<B1-Motion>", self._draw_motion)
         self.image_canvas.bind("<ButtonRelease-1>", self._draw_end)
-        self._help(self.image_canvas, "参考图像坐标随窗口缩放保持一致。绿色为计算区、青色为统计 ROI、橙色为标距、红色为排除区。")
+        self._help(self.image_canvas, lambda _event: (
+            f"当前绘制：{self.draw_var.get()}。按住左键拖出矩形。绿色为计算区、青色为统计区、橙色为标距、红色为排除区。"
+            if self._image is not None else "在控制台新建或打开项目后，这里会显示项目的参考图片。"
+        ), title="参考图片")
         self.image_info_var = tk.StringVar(self, value="打开或建立项目后显示参考图像。")
         self.image_info_label = ttk.Label(self.visual_page, textvariable=self.image_info_var, wraplength=700)
         self.image_info_label.grid(row=2, column=0, sticky="ew")
@@ -745,9 +817,11 @@ class AgentPage(ttk.Frame):
                     return
                 kind, payload = self._queue.get_nowait()
                 if kind == "progress":
-                    event = payload.get("event", "处理中")
+                    event = PROGRESS_LABELS.get(payload.get("event"), "正在处理")
                     native = payload.get("native_frame")
-                    self.status_var.set(f"{event}" + (f" · 原生帧 {native}" if native is not None else ""))
+                    position, total = payload.get("position"), payload.get("total")
+                    count = f"（{position}/{total}）" if position is not None and total else ""
+                    self.status_var.set(event + (f" · 原生帧 {native}" if native is not None else "") + count)
                 elif kind == "cancel":
                     if payload:
                         self._error(payload)
@@ -776,17 +850,53 @@ class AgentPage(ttk.Frame):
             self._poll_id = self._scheduler.after(60, self._poll)
 
     def _update_actions(self):
-        if not hasattr(self, "run_button"):
+        if not hasattr(self, "cancel_button"):
             return
-        ready = not self._busy and self.project_dir is not None
-        for button in (self.save_button, self.plan_button, self.verify_button):
-            button.configure(state="normal" if ready else "disabled")
-        self.run_button.configure(state="normal" if ready and not self._dirty and not self._editor_dirty and self.plan and self.plan.get("status") == "ready" else "disabled")
-        self.report_button.configure(state="normal" if ready and self.artifacts.get("report") else "disabled")
-        self.folder_button.configure(state="normal" if ready and self.run_dir else "disabled")
-        self.summary_button.configure(state="normal" if ready and self.artifacts.get("summary") else "disabled")
-        self.gauges_button.configure(state="normal" if ready and self.artifacts.get("gauges") else "disabled")
-        self.reprocess_button.configure(state="normal" if ready and self.run_dir else "disabled")
+        for button in (self.discover_button, self.create_button, self.auto_button,
+                       self.save_button, self.plan_button, self.run_button, self.verify_button,
+                       self.report_button, self.folder_button, self.summary_button,
+                       self.gauges_button, self.reprocess_button):
+            button.configure(state="disabled" if self._disabled_help(button) else "normal")
+
+    def _disabled_help(self, widget):
+        if widget is getattr(self, "cancel_button", None):
+            return "只有正在逐帧分析时才可以请求停止。"
+        if self._busy:
+            return "请等待当前操作完成。"
+        if widget in (self.discover_button, self.create_button, self.auto_button):
+            if not self.source_var.get().strip():
+                return "先选择存放实验图像的目录。"
+            if widget is not self.discover_button and not self.project_var.get().strip():
+                return "先用“选择新目录”设置项目保存位置。"
+            return ""
+        if self.project_dir is None:
+            return "先新建或打开一个自动分析项目。"
+        if widget is self.run_button:
+            if self._editor_dirty:
+                return "先点“应用到列表”保存当前测量项，再生成计划。"
+            if self._dirty:
+                return "设置已修改，请重新生成计划。"
+            if not self.plan or self.plan.get("status") != "ready":
+                return "点击“生成计划”，到“计划与结果”检查试算质量。计划可运行后再开始。"
+        if widget in (self.folder_button, self.reprocess_button) and self.run_dir is None:
+            return "先完成一次分析，生成结果目录。"
+        for button, key, reason in (
+            (self.report_button, "report", "先运行分析，生成可打开的报告。"),
+            (self.summary_button, "summary", "先运行分析，生成逐帧数据表。"),
+            (self.gauges_button, "gauges", "在“ROI 与标距”添加标距并运行分析，标距表生成后可打开。"),
+        ):
+            if widget is button and not self.artifacts.get(key):
+                return reason
+        return ""
+
+    def _geometry_table_help(self, event=None):
+        if event is not None and getattr(event, "keysym", "") != "F1":
+            column = self.geometry_tree.identify_column(event.x)
+            if column == "#1":
+                return "类型决定如何使用坐标。统计区用来汇总应变，标距有两个端点，排除区不参与计算。"
+            if column == "#2":
+                return "名称会写入导出的数据表。标距名称旁显示所用的测量方向。"
+        return "单击一行可编辑名称、坐标或方向。点“应用到列表”更新该行，再保存项目。"
 
     @staticmethod
     def _text(widget, value):
@@ -822,7 +932,7 @@ class AgentPage(ttk.Frame):
             value = item["value"]
             name = value.get("name", "") if isinstance(value, dict) else self._format(value)
             if item["kind"] == KINDS[1]:
-                name += " · " + value.get("axis", "")
+                name += " · " + AXIS_LABELS.get(value.get("axis"), "")
             self.geometry_tree.insert("", "end", iid=str(index), values=(item["kind"], name))
 
     def _select_item(self, _event=None):
