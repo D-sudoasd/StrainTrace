@@ -8,14 +8,17 @@ import re
 import sys
 import threading
 from dataclasses import replace
+from time import perf_counter_ns
 
 import cv2
 
 from ..config import CaptureError
-from .base import Camera, Device, Feature, Image, receipt_times
+from .base import HOST_NEXT_RECEIPT, Camera, Device, Feature, Image, TriggerSupport, receipt_times
+from .host_sampler import first_host_receipt
 
 
 _API = {"win32": cv2.CAP_DSHOW, "linux": cv2.CAP_V4L2, "darwin": cv2.CAP_AVFOUNDATION}.get(sys.platform, cv2.CAP_ANY)
+UVC_TRIGGER_SUPPORT = TriggerSupport(software=True, hardware=False, basis="backend", software_method=HOST_NEXT_RECEIPT)
 _PROPERTIES = {
     "width": (cv2.CAP_PROP_FRAME_WIDTH, "px"),
     "height": (cv2.CAP_PROP_FRAME_HEIGHT, "px"),
@@ -60,7 +63,7 @@ def camera(identity: str, cti_files=()) -> UvcCamera:
 
 
 class UvcCamera(Camera):
-    trigger_method = "host_next_receipt"
+    trigger_method = HOST_NEXT_RECEIPT
 
     def __init__(self, index: int | None = None, *, identity: str | None = None):
         self._index = index
@@ -69,8 +72,8 @@ class UvcCamera(Camera):
         self._mode = None
         self._condition = threading.Condition()
         self._worker = None
-        self._generation = 0
-        self._sample_after = None
+        self._request_ns = None
+        self._selected = None
         self._latest = None
         self._failure = None
         self._stop = threading.Event()
@@ -133,7 +136,7 @@ class UvcCamera(Camera):
     def start(self, trigger="free", source=None) -> None:
         if trigger not in ("free", "software"):
             raise CaptureError("TRIGGER_UNSUPPORTED", "OpenCV video input has no hardware FrameStart")
-        self._failure = self._latest = self._sample_after = None
+        self._failure = self._selected = self._request_ns = None
         self._cached_features = {name: replace(feature, writable=False) for name, feature in self.features().items()}
         self._mode = trigger
         self._stop.clear()
@@ -142,12 +145,17 @@ class UvcCamera(Camera):
         self._worker = threading.Thread(target=self._pump, args=(trigger,), name=f"uvc-read-{self._index}", daemon=True)
         self._worker.start()
 
+    def trigger_support(self) -> TriggerSupport:
+        return UVC_TRIGGER_SUPPORT
+
     def stop(self) -> None:
         if self._abandoned:
             return
         if self._worker is not None:
-            self._stop.set()
-            self._request.set()
+            with self._condition:
+                self._stop.set()
+                self._request.set()
+                self._condition.notify_all()
             self._worker.join(timeout=2)
             with self._condition:
                 # Hand the handle back to the blocked reader. release() on a
@@ -176,9 +184,11 @@ class UvcCamera(Camera):
                         break
                 image = self._get_image()
                 with self._condition:
-                    self._latest = image
-                    self._generation += 1
-                    self._condition.notify_all()
+                    if self._stop.is_set() or self._request_ns is None or self._selected is not None:
+                        continue
+                    self._selected = image if mode == "free" else first_host_receipt(image, self._request_ns)
+                    if self._selected is not None:
+                        self._condition.notify_all()
         except Exception as exc:
             with self._condition:
                 self._failure = exc
@@ -192,24 +202,28 @@ class UvcCamera(Camera):
 
     def trigger(self) -> None:
         with self._condition:
-            if self._mode != "software" or self._sample_after is not None:
+            if self._failure is not None:
+                raise self._failure
+            if self._mode != "software" or self._request_ns is not None or self._stop.is_set():
                 raise CaptureError("CAMERA_NOT_READY", f"{self.device.id} is not ready to sample a frame")
-            self._sample_after = self._generation
+            self._request_ns = perf_counter_ns()
 
     def read(self, timeout_s: float) -> Image | None:
         with self._condition:
-            if self._mode == "free" and self._sample_after is None:
-                self._sample_after = self._generation
+            if self._mode == "free" and self._request_ns is None and not self._stop.is_set():
+                self._request_ns = perf_counter_ns()
                 self._request.set()
-            if self._mode not in ("free", "software") or self._sample_after is None:
+            if self._mode not in ("free", "software") or self._request_ns is None:
                 raise CaptureError("CAMERA_NOT_READY", f"{self.device.id} is not armed")
             self._condition.wait_for(
-                lambda: self._failure is not None or self._generation > self._sample_after,
+                lambda: self._failure is not None or self._selected is not None or self._stop.is_set(),
                 timeout=timeout_s,
             )
-            if self._failure is not None:
-                raise self._failure
-            if self._generation <= self._sample_after:
+            if self._stop.is_set():
                 return None
-            self._sample_after = None
-            return self._latest
+            selected = self._selected
+            if selected is not None:
+                self._selected = self._request_ns = None
+            elif self._failure is not None:
+                raise self._failure
+            return selected

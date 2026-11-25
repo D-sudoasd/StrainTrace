@@ -576,6 +576,48 @@ def _folder_image_count(path: Path) -> int | None:
     return sum(1 for item in path.iterdir() if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def _capture_source(value: Any, frame_count: int | None) -> dict[str, Any]:
+    path = "$.capture_source"
+    source = _object(value, path)
+    _reject_unknown(source, {"experiment_id", "camera_id", "image_part", "frames", "event"}, path)
+    if frame_count is None:
+        _fail("CONFIG_VALUE_ERROR", "capture_source requires ordered image_paths", path)
+    frames = _array(source.get("frames"), _path(path, "frames"), min_items=2)
+    if len(frames) != frame_count:
+        _fail("CONFIG_VALUE_ERROR", "capture_source frames must match image_paths in order and count", _path(path, "frames"))
+    normalized = {key: _string(source.get(key), _path(path, key)) for key in ("experiment_id", "camera_id")}
+    if "event" in source:
+        location = _path(path, "event")
+        observed = _object(source["event"], location)
+        numbers = ("phase", "event_number", "signal_utc_ns")
+        _reject_unknown(observed, {"signal_id", *numbers}, location)
+        normalized["event"] = {"signal_id": _string(observed.get("signal_id"), _path(location, "signal_id")),
+                               **{name: _integer(observed.get(name), _path(location, name), minimum=1) for name in numbers}}
+    part = source.get("image_part")
+    normalized["image_part"] = _string(part, _path(path, "image_part")) if part is not None else None
+    normalized["frames"] = []
+    for index, frame in enumerate(frames):
+        location = _path(_path(path, "frames"), index)
+        record = _object(frame, location)
+        fields = ("frame_id", "raw_sha256", "input_sha256")
+        _reject_unknown(record, {*fields, "experiment_id", "event_position"}, location)
+        entry = {key: _string(record.get(key), _path(location, key)) for key in fields}
+        if "experiment_id" in record:
+            entry["experiment_id"] = _string(record["experiment_id"], _path(location, "experiment_id"))
+        if "event_position" in record or ("event" in normalized and index > 0):
+            position = record.get("event_position")
+            if "event" not in normalized or position not in ("pre", "boundary", "post"):
+                _fail("CONFIG_VALUE_ERROR", "expected a recorded pre, boundary or post event position",
+                      _path(location, "event_position"))
+            entry["event_position"] = position
+        for key in fields[1:]:
+            value = entry[key]
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                _fail("CONFIG_VALUE_ERROR", "expected a lower-case SHA-256 digest", _path(location, key))
+        normalized["frames"].append(entry)
+    return normalized
+
+
 def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None) -> dict[str, Any]:
     root = _object(dict(config), "$")
     allowed = {
@@ -583,6 +625,7 @@ def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None)
         "analysis_mode",
         "image_paths",
         "image_folder",
+        "capture_source",
         "start_frame_1based",
         "end_frame_1based",
         "reference_frame_1based",
@@ -639,6 +682,8 @@ def normalize_config(config: Mapping[str, Any], *, base_dir: Path | None = None)
         frame_count = _folder_image_count(Path(folder))
         if frame_count == 0:
             _fail("CONFIG_INPUT_ERROR", "image_folder contains no supported image files", "$.image_folder")
+    if "capture_source" in root:
+        normalized["capture_source"] = _capture_source(root["capture_source"], frame_count if has_paths else None)
 
     start = _integer(root["start_frame_1based"], "$.start_frame_1based", minimum=1)
     end = _integer(root["end_frame_1based"], "$.end_frame_1based", minimum=1)

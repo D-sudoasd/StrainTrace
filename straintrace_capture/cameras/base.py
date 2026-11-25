@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from ..config import CaptureError
+
+
+HOST_NEXT_RECEIPT = "host_next_receipt"
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,28 @@ class Device:
     support: str
     identity_scope: str = "serial_number"
     transport: str | None = None
+
+
+@dataclass(frozen=True)
+class TriggerSupport:
+    software: bool | None = None
+    hardware: bool | None = None
+    basis: str = "unknown"
+    missing_nodes: tuple[str, ...] = ()
+    error: str | None = None
+    physical_inputs: tuple[str, ...] | None = None
+    software_method: str | None = None
+
+
+def is_physical_trigger_input(value: str | None) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"(?:Line|CC|CxpTrigger|CXPTrigger)[0-9]+", value) is not None
+
+
+@dataclass(frozen=True)
+class TriggerWaitSample:
+    line: str | None = None
+    asserted: bool | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +112,7 @@ class Image:
     exposure_start: ClockReading | None = None
     exposure_end: ClockReading | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    auxiliary_images: tuple[Image, ...] = ()
 
     def __post_init__(self) -> None:
         pixels = self.pixels
@@ -98,8 +126,17 @@ class Image:
             valid_shape = pixels.ndim == 3 and pixels.shape[2] == len(color)
         if not valid_shape or not pixels.size or not 1 <= self.significant_bits <= pixels.dtype.itemsize * 8:
             raise CaptureError("UNSUPPORTED_IMAGE", f"invalid array shape or bit depth: {pixels.shape}")
+        receipt = self.received_utc_ns, self.received_monotonic_ns, self.native_frame_id
+        for part in self.auxiliary_images:
+            if part.auxiliary_images or receipt != (part.received_utc_ns, part.received_monotonic_ns, part.native_frame_id):
+                raise CaptureError("IMAGE_PART_RECEIPT_MISMATCH", "image parts must belong to one received frame")
         # Borrowed SDK buffers must already have been copied by the backend.
         pixels.setflags(write=False)
+
+    @property
+    def raw_bytes(self) -> int:
+        size = self.pixels.nbytes
+        return size + sum(part.pixels.nbytes for part in self.auxiliary_images) if self.auxiliary_images else size
 
 
 def receipt_times() -> tuple[int, int]:
@@ -109,6 +146,10 @@ def receipt_times() -> tuple[int, int]:
 class Camera(ABC):
     device: Device
     trigger_method = "software_frame_start"
+
+    def trigger_wait_monitor(self):
+        """Return a context for sampling an already configured hardware wait output."""
+        return nullcontext(lambda: TriggerWaitSample(reason="driver_unavailable"))
 
     @abstractmethod
     def open(self) -> None:
@@ -140,6 +181,10 @@ class Camera(ABC):
 
     def trigger(self) -> None:
         raise CaptureError("TRIGGER_UNSUPPORTED", f"{self.device.id} does not support software trigger")
+
+    def trigger_support(self) -> TriggerSupport:
+        """Report evidence from an open camera without arming or editing it."""
+        return TriggerSupport()
 
     def set_features(self, settings) -> None:
         for name, value in settings.items():

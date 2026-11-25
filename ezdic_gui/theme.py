@@ -1,7 +1,9 @@
 """UI typography, DPI scaling, light/dark color palettes, and ttk styling."""
 
 import os
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import font as tkfont, ttk
 
 UI_FONT_FAMILY = "Microsoft YaHei UI"
@@ -54,6 +56,19 @@ def enable_windows_dpi_awareness():
             pass
     except Exception:
         pass
+
+
+def create_tk_root():
+    """Initialize Tk from the installed interpreter when a Windows venv needs its scripts."""
+    enable_windows_dpi_awareness()
+    if os.name == "nt" and sys.prefix != sys.base_prefix and not getattr(sys, "frozen", False):
+        tcl_root = Path(sys.base_prefix) / "tcl"
+        for key, directory, script in (("TCL_LIBRARY", f"tcl{tk.TclVersion}", "init.tcl"),
+                                       ("TK_LIBRARY", f"tk{tk.TkVersion}", "tk.tcl")):
+            path = tcl_root / directory
+            if key not in os.environ and (path / script).is_file():
+                os.environ[key] = str(path)
+    return tk.Tk()
 
 
 class ThemeMixin:
@@ -170,6 +185,14 @@ class ThemeMixin:
         self.style.configure("Brand.TLabel", background=self.ui_bg, foreground=self.text_color,
                              font=(self.ui_font_family, 18, "bold"))
         self.style.configure("AppHint.TLabel", background=self.ui_bg, foreground=self.muted_color, font=base_font)
+        help_bg, help_fg, help_border = (
+            ("#263750", "#f1f5f9", "#6386b2") if self.dark_mode.get() else ("#f0f6ff", "#18263c", "#a8bedc")
+        )
+        self.style.configure("Help.TLabel", background=help_bg, foreground=help_fg, bordercolor=help_border)
+        self.style.configure("HelpTitle.TLabel", font=step_font)
+        self.style.configure("HelpKey.TLabel", foreground=self.muted_color, font=(self.ui_font_family, 9))
+        self.style.configure("NextStep.TLabel", background=self.panel_bg, foreground=self.key_color,
+                             font=base_font, padding=(10, 7))
         self.style.configure("Badge.TLabel", background=self.panel_bg, foreground=self.key_color,
                              font=base_font, padding=(10, 4))
         self.style.configure("Ready.TLabel", background=self.success_bg, foreground=self.success_color,
@@ -230,6 +253,7 @@ class ThemeMixin:
                              padding=(18, 8), font=step_font)
         self.style.map("TNotebook.Tab", background=[("selected", self.card_bg), ("active", self.hover_bg)],
                        foreground=[("selected", self.primary_text)])
+        self.style.configure("Detail.TNotebook.Tab", padding=(10, 6), font=base_font)
         self.style.configure("Horizontal.TProgressbar", background=self.primary_color, troughcolor=self.panel_bg,
                              borderwidth=0, thickness=5)
         self.style.configure("TScrollbar", background=self.panel_bg, troughcolor=self.ui_bg,

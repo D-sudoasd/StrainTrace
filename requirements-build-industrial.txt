@@ -1,0 +1,4 @@
+-r requirements-build.txt
+pypylon==26.10
+harvesters==1.4.3
+genicam==1.6.0

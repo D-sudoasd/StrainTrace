@@ -14,7 +14,7 @@ import numpy as np
 import psutil
 
 
-def benchmark(output: Path, duration: int):
+def benchmark(output: Path, duration: int, *, durability="buffered"):
     from straintrace_capture import CaptureConfig, CaptureSession, ExperimentReader
 
     process = psutil.Process()
@@ -28,7 +28,7 @@ def benchmark(output: Path, duration: int):
     for name, cameras, width, height, fmt, fps, duration_s in cases:
         root = output / name
         config = CaptureConfig.from_dict({
-            "config_version": 1, "name": name,
+            "config_version": 1, "name": name, "durability": durability,
             "cameras": [{"id": f"sim:{index}", "settings": {
                 "width": width, "height": height, "pixel_format": fmt, "fps": float(fps), "motion_px": .01,
                 "strain_per_frame": 0.,
@@ -63,6 +63,7 @@ def benchmark(output: Path, duration: int):
         case = {
             "name": name, "camera_count": cameras, "width": width, "height": height, "pixel_format": fmt,
             "target_camera_fps": fps, "duration_s": duration_s, "elapsed_s": acquisition_s,
+            "durability": durability,
             "receipt_cadence": intervals, "peak_rss_bytes": peak, "initial_rss_bytes": baseline,
             "verify_s": verify_s,
             "verification": verification, "status": status,
@@ -85,13 +86,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="new writable benchmark folder")
     parser.add_argument("--duration", default=60, type=int, help="endurance phase seconds")
+    parser.add_argument("--durability", choices=("buffered", "write_through"), default="buffered", help="TIFF write mode")
     args = parser.parse_args()
     if args.duration < 1:
         parser.error("duration must be positive")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    report = benchmark(output, args.duration)
+    report = benchmark(output, args.duration, durability=args.durability)
     (output / "benchmark.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return 0 if all(case["verification"]["complete"] for case in report["cases"]) else 1
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import replace
 
-from ..config import CaptureError
-from .base import ClockReading, Feature
+from ..config import CaptureError, HARDWARE_COUNTER_FEATURES
+from .base import ClockReading, Feature, TriggerSupport, TriggerWaitSample, is_physical_trigger_input
 
 
 NODES = {
@@ -33,7 +34,7 @@ NODES = {
     "test_pattern": ("TestPattern",),
 }
 CHUNK_FIELDS = (
-    "ChunkCounterValue", "ChunkFramecounter", "ChunkFrameID", "ChunkExposureTime", "ChunkTimestamp",
+    *HARDWARE_COUNTER_FEATURES, "ChunkExposureTime", "ChunkTimestamp",
     "ChunkExposureStartTimestamp", "ChunkExposureEndTimestamp", "BslChunkTimestampValue",
 )
 UNITS = {
@@ -50,8 +51,14 @@ PRIORITY = {
         "width", "height", "offset_x", "offset_y", "chunk_enable",
     ))
 }
-_MONO_OR_BAYER = re.compile(r"(Mono|Bayer(?:RG|BG|GR|GB))(8|10|12|14|16)(?:p|Packed)?$")
+ROI_AXES = (("width", "offset_x"), ("height", "offset_y"))
+PHASE_FEATURES = frozenset(("acquisition_mode", "trigger_mode", "trigger_source", "trigger_selector"))
+_MONO_OR_BAYER = re.compile(r"(Mono|Bayer(?:RG|BG|GR|GB))(8|10|12|14|16)(p|[Pp]acked)?$")
 _COLOR = re.compile(r"(RGBa|BGRa|RGBA|BGRA|RGB|BGR)(8|10|12|14|16)(?:Packed)?$")
+
+
+def setting_order(settings):
+    return sorted(settings, key=lambda name: PRIORITY.get(name, len(PRIORITY)))
 
 
 def image_layout(pixel_format: str) -> tuple[int, str]:
@@ -66,6 +73,11 @@ def image_layout(pixel_format: str) -> tuple[int, str]:
         if len(model) == 3 or bits == 8:
             return bits, model
     raise CaptureError("PIXEL_FORMAT_UNSUPPORTED", f"lossless capture does not support {pixel_format!r}")
+
+
+def is_packed_mono_or_bayer(pixel_format: str) -> bool:
+    match = _MONO_OR_BAYER.fullmatch(pixel_format)
+    return match is not None and match[3] is not None
 
 
 def optional(getter, default=None):
@@ -113,6 +125,52 @@ class GenApi:
         node = self._node(native_name)
         return self._get(node, "value") if self._readable(node) else None
 
+    def _wait_output_sample(self, selector, line):
+        if self._get(selector, "value") != line:
+            return TriggerWaitSample(line, reason="line_selection_changed")
+        status = self._node("LineStatus")
+        state = None
+        if self._readable(status):
+            getter = "GetValue" if self._pylon else "get_value"
+            # Ignore the GenApi register cache for an observation used to start a test.
+            state = optional(lambda: getattr(status, getter)(False, True))
+        return (TriggerWaitSample(line, state) if type(state) is bool
+                else TriggerWaitSample(line, reason="line_status_unreadable"))
+
+    @contextmanager
+    def trigger_wait_monitor(self):
+        """Select for reading only. Preserve the hardware wiring and output configuration."""
+        selector = self._node("LineSelector")
+        original = self._get(selector, "value") if self._readable(selector) else None
+        if not isinstance(original, str) or self._node("LineStatus") is None:
+            yield lambda: TriggerWaitSample(reason="line_catalog_unavailable")
+            return
+        attribute = "Value" if self._pylon else "value"
+        writable = self._writable(selector)
+        choices = self._get(selector, "symbolics") if writable else ()
+        changed = False
+        rejected = None
+        try:
+            for line in dict.fromkeys((original, *(choices or ()))):
+                if line != original:
+                    changed = True
+                    optional(lambda: setattr(selector, attribute, line))
+                    if self._get(selector, "value") != line:
+                        continue
+                if self.get("LineMode") != "Output" or self.get("LineSource") != "FrameTriggerWait":
+                    continue
+                if self.get("LineInverter") is not False or self.get("LineLogic") not in (None, "Positive"):
+                    rejected = line
+                    continue
+                yield lambda: self._wait_output_sample(selector, line)
+                return
+            reason = "output_polarity_unconfirmed" if rejected else "wait_output_not_configured"
+            yield lambda: TriggerWaitSample(rejected, reason=reason)
+        finally:
+            if changed and self._get(selector, "value") != original:
+                optional(lambda: setattr(selector, attribute, original))
+                if self._get(selector, "value") != original:
+                    raise CaptureError("WAIT_OUTPUT_SELECTOR_RESTORE_FAILED", f"could not restore LineSelector to {original}")
     def feature(self, code: str) -> Feature | None:
         for name in NODES[code]:
             node = self._node(name)
@@ -143,7 +201,7 @@ class GenApi:
         feature = self.feature(code) if code in NODES else None
         if feature is None:
             raise CaptureError("FEATURE_UNAVAILABLE", f"camera does not expose {code}")
-        if code in ("acquisition_mode", "trigger_mode", "trigger_source", "trigger_selector"):
+        if code in PHASE_FEATURES:
             raise CaptureError("PHASE_OWNS_TRIGGER", f"configure {code} via the capture phase")
         self._write(feature, value)
 
@@ -157,13 +215,41 @@ class GenApi:
 
     def configure(self, settings) -> None:
         # The maximum width/height can depend on the current offset.
-        for dimension, offset in (("width", "offset_x"), ("height", "offset_y")):
+        for dimension, offset in ROI_AXES:
             if dimension in settings and offset in settings:
                 feature = self.feature(offset)
                 if feature and feature.minimum is not None and feature.value != feature.minimum:
                     self._write(feature, feature.minimum)
-        for code in sorted(settings, key=lambda name: PRIORITY.get(name, len(PRIORITY))):
+        for code in setting_order(settings):
             self.write(code, settings[code])
+
+    def trigger_support(self) -> TriggerSupport:
+        # Use the node catalog. An inaccessible feature can still be present on
+        # another TriggerSelector setting. Some pypylon lookups also return a
+        # placeholder for names that are absent from the catalog.
+        try:
+            if self._pylon:
+                names = {(node.GetNode() if hasattr(node, "GetNode") else node).GetName() for node in self._map.GetNodes()}
+            else:
+                names = {node.node.name for node in self._map.nodes}
+        except Exception as exc:
+            return TriggerSupport(error=str(exc))
+        if not names:
+            return TriggerSupport(error="the remote node catalog is empty")
+        missing = tuple(key for key in ("TriggerMode", "TriggerSource") if key not in names)
+        if missing:
+            return TriggerSupport(software=False, hardware=False, basis="device_nodes", missing_nodes=missing)
+        inputs = None
+        # A catalog can depend on the selector and mode. Check it only in the
+        # configuration used to set the source, without changing device state.
+        if (self.get("TriggerSelector") == "FrameStart" and self.get("TriggerMode") == "Off"
+            and self.get("AcquisitionMode") in (None, "Continuous")):
+            source = self.feature("trigger_source")
+            if source and source.writable and source.choices:
+                inputs = tuple(name for name in source.choices if is_physical_trigger_input(name))
+        if not self._pylon and "TriggerSoftware" not in names:
+            return TriggerSupport(software=False, basis="device_nodes", missing_nodes=("TriggerSoftware",), physical_inputs=inputs)
+        return TriggerSupport(basis="device_nodes", physical_inputs=inputs)
 
     def trigger_setup(self, trigger: str, source: str | None) -> None:
         acquisition = self.feature("acquisition_mode")
@@ -201,8 +287,8 @@ class GenApi:
         trigger_source = self.feature("trigger_source")
         if trigger_source is None:
             raise CaptureError("TRIGGER_UNSUPPORTED", "camera does not expose TriggerSource")
-        if trigger == "hardware" and not (source and re.fullmatch(r"Line[0-9]+|CC[0-9]+", source)):
-            raise CaptureError("TRIGGER_SOURCE_UNSUPPORTED", "hardware triggering requires a physical Line<n> or CC<n> input")
+        if trigger == "hardware" and not is_physical_trigger_input(source):
+            raise CaptureError("TRIGGER_SOURCE_UNSUPPORTED", "hardware triggering requires a Line, CC or CoaXPress trigger input")
         self._write(trigger_source, "Software" if trigger == "software" else source)
         self._write(self.feature("trigger_mode"), "On")
 

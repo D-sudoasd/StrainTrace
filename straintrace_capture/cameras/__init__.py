@@ -57,7 +57,7 @@ class CameraRegistry:
                 providers[name] = {"state": "error", "code": "DISCOVERY_FAILED", "message": str(exc)}
         return {"devices": devices, "providers": providers}
 
-    def camera(self, identity: str) -> Camera:
+    def camera(self, identity: str, *, refresh=False) -> Camera:
         name, _, suffix = identity.partition(":")
         if not suffix:
             raise CaptureError("INVALID_CAMERA_ID", f"invalid camera ID: {identity!r}")
@@ -68,7 +68,7 @@ class CameraRegistry:
             with self._mutex:
                 if self._gentl_group is None:
                     self._gentl_group = provider.GenTLGroup(self.cti_files)
-                return self._gentl_group.camera(identity)
+                return self._gentl_group.camera(identity, refresh=refresh)
         return provider.camera(identity, self.cti_files)
 
 

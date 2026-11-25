@@ -6900,7 +6900,8 @@ class RunTransaction:
 def _canonical_settings(settings):
     if not isinstance(settings, Mapping):
         raise CoreError("INVALID_SETTINGS", {"message": "settings must be a mapping"})
-    internal = {"_run_token", "_code_paths", "_legacy_direct_processing", "_gui_adapter", "_cli_adapter"}
+    internal = {"_run_token", "_code_paths", "_legacy_direct_processing", "_gui_adapter", "_cli_adapter",
+                "_corrected_input_hashes"}
     canonical_override = settings.get("_canonical_config")
     if canonical_override is not None:
         if not isinstance(canonical_override, Mapping):
@@ -6963,6 +6964,28 @@ def _resolve_sequence_inputs(settings, *, require_two=False):
     reference_idx = reference_frame - 1
     input_paths = [paths[index] for index in selected_indices]
     identities = ordered_input_manifest(input_paths)
+    expected_hashes = settings.get("_corrected_input_hashes")
+    if expected_hashes is not None:
+        if [entry["sha256"] for entry in identities] != expected_hashes:
+            raise CoreError("CORRECTED_INPUT_CHANGED", {"message": "校正图像校验值已变化，请重新生成校正序列。"})
+        binding = settings["capture_binding"]
+        artifacts = ((binding["path"], binding["sha256"]), (binding["calibration_path"], binding["calibration_sha256"]))
+        if any(not Path(path).is_file() or sha256_file(Path(path)) != digest for path, digest in artifacts):
+            raise CoreError("CAPTURE_BINDING_CHANGED", {"message": "采集绑定或标定文件已变化，请重新打开校正序列。"})
+    if (source := settings.get("capture_source")) is not None:
+        records = source["frames"]
+        if len(records) != len(paths):
+            raise CoreError("CAPTURE_BINDING_CHANGED", {"message": "分析图像数量与采集来源记录不同。请重新打开采集实验。"})
+        if records[0].get("experiment_id", source["experiment_id"]) != source["experiment_id"] and reference_idx != 0:
+            raise CoreError("CAPTURE_REFERENCE_RANGE", {"message": "第 1 帧是已选的原实验参考图，分析范围请从第 1 帧开始。"})
+        if continued := settings.get("_continued_capture_binding"):
+            path, digest = continued
+            if not Path(path).is_file() or sha256_file(Path(path)) != digest:
+                raise CoreError("CAPTURE_BINDING_CHANGED", {"message": "采集绑定已变化，请重新打开续采分析。"})
+        for identity, record in zip(identities, records[start_idx:end_idx + 1], strict=True):
+            if identity["sha256"] != record["input_sha256"]:
+                raise CoreError("CAPTURE_IMAGE_CHANGED", {"frame_id": record["frame_id"],
+                                "message": "图像校验值与采集来源记录不符。请核对实验原图或重新生成分析图像。"})
     decoded = {}
     reference_shape = None
     for index in selected_indices:

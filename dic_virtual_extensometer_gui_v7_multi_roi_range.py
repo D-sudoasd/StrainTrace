@@ -33,6 +33,7 @@ DIC Virtual Extensometer GUI v7 Multi-ROI Range Preview
 
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -91,8 +92,10 @@ from ezdic_gui import (
     ViewersMixin,
     _get_win32_monitor_api,  # noqa: F401
     choose_ui_font_family,  # noqa: F401
-    enable_windows_dpi_awareness,
+    enable_windows_dpi_awareness,  # noqa: F401
 )
+from ezdic_gui.controls import focus_canvas_child, notebook_help
+from ezdic_gui.theme import create_tk_root
 
 # 优先使用微软雅黑 / 黑体，并使用其他平台已有的中文字库作为回退。
 plt.rcParams["font.sans-serif"] = [
@@ -1812,6 +1815,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         workbench_menu = tk.Menu(self.root, tearoff=0)
         capture_menu = tk.Menu(workbench_menu, tearoff=0)
         capture_menu.add_command(label="打开采集实验…", command=self._choose_capture_experiment)
+        capture_menu.add_command(label="打开采集绑定…", command=self._choose_corrected_capture)
         capture_menu.add_command(label="跟随采集与在线分析…", command=lambda: self._choose_capture_experiment(live=True))
         capture_menu.add_command(label="打开 Capture 工作台", command=self._open_capture_workbench)
         workbench_menu.add_cascade(label="采集联动", menu=capture_menu)
@@ -3398,6 +3402,9 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         if folder:
             self._capture_selection = None
             self._capture_prepared = None
+            self._capture_input = None
+            self._corrected_capture_source = None
+            self._continued_capture_source = None
             self.image_folder.set(folder)
             if not str(self.output_folder.get() or "").strip():
                 default_name = (
@@ -3480,6 +3487,232 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.load_first_image()
         self.log(f"Capture 实验 {binding['experiment_id']} · {binding['camera_id']}")
 
+    def _choose_capture_experiment(self, *, live=False):
+        folder = filedialog.askdirectory(parent=self.root, title="选择 StrainTrace Capture 实验")
+        if not folder:
+            return
+        try:
+            from straintrace_capture import ExperimentReader
+            from straintrace_capture.dialogs import AnalysisChoiceDialog
+            from straintrace_capture.handoff import launch_analysis
+
+            with ExperimentReader(folder) as reader:
+                cameras = [row["device"] for row in reader.cameras()]
+                record = reader.experiment
+                resolved = reader.root
+            camera = None
+            linked_live = live and bool(record["config"]["metadata"].get("continuation_of"))
+            if len(cameras) > 1 and (not live or linked_live):
+                options = {f"{item['model']} · {item['id']}": item['id'] for item in cameras}
+                choose = AnalysisChoiceDialog(self.root, "选择相机", "选择用于参考帧和实验帧的相机。", options).result
+                if choose is None:
+                    return
+                camera = options[choose]
+            if live:
+                if linked_live:
+                    if not cameras:
+                        messagebox.showinfo("等待相机登记", "相机登记后可选择原实验参考图。", parent=self.root)
+                        return
+                    self._choose_continuation_reference({"experiment_root": str(resolved),
+                                                         "experiment_id": record["experiment_id"],
+                                                         "camera_id": camera or cameras[0]["id"]}, live=True)
+                else:
+                    launch_analysis(folder, camera_id=camera, live=True)
+            else:
+                self.open_capture_experiment(folder, camera, choose_part=True)
+        except Exception as exc:
+            messagebox.showerror("无法打开采集实验", str(exc), parent=self.root)
+
+    def _open_capture_workbench(self):
+        from straintrace_capture.handoff import launch_capture
+
+        selection = getattr(self, "_capture_selection", None)
+        try:
+            launch_capture(selection[0] if selection else None)
+        except OSError as exc:
+            messagebox.showerror("无法启动 Capture", str(exc), parent=self.root)
+
+    def _choose_corrected_capture(self):
+        if path := filedialog.askopenfilename(parent=self.root, title="打开采集绑定",
+                                              filetypes=[("采集绑定文件", "*.json")]):
+            self.open_corrected_capture(path)
+
+    def open_corrected_capture(self, path):
+        from straintrace_capture.continuation_analysis import BINDING_PREFIX, LIVE_REFERENCE_PREFIX, read_continuation_binding
+        from straintrace_capture.handoff import launch_live_reference, read_corrected_analysis
+        from straintrace_capture.presentation import ui_error
+
+        if self.is_processing or self._completion_pending or getattr(self, "_corrected_capture_loading", False):
+            messagebox.showinfo("正在处理", "当前任务完成后可打开采集绑定。", parent=self.root)
+            return
+        path = Path(path).expanduser().resolve()
+        if path.parent.name.startswith(LIVE_REFERENCE_PREFIX):
+            try:
+                launch_live_reference(path)
+            except OSError as exc:
+                messagebox.showerror("无法打开实时分析", ui_error(exc), parent=self.root)
+            return
+        continued = path.parent.name.startswith(BINDING_PREFIX)
+        self._corrected_capture_loading = True
+        previous_sequence = self.loaded_image_sequence_fingerprint
+        self.log("正在校验采集绑定、图像来源与台账。")
+
+        def accept(snapshot, digest):
+            self._corrected_capture_loading = False
+            if self.is_processing or self._completion_pending or self.loaded_image_sequence_fingerprint != previous_sequence:
+                self.log("采集绑定已校验。可从“采集联动”重新打开。")
+                return
+            source = (path, digest)
+            self._load_capture_selection(snapshot, prepared=snapshot,
+                                         corrected_source=None if continued else source,
+                                         continued_source=source if continued else None)
+
+        def failed(exc):
+            self._corrected_capture_loading = False
+            messagebox.showerror("无法打开采集绑定", ui_error(exc), parent=self.root)
+
+        def read():
+            try:
+                read_binding = read_continuation_binding if continued else read_corrected_analysis
+                snapshot, digest = read_binding(path)
+            except Exception as exc:
+                self.post_to_ui(lambda issue=exc: failed(issue))
+            else:
+                self.post_to_ui(lambda: accept(snapshot, digest))
+
+        threading.Thread(target=read, name="verify-corrected-capture", daemon=True).start()
+
+    def open_capture_experiment(self, folder, camera_id=None, reference_sequence=None, *, image_part=None, choose_part=False,
+                                event_context_id=None, expected_id=None):
+        from straintrace_capture import CaptureError
+        from straintrace_capture.handoff import analysis_snapshot
+
+        if self.is_processing or self._completion_pending:
+            messagebox.showinfo("正在处理", "当前分析完成后可打开采集实验。", parent=self.root)
+            return
+        scope = {"event_context_id": event_context_id, "expected_id": expected_id} if event_context_id is not None else {}
+        try:
+            binding = analysis_snapshot(folder, camera_id, reference_sequence, image_part=image_part, **scope)
+        except CaptureError as exc:
+            if exc.code != "CHOOSE_REFERENCE" or reference_sequence is not None:
+                raise
+            reference_sequence = simpledialog.askinteger("选择参考图像", "输入已提交参考帧的采集序号",
+                                                         minvalue=1, parent=self.root)
+            if reference_sequence is None:
+                return
+            binding = analysis_snapshot(folder, camera_id, reference_sequence, image_part=image_part, **scope)
+        if choose_part and image_part is None and binding["frames"][0].get("auxiliary_images"):
+            from straintrace_capture.dialogs import AnalysisChoiceDialog
+            from straintrace_capture.image_inputs import analysis_part_options
+
+            options = analysis_part_options(binding["frames"][0])
+            choice = AnalysisChoiceDialog(self.root, "选择图像部件", "参考帧和实验帧将使用这里选择的一路原图。",
+                                          {label: tip for label, (_, tip) in options.items()}).result
+            if choice is None:
+                return
+            if part := options[choice][0]:
+                binding = analysis_snapshot(folder, binding["camera_id"], binding["frames"][0]["sequence"], image_part=part, **scope)
+        if (choose_part and event_context_id is None and reference_sequence is None and binding["frames"][0]["role"] != "reference"
+                and binding["metadata"].get("continuation_of")):
+            self._choose_continuation_reference(binding)
+            return
+        self._open_unprocessed_capture(binding)
+
+    def _choose_continuation_reference(self, binding, *, live=False):
+        from straintrace_capture.continuation_analysis_gui import ContinuationReferenceWindow
+        from straintrace_capture.handoff import launch_analysis, launch_live_reference
+
+        current = getattr(self, "_continuation_reference_window", None)
+        if current is not None and current.top.winfo_exists():
+            current.top.destroy()
+
+        def submit(action, ready, failed):
+            def work():
+                try:
+                    value = action()
+                except Exception as exc:
+                    self.post_to_ui(lambda problem=exc: failed(problem))
+                else:
+                    self.post_to_ui(lambda: ready(value))
+            threading.Thread(target=work, name="choose-continuation-reference", daemon=True).start()
+
+        def use_current():
+            if live:
+                launch_analysis(binding["experiment_root"], camera_id=binding["camera_id"], live=True)
+            else:
+                self._open_unprocessed_capture(binding)
+
+        self._continuation_reference_window = ContinuationReferenceWindow(
+            self.root, Path(binding["experiment_root"]), binding["experiment_id"], binding["camera_id"],
+            binding["camera_id"], binding.get("image_part"), submit,
+            launch_live_reference if live else self.open_corrected_capture, use_current, live=live,
+        )
+
+    def _open_unprocessed_capture(self, binding):
+        from straintrace_capture import CaptureError
+        from straintrace_capture.handoff import analysis_paths, derive_analysis_inputs, write_snapshot
+
+        root = binding["experiment_root"]
+        prepared = None
+        try:
+            analysis_paths(binding)
+        except CaptureError as exc:
+            if exc.code not in {"BAYER_DERIVATION_REQUIRED", "ALPHA_DERIVATION_REQUIRED"}:
+                raise
+            if not messagebox.askyesno("转换分析输入", "按相机像素格式生成独立的亮度图像序列并载入分析？", parent=self.root):
+                return
+            from uuid import uuid4
+
+            derived = Path(root) / "analysis-inputs" / str(uuid4())
+            prepared = derive_analysis_inputs(binding, derived, debayer=True, drop_alpha=True)
+            write_snapshot(prepared, derived / "capture_binding.json")
+        self._load_capture_selection(binding, prepared=prepared)
+
+    def _load_capture_selection(self, binding, *, prepared=None, corrected_source=None, continued_source=None):
+        root = binding["experiment_root"]
+        sources = ("_capture_selection", "_capture_prepared", "_corrected_capture_source", "_continued_capture_source")
+        old_sources = [getattr(self, attr, None) for attr in sources]
+        controls = (self.image_folder, self.output_folder, self.start_frame_1based, self.end_frame_1based,
+                    self.preview_frame_1based)
+        previous = [var.get() for var in controls]
+        image_part = binding.get("image_part")
+        event = binding.get("event")
+        self._capture_selection = (root, binding["camera_id"], binding["frames"][0]["sequence"], image_part)
+        self._capture_prepared = prepared if prepared is not None else binding if event else None
+        self._corrected_capture_source = corrected_source
+        self._continued_capture_source = continued_source
+        self.image_folder.set(root)
+        result_folder = "offline"
+        prepared_source = corrected_source or continued_source
+        if prepared_source:
+            result_folder += f"-{prepared_source[0].parent.name}"
+        elif image_part:
+            identity = f"{binding['camera_id']}\n{image_part}"
+            result_folder += f"-part-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
+        if event:
+            identity = f"{event['signal_id']}\n{binding['camera_id']}\n{binding['frames'][0]['frame_id']}\n{image_part or ''}"
+            result_folder += f"-event-{event['phase']}-{event['event_number']}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
+        if prepared_source or image_part or event:
+            self.start_frame_1based.set(1)
+            self.end_frame_1based.set(len(binding["frames"]))
+            self.preview_frame_1based.set(1)
+        self.output_folder.set(str(Path(root) / "analysis" / result_folder))
+        if not self.load_first_image():
+            for attr, value in zip(sources, old_sources, strict=True):
+                setattr(self, attr, value)
+            for var, value in zip(controls, previous, strict=True):
+                var.set(value)
+            return
+        self.log(f"Capture 实验 {binding['experiment_id']} · {binding['camera_id']}" + (f" · 部件 {image_part}" if image_part else ""))
+        if corrected_source:
+            self.log(f"已载入 {len(binding['frames'])} 张校正图像，参考图采集序号 {binding['frames'][0]['sequence']}。")
+        if continued_source:
+            reference = binding["external_reference"]
+            self.log(f"第 1 帧采用原实验《{reference['name']}》序号 {reference['sequence']} 的参考图。")
+        if event:
+            self.log(f"阶段 {event['phase']} · 事件 {event['event_number']} · 共 {len(binding['frames'])} 张图，"
+                     f"参考图原帧序号 {binding['frames'][0]['sequence']}。")
+
     def select_output_folder(self):
         folder = filedialog.askdirectory(title="选择输出文件夹")
         if folder:
@@ -3501,11 +3734,12 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             return
 
         selection = getattr(self, "_capture_selection", None)
+        binding = None
         if selection and Path(folder).resolve() == Path(selection[0]):
             from straintrace_capture.handoff import analysis_paths, analysis_snapshot
 
             try:
-                binding = getattr(self, "_capture_prepared", None) or analysis_snapshot(*selection)
+                binding = getattr(self, "_capture_prepared", None) or analysis_snapshot(*selection[:3], image_part=selection[3])
                 new_image_paths = analysis_paths(binding)
             except Exception as exc:
                 messagebox.showerror("无法读取采集图像", str(exc), parent=self.root)
@@ -3588,6 +3822,8 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             self.log(f"当前预览：第 {self.current_preview_index + 1} 帧 / 共 {n} 帧")
             self.remember_recent_paths(image_dir=folder, output_dir=self.output_folder.get().strip() or None)
             self.update_workflow_action_states()
+            self._capture_input = binding
+            return True
         except Exception as exc:
             self.image_paths = old_state["image_paths"]
             self.loaded_image_folder = old_state["loaded_image_folder"]
@@ -3663,8 +3899,16 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         start, _ = self._safe_int_var(self.start_frame_1based)
         end, _ = self._safe_int_var(self.end_frame_1based)
         range_text = f"{start}–{end}" if start is not None and end is not None else "输入待校验"
+        source = "校正序列 · " if getattr(self, "_corrected_capture_source", None) else ""
+        if getattr(self, "_continued_capture_source", None):
+            source = "续采分析 · 第 1 帧为原实验参考图 · "
+        capture = getattr(self, "_capture_selection", None)
+        if capture and capture[3]:
+            source += f"部件 {capture[3]} · "
+        if event := (getattr(self, "_capture_prepared", None) or {}).get("event"):
+            source += f"事件 {event['event_number']} · "
         self.status_var.set(
-            f"预览第 {index0 + 1}/{n} 帧：{os.path.basename(path)} | 分析范围 {range_text}"
+            f"{source}预览第 {index0 + 1}/{n} 帧：{os.path.basename(path)} | 分析范围 {range_text}"
         )
         self._update_preview_scale_label()
         self.log(f"已显示第 {index0 + 1} 帧：{path}")
@@ -4535,7 +4779,7 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         reference_normalization = (
             compute_reference_normalization(reference_raw) if reference_raw is not None else None
         )
-        return {
+        settings = {
             "output_dir": Path(self.output_folder.get().strip()),
             "image_paths": list(self.image_paths),
             "roi_groups": [dict(group) for group in self.roi_groups],
@@ -4590,6 +4834,27 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             "mask": self.dic_mask_settings() if is_ff else {"mode": "none"},
             "display": self.dic_display_options() if is_ff else {},
         }
+        if binding := getattr(self, "_capture_input", None):
+            from straintrace_capture.handoff import analysis_paths, analysis_source
+
+            if list(self.image_paths) != analysis_paths(binding):
+                raise ValueError("当前图像序列已经改变，请重新打开采集实验。")
+            settings["capture_source"] = analysis_source(binding)
+        if continued := getattr(self, "_continued_capture_source", None):
+            if start_idx != 0:
+                raise ValueError("第 1 帧是已选的原实验参考图，分析范围请从第 1 帧开始。")
+            settings["_continued_capture_binding"] = (str(continued[0]), continued[1])
+        if source := getattr(self, "_corrected_capture_source", None):
+            binding = self._capture_prepared
+            path, digest = source
+            settings["capture_binding"] = {
+                "path": str(path), "sha256": digest, "experiment_id": binding["experiment_id"],
+                "camera_id": binding["camera_id"], "reference_frame_id": binding["frames"][start_idx]["frame_id"],
+                "calibration_path": str(path.with_name(binding["lens_calibration"]["path"])),
+                "calibration_sha256": binding["lens_calibration"]["sha256"],
+            }
+            settings["_corrected_input_hashes"] = [row["analysis_sha256"] for row in binding["frames"][start_idx:end_idx + 1]]
+        return settings
 
     def post_to_ui(self, callback, run_token=None):
         if run_token is None:
@@ -5159,23 +5424,47 @@ def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(prog="straintrace-gui")
-    parser.add_argument("--capture", type=Path)
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--capture", type=Path)
+    inputs.add_argument("--capture-binding", type=Path)
+    inputs.add_argument("--live-reference-binding", type=Path)
     parser.add_argument("--camera")
     parser.add_argument("--reference-sequence", type=int)
+    parser.add_argument("--image-part")
+    parser.add_argument("--event-context")
+    parser.add_argument("--expect-experiment-id")
     parser.add_argument("--live", action="store_true")
     args, _ = parser.parse_known_args(argv)
+    if args.event_context is not None and (not args.capture or args.live):
+        parser.error("--event-context requires offline --capture")
+    if args.expect_experiment_id is not None and args.event_context is None:
+        parser.error("--expect-experiment-id requires --event-context")
+    if args.live_reference_binding:
+        if args.live or args.camera is not None or args.reference_sequence is not None or args.image_part is not None:
+            parser.error("--live-reference-binding already fixes the camera, image part and reference")
+        from straintrace_capture.continuation_analysis import live_reference_root
+        from straintrace_capture.live_gui import run_live
+
+        return run_live(live_reference_root(args.live_reference_binding), reference_binding=args.live_reference_binding)
+    if args.capture_binding and (args.live or args.camera is not None or args.reference_sequence is not None or args.image_part is not None):
+        parser.error("--capture-binding already fixes the camera, image part and reference")
+    if args.image_part is not None and not args.capture:
+        parser.error("--image-part requires --capture")
     if args.live:
         if not args.capture:
             parser.error("--live requires --capture")
         from straintrace_capture.live_gui import run_live
 
-        return run_live(args.capture, args.camera, args.reference_sequence)
-    enable_windows_dpi_awareness()
-    root = tk.Tk()
+        return run_live(args.capture, args.camera, args.reference_sequence, image_part=args.image_part)
+    root = create_tk_root()
     app = MultiROIGUI(root)
-    if args.capture:
+    if args.capture_binding:
+        app.open_corrected_capture(args.capture_binding)
+    elif args.capture:
         try:
-            app.open_capture_experiment(args.capture, args.camera, args.reference_sequence)
+            scope = ({"event_context_id": args.event_context, "expected_id": args.expect_experiment_id}
+                     if args.event_context is not None else {})
+            app.open_capture_experiment(args.capture, args.camera, args.reference_sequence, image_part=args.image_part, **scope)
         except Exception as exc:
             messagebox.showerror("无法打开采集实验", str(exc), parent=root)
     app.run()

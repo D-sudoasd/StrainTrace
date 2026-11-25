@@ -7,9 +7,12 @@ windowed executable; ``ezDIC-cli.exe`` is a console executable that exposes the
 same headless CLI contract as ``python ezdic_cli.py`` in a source checkout.
 """
 
+import argparse
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+import sys
 
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 
 # PyInstaller executes a spec in a generated namespace without ``__file__``;
@@ -19,6 +22,25 @@ PROJECT_ROOT = Path(SPECPATH).resolve()
 
 def source_file(relative_path: str) -> str:
     return str(PROJECT_ROOT / relative_path)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--industrial", action="store_true", help="bundle the Basler and GenTL user-space SDKs on Windows")
+industrial = parser.parse_args().industrial
+industrial_datas = []
+industrial_binaries = []
+industrial_hooks = []
+if industrial:
+    if sys.platform != "win32":
+        parser.error("The industrial portable build targets Windows.")
+    try:
+        for package in ("pypylon", "genicam", "harvesters"):
+            industrial_datas.extend(copy_metadata(package))
+    except PackageNotFoundError as exc:
+        parser.error(f"{exc.name} is missing. Install requirements-build-industrial.txt before building.")
+    industrial_datas.extend(collect_data_files("genicam", includes=["licenses/*"]))
+    industrial_binaries = collect_dynamic_libs("genicam")
+    industrial_hooks = [source_file("scripts/pyinstaller")]
 
 
 # Root-level documents are copied again by build_release.ps1 so the portable
@@ -108,6 +130,7 @@ capture_datas = [
 common_datas = (
     root_datas + source_datas + benchmark_datas + capture_datas
     + collect_data_files("matplotlib") + copy_metadata("scipy") + copy_metadata("cv2-enumerate-cameras")
+    + industrial_datas
 )
 common_hiddenimports = [
     "ezdic_core",
@@ -188,20 +211,17 @@ common_excludes = [
     "pytest",
     "yaml",
     "jsonschema",
-    # Industrial SDKs and CTIs are installed separately in the source workflow.
-    "pypylon",
-    "harvesters",
-    "genicam",
 ]
+common_excludes += (["pypylon.pylondataprocessing"] if industrial else ["pypylon", "harvesters", "genicam"])
 
 
 gui_analysis = Analysis(
     [source_file("ezdic_frozen_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=industrial_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
-    hookspath=[],
+    hookspath=industrial_hooks,
     hooksconfig={},
     runtime_hooks=[],
     excludes=common_excludes,
@@ -235,10 +255,10 @@ capture_gui_exe = EXE(
 cli_analysis = Analysis(
     [source_file("ezdic_cli_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=industrial_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
-    hookspath=[],
+    hookspath=industrial_hooks,
     hooksconfig={},
     runtime_hooks=[],
     excludes=common_excludes,
@@ -279,7 +299,7 @@ coll = COLLECT(
     cli_analysis.binaries,
     cli_analysis.datas,
     strip=False,
-    upx=True,
+    upx=not industrial,
     upx_exclude=[],
-    name="ezDIC_Windows_x64",
+    name="ezDIC_Windows_x64_Industrial" if industrial else "ezDIC_Windows_x64",
 )

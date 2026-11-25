@@ -1,17 +1,20 @@
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from straintrace_capture import CameraRegistry, CaptureConfig, CaptureSession, ExperimentReader
 from straintrace_capture.cameras.base import ClockReading, Device
 from straintrace_capture.cameras.simulated import SimulatedCamera
+from straintrace_capture.image_inputs import decode_samples
 from straintrace_capture.synchronization import ClockAnchor, LoadAlignment, ThresholdTrigger, capture_axis, link_detector
+from straintrace_capture.trigger_review import read_trigger_review
 
 
 class PulseCamera(SimulatedCamera):
     def __init__(self, identity):
-        super().__init__(0)
+        super().__init__(0 if identity.endswith("left") else 1)
         self.device = Device(identity, "pulse", "Test fixture", "Scripted pulse source", identity, "simulated")
         self.counter_values = iter([41, 42, 45] if identity.endswith("left") else [80, 82, 84])
 
@@ -30,7 +33,7 @@ class PulseCamera(SimulatedCamera):
         return replace(image, exposure_start=start, exposure_end=end, metadata={"ChunkCounterValue": counter})
 
 
-def test_hardware_association_needs_explicit_id_and_preserves_missing_pulses(tmp_path):
+def _pulse_capture(root, factory=PulseCamera):
     names = ("pulse:left", "pulse:right")
     config = CaptureConfig.from_dict({
         "config_version": 1, "name": "Common-pulse fixture",
@@ -41,11 +44,16 @@ def test_hardware_association_needs_explicit_id_and_preserves_missing_pulses(tmp
                                  "first_counter": dict(zip(names, (41, 80))), "first_event_number": 100},
         }],
     })
-    registry = CameraRegistry(custom={"pulse": (lambda: [], PulseCamera)})
-    capture = CaptureSession(config, tmp_path / "fixture", registry=registry)
+    registry = CameraRegistry(custom={"pulse": (lambda: [], factory)})
+    capture = CaptureSession(config, root, registry=registry)
     capture.start()
     assert capture.wait(5)["state"] == "completed"
-    with ExperimentReader(capture.output) as reader:
+    return capture.output
+
+
+def test_hardware_association_needs_explicit_id_and_preserves_missing_pulses(tmp_path):
+    root = _pulse_capture(tmp_path / "fixture")
+    with ExperimentReader(root) as reader:
         pairing = reader.pairing()
         indexed = {group["external_event_number"]: group for group in pairing["groups"]}
         assert pairing["hardware_counter_gap_ranges"] == [{"phase": 1, "first_event_number": 103, "last_event_number": 103}]
@@ -53,12 +61,19 @@ def test_hardware_association_needs_explicit_id_and_preserves_missing_pulses(tmp
         assert indexed[101]["missing_cameras"] == ["pulse:right"]
         assert indexed[102]["missing_cameras"] == ["pulse:left"]
         assert indexed[104]["status"] == "associated"
-        assert reader.verify()["committed_frames"] == 6
-        assert not reader.verify()["complete"]
+        verification = reader.verify()
+        assert verification["committed_frames"] == 6 and not verification["complete"]
+        snapshot = verification["hardware_groups"]
+        assert snapshot["phase"] == 1 and not snapshot["accepting"]
+        assert [row["number"] for row in snapshot["groups"]] == [100, 104, 102, 101]
+        observed = {row["number"]: row for row in snapshot["groups"]}
+        assert observed[100]["saved_cameras"] == 2 and not observed[100]["advanced"]
+        assert observed[101]["advanced"] == ["pulse:right"] and observed[101]["saved_cameras"] == 1
+        assert observed[102]["advanced"] == ["pulse:left"] and observed[102]["saved_cameras"] == 1
         frame = reader.frames(camera_id="pulse:left", limit=1)[0]
     source = tmp_path / "detector.csv"
     source.write_text("event_number,detector_frame\n100,cbf_01\n101,cbf_02\n103,cbf_03\n", encoding="utf-8")
-    linked = link_detector(capture.output, source, trigger_source="DAQ-A")["links"]
+    linked = link_detector(root, source, trigger_source="DAQ-A")["links"]
     assert {row["external_event_number"]: row["association"] for row in linked} == {
         100: "identity_match", 101: "partial_capture", 102: "capture_only",
         103: "detector_only", 104: "capture_only",
@@ -84,6 +99,64 @@ def test_hardware_association_needs_explicit_id_and_preserves_missing_pulses(tmp
     assert result["force_support"]["status"] == "EXPOSURE_WINDOW_MEAN"
     align.max_gap_s = .5
     assert align.at(frame)["force_N"] is None
+
+
+def test_trigger_review_pages_use_ledger_ids_and_leave_missing_images_empty(tmp_path):
+    root = _pulse_capture(tmp_path / "paired")
+    with ExperimentReader(root) as reader:
+        equivalent = {row["event_id"]: row for row in reader.pairing()["groups"]}
+        page = reader.trigger_group_page()
+        assert len(page) == 4
+        for row in page:
+            assert all(row[key] == value for key, value in equivalent[row["event_id"]].items())
+        recent = reader.trigger_group_page(limit=2)
+        past = reader.trigger_group_page(limit=2, before=recent[-1]["ordinal"])
+        assert recent + past == page
+        assert reader.trigger_group_page(limit=2, after=past[0]["ordinal"], newest_first=False) == recent[::-1]
+        gaps = reader.trigger_group_page(problems_only=True)
+        assert {row["external_event_number"] for row in gaps} == {101, 102}
+        target = gaps[-1]["event_id"]
+        assert reader.trigger_group_page(through_event=target)[0]["event_id"] == target
+        group, frames = reader.trigger_group(target)
+        assert [row["trigger_event_id"] for row in frames] == [target]
+        assert group["missing_cameras"] == ["pulse:left" if frames[0]["camera_id"] == "pulse:right" else "pulse:right"]
+        intact = next(row["event_id"] for row in page if row["external_event_number"] == 100)
+        displayed, records, images, errors, span = read_trigger_review(root, intact)
+        assert displayed["status"] == "associated" and not errors
+        assert set(images) == {"pulse:left", "pulse:right"}
+        assert not np.array_equal(images["pulse:left"].pixels, images["pulse:right"].pixels)
+        stamps = [rows[0]["timestamps"]["received_monotonic"]["value"] for rows in records.values()]
+        assert span == max(stamps) - min(stamps)
+        for camera, image in images.items():
+            np.testing.assert_array_equal(image.pixels, decode_samples(reader.image_path(records[camera][0])), strict=True)
+
+    group, _, images, errors, span = read_trigger_review(root, target)
+    assert group["status"] == "incomplete" and not errors
+    assert set(images) == set(group["expected_cameras"]) - set(group["missing_cameras"])
+    assert span is None
+
+
+def test_trigger_review_preserves_ambiguity_and_reports_a_corrupt_tiff(tmp_path):
+    class RepeatCounter(PulseCamera):
+        def __init__(self, identity):
+            super().__init__(identity)
+            if identity.endswith("left"):
+                self.counter_values = iter([41, 41, 45])
+
+    root = _pulse_capture(tmp_path / "duplicate", RepeatCounter)
+    with ExperimentReader(root) as reader:
+        conflicts = reader.trigger_group_page(problems_only=True)
+        event = next(row for row in conflicts if row["external_event_number"] == 100)
+        group, frames, images, errors, span = read_trigger_review(root, event["event_id"])
+        assert group["status"] == "ambiguous" and group["ambiguous_cameras"] == ["pulse:left"]
+        assert len(frames["pulse:left"]) == 2 and set(images) == {"pulse:right"} and span is None and not errors
+        path = reader.image_path(frames["pulse:right"][0])
+        original = path.read_bytes()
+    path.write_bytes(original + b"bad")
+    group, _, images, errors, _ = read_trigger_review(root, event["event_id"])
+    assert group["status"] == "ambiguous" and not images
+    assert "CAPTURE_IMAGE_CHANGED" in errors["pulse:right"]
+    path.write_bytes(original)
 
 
 def test_load_measurement_threshold_triggers_only_crossings():

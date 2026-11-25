@@ -11,6 +11,47 @@
     "analysis_mode": {"enum": ["extensometer", "fullfield"]},
     "image_paths": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
     "image_folder": {"type": "string", "minLength": 1},
+    "capture_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["experiment_id", "camera_id", "frames"],
+      "allOf": [{
+        "if": {"required": ["event"]},
+        "then": {"properties": {"frames": {"prefixItems": [{}], "items": {"required": ["event_position"]}}}},
+        "else": {"properties": {"frames": {"items": {"not": {"required": ["event_position"]}}}}}
+      }],
+      "properties": {
+        "experiment_id": {"type": "string", "minLength": 1},
+        "camera_id": {"type": "string", "minLength": 1},
+        "image_part": {"type": ["string", "null"], "minLength": 1},
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["signal_id", "phase", "event_number", "signal_utc_ns"],
+          "properties": {
+            "signal_id": {"type": "string", "minLength": 1},
+            "phase": {"type": "integer", "minimum": 1},
+            "event_number": {"type": "integer", "minimum": 1},
+            "signal_utc_ns": {"type": "integer", "minimum": 1}
+          }
+        },
+        "frames": {
+          "description": "One ledger receipt and pair of hashes per input path, in the same order.",
+          "type": "array", "minItems": 2,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["frame_id", "raw_sha256", "input_sha256"],
+            "properties": {
+              "frame_id": {"type": "string", "minLength": 1},
+              "experiment_id": {"type": "string", "minLength": 1, "description": "Present for an image from a linked earlier experiment."},
+              "event_position": {"enum": ["pre", "boundary", "post"]},
+              "raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
     "start_frame_1based": {"type": "integer", "minimum": 1},
     "end_frame_1based": {"type": "integer", "minimum": 1},
     "reference_frame_1based": {"type": "integer", "minimum": 1},
@@ -30,6 +71,7 @@
     "transaction": {"$ref": "#/$defs/transaction"},
     "metadata": {"type": "object", "description": "Caller-defined annotations; values still must be finite JSON."}
   },
+  "dependentRequired": {"capture_source": ["image_paths"]},
   "allOf": [
     {
       "oneOf": [

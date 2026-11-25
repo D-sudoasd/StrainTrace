@@ -50,7 +50,14 @@ def repaint_after_resize(window):
             window.after_cancel(pending)
         pending = window.after(110, deferred)
 
+    def destroyed(event):
+        nonlocal pending
+        if event.widget is window and pending:
+            window.after_cancel(pending)
+            pending = None
+
     window.bind("<Configure>", resized, add="+")
+    window.bind("<Destroy>", destroyed, add="+")
 
 
 class ImageViewport(ttk.Frame):
@@ -67,11 +74,15 @@ class ImageViewport(ttk.Frame):
         self.canvas = tk.Canvas(self, bg="#0a1117", highlightthickness=1,
                                 highlightbackground="#354b5a", takefocus=True, cursor="crosshair")
         self.canvas.grid(row=1, column=0, sticky="nsew", padx=8)
-        self._caption = ttk.Label(self, text="Awaiting image", style="CaptureMono.TLabel", anchor="w")
+        self._caption = ttk.Label(self, text="等待图像", style="CaptureMono.TLabel", anchor="w")
         self._caption.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 6))
+        self.bind("<Configure>", self._fit_caption, add="+")
         self._image = self._prepared = self._photo = None
+        self.displayed_image = None
         self._image_key = None
-        self._placeholder = "Start preview to check the field of view"
+        self._placeholder = "连接预览后可查看图像"
+        self._empty_caption = "等待图像"
+        self._frame_caption = None
         self._zoom = None
         self._offset = (0.0, 0.0)
         self._project = (1.0, 0.0, 0.0)
@@ -79,11 +90,13 @@ class ImageViewport(ttk.Frame):
         self._roi_anchor = None
         self._probe_coordinate = None
         self.roi = None
+        self.region_editable = True
         self.guide = "Off"
         self.palette = "native"
+        self._checkerboard = None
         self._calibration = None
         self._calibration_error = None
-        self._draw_pending = False
+        self._draw_after = None
         self.canvas.bind("<Configure>", self._schedule_draw)
         self.canvas.bind("<Motion>", self._probe)
         self.canvas.bind("<Leave>", self._clear_probe)
@@ -105,26 +118,54 @@ class ImageViewport(ttk.Frame):
     def set_title(self, title: str):
         self._title.configure(text=title)
 
+    def _fit_caption(self, event):
+        if event.height < 125:
+            if self._caption.winfo_manager():
+                self._caption.grid_remove()
+        elif not self._caption.winfo_manager():
+            self._caption.grid()
+
     def _wrap_title(self, event):
         if int(self._title.cget("wraplength")) != event.width:
             self._title.configure(wraplength=event.width)
 
-    def image(self, image, *, placeholder=None):
-        key = (None if image is None else image.received_monotonic_ns, self.palette, id(self._calibration))
-        if self._image_key == key and (placeholder is None or placeholder == self._placeholder):
+    def image(self, image, *, placeholder=None, features=None, empty_caption="等待图像", frame_caption=None):
+        key = (id(image), self.palette, id(self._calibration))
+        if (self._image_key == key and (placeholder is None or placeholder == self._placeholder)
+                and empty_caption == self._empty_caption and frame_caption == self._frame_caption):
             return
+        if image is not None and self._calibration is not None:
+            from .calibration import calibration_geometry, require_matching_calibration
+
+            try:
+                if features is None:
+                    raise CaptureError("CALIBRATION_IMAGE_UNAVAILABLE", "no recorded geometry for this image")
+                geometry = calibration_geometry(image.pixels.shape, features, image.metadata)
+                require_matching_calibration(self._calibration, geometry)
+            except CaptureError:
+                self._calibration = None
+                self._calibration_error = "校正已关闭 · 原图"
+                key = (id(image), self.palette, id(None))
         self._image_key = key
         self._image = image
         self._prepared = None
+        self._empty_caption = empty_caption
+        self._frame_caption = frame_caption
         if placeholder is not None:
             self._placeholder = placeholder
         self._set_caption()
         self._schedule_draw()
 
-    def show_calibration(self, profile):
+    def show_calibration(self, profile, *, image=None, features=None):
         self._calibration = profile
         self._calibration_error = None
-        self.image(self._image)
+        self._image_key = None
+        self.image(self._image if image is None else image, features=features)
+
+    def show_checkerboard(self, overlay):
+        if overlay != self._checkerboard:
+            self._checkerboard = overlay
+            self._schedule_draw()
 
     @property
     def corrected(self):
@@ -141,18 +182,32 @@ class ImageViewport(ttk.Frame):
         self._schedule_draw()
 
     def _schedule_draw(self, _event=None):
-        if not self._draw_pending:
-            self._draw_pending = True
-            self.after_idle(self.draw)
+        if self._draw_after is None:
+            self._draw_after = self.after_idle(self._draw_when_idle)
+
+    def _draw_when_idle(self):
+        self._draw_after = None
+        self.draw()
+
+    def _cancel_draw(self):
+        if self._draw_after is not None:
+            self.after_cancel(self._draw_after)
+            self._draw_after = None
+
+    def destroy(self):
+        self._cancel_draw()
+        super().destroy()
 
     def _set_caption(self):
         image = self._image
-        info = "Awaiting image"
+        info = self._empty_caption
         if image is not None:
             height, width = image.pixels.shape[:2]
-            info = f"{width}×{height} · {image.pixel_format}"
-            if self._calibration is not None:
-                info = self._calibration_error or "Undistorted preview"
+            info = self._frame_caption or f"{width}×{height} · {image.pixel_format}"
+            if self._calibration_error:
+                info = self._calibration_error
+            elif self._calibration is not None:
+                info = "已校正预览"
             elif self._probe_coordinate is not None:
                 x, y = self._probe_coordinate
                 if x < width and y < height:
@@ -160,7 +215,8 @@ class ImageViewport(ttk.Frame):
         self._caption.configure(text=info)
 
     def draw(self):
-        self._draw_pending = False
+        self._cancel_draw()
+        self.displayed_image = None
         self.canvas.delete("all")
         w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
         if self._image is None:
@@ -176,7 +232,8 @@ class ImageViewport(ttk.Frame):
                     pixels = undistort(pixels, self._calibration)
                     self._calibration_error = None
                 except CaptureError:
-                    self._calibration_error = "Profile geometry mismatch"
+                    self._calibration = None
+                    self._calibration_error = "校正已关闭 · 原图"
                 self._set_caption()
             self._prepared = PillowImage.fromarray(pixels)
         iw, ih = self._prepared.size
@@ -196,6 +253,7 @@ class ImageViewport(ttk.Frame):
                                PillowImage.Resampling.NEAREST if zoom >= 1 else PillowImage.Resampling.BILINEAR)
             self._photo = ImageTk.PhotoImage(tile, master=self.canvas)
             self.canvas.create_image(left + x0 * zoom, top + y0 * zoom, image=self._photo, anchor="nw")
+            self.displayed_image = self._image
         if self.guide == "Crosshair":
             self.canvas.create_line(left + iw * zoom / 2, top, left + iw * zoom / 2, top + ih * zoom, fill="#69b5ac")
             self.canvas.create_line(left, top + ih * zoom / 2, left + iw * zoom, top + ih * zoom / 2, fill="#69b5ac")
@@ -205,6 +263,14 @@ class ImageViewport(ttk.Frame):
                                         fill="#69b5ac", dash=(4, 4))
                 self.canvas.create_line(left, top + ih * zoom * i / 4, left + iw * zoom, top + ih * zoom * i / 4,
                                         fill="#69b5ac", dash=(4, 4))
+        if self._checkerboard is not None and self._calibration is None:
+            utc, monotonic, points = self._checkerboard
+            if (utc, monotonic) == (self._image.received_utc_ns, self._image.received_monotonic_ns):
+                for x, y in points:
+                    sx, sy = left + x * zoom, top + y * zoom
+                    if 0 <= sx < w and 0 <= sy < h:
+                        self.canvas.create_oval(sx - 2.5, sy - 2.5, sx + 2.5, sy + 2.5,
+                                                fill="#78f6c3", outline="#17342c", tags="checkerboard")
         if self.roi and self._calibration is None:
             x, y, rw, rh = self.roi
             self.canvas.create_rectangle(left + x * zoom, top + y * zoom, left + (x + rw) * zoom,
@@ -231,7 +297,7 @@ class ImageViewport(ttk.Frame):
     def _begin(self, event):
         self.canvas.focus_set()
         self._select(self.camera_id)
-        if event.state & 0x1 and self._calibration is None:
+        if event.state & 0x1 and self._calibration is None and self.region_editable:
             self._roi_anchor = self._source(event)
         else:
             self._drag_origin = event.x, event.y, *self._offset

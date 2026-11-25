@@ -157,7 +157,10 @@ def classify_time_value(value: Any) -> dict[str, Any]:
     }
 
 
-def parse_row_time(field: str, row: Mapping[str, Any]) -> tuple[float | None, str, str | None, str | None]:
+def parse_row_time(
+    field: str, row: Mapping[str, Any], *, numeric_domain: str | None = None,
+    numeric_scale: float = 1., default_clock_id: str | None = None,
+) -> tuple[float | None, str, str | None, str | None]:
     """Return ``(value, domain, clock_id, reason)`` for the selected row time field."""
     if field not in row or row.get(field) is None or str(row.get(field)).strip() == "":
         if field == "timestamp_unix_s" and row.get("estimated_timestamp_unix_s") not in (None, ""):
@@ -175,7 +178,14 @@ def parse_row_time(field: str, row: Mapping[str, Any]) -> tuple[float | None, st
     if clock_id == "":
         clock_id = None
     if number is not None:
-        if field.endswith("unix_s"):
+        number *= numeric_scale
+        if not math.isfinite(number):
+            return None, "missing", clock_id, "TIME_VALUE_OUTSIDE_RANGE"
+        if numeric_domain == "relative":
+            if is_estimated:
+                return None, "missing", clock_id, "TIME_FIELD_MARKED_DERIVED"
+            return number, "relative", clock_id or default_clock_id, None
+        if numeric_domain == "absolute" or field.endswith("unix_s"):
             if number < ABSOLUTE_EPOCH_MIN:
                 return None, "missing", clock_id, "UNIX_FIELD_VALUE_OUTSIDE_EPOCH_RANGE"
             return number, "unix_epoch_estimated" if is_estimated else "unix_epoch_recorded", clock_id, None
@@ -189,6 +199,8 @@ def parse_row_time(field: str, row: Mapping[str, Any]) -> tuple[float | None, st
             return None, "relative", None, "RELATIVE_CLOCK_ID_REQUIRED"
         return number, "relative", clock_id, None
 
+    if numeric_domain == "relative":
+        return None, "missing", clock_id, "RELATIVE_TIME_MUST_BE_NUMERIC"
     text = str(raw).strip()
     candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
     try:
@@ -228,17 +240,22 @@ def read_load_table(
     time_column: str,
     force_column: str,
     force_unit: str | None = None,
+    *,
+    encoding: str = "utf-8-sig",
+    time_parser=None,
 ) -> dict[str, Any]:
     """Read and validate a headered load CSV with strict monotonicity and unit checks."""
     file_path = Path(path).expanduser()
     if not file_path.is_file():
         raise CampaignError("LOAD_SOURCE_NOT_FOUND", f"load source does not exist: {file_path}")
-    with file_path.open("r", encoding="utf-8-sig", newline="") as stream:
+    with file_path.open("r", encoding=encoding, newline="") as stream:
         sample = stream.read(8192)
         stream.seek(0)
         delimiter = sniff_csv_delimiter(sample)
         reader = csv.DictReader(stream, delimiter=delimiter)
         headers = reader.fieldnames or []
+        if len(set(headers)) != len(headers):
+            raise CampaignError("LOAD_HEADER_INVALID", "load column names must be unique")
         if time_column not in headers:
             raise CampaignError("LOAD_TIME_COLUMN_MISSING", f"load source has no {time_column!r} column")
         if force_column not in headers:
@@ -251,8 +268,9 @@ def read_load_table(
     forces: list[float | None] = []
     valid: list[bool] = []
     force_reasons: list[str] = []
+    parse_time = time_parser or parse_row_time
     for index, raw in enumerate(rows):
-        time_value, domain, clock_id, time_error = parse_row_time(time_column, raw)
+        time_value, domain, clock_id, time_error = parse_time(time_column, raw)
         if time_value is None:
             raise CampaignError("LOAD_TIME_AXIS_INVALID", f"load row {index + 2} has invalid time: {time_error}")
         parsed_times.append(time_value)
@@ -266,10 +284,12 @@ def read_load_table(
             valid.append(False)
             force_reasons.append("UNKNOWN_FORCE_UNIT" if raw_force is not None and scale is None else "INVALID_FORCE_VALUE")
         else:
-            forces.append(raw_force * scale)
+            force = finite_number(raw_force * scale)
+            forces.append(force)
             row_valid = raw.get("is_force_valid")
-            valid.append(True if row_valid in (None, "") else parse_bool(row_valid))
-            force_reasons.append("VALID_FORCE_N" if valid[-1] else "SOURCE_MARKED_FORCE_INVALID")
+            valid.append(force is not None and (row_valid in (None, "") or parse_bool(row_valid)))
+            force_reasons.append("INVALID_FORCE_VALUE" if force is None else
+                                 "VALID_FORCE_N" if valid[-1] else "SOURCE_MARKED_FORCE_INVALID")
 
     if not rows:
         raise CampaignError("LOAD_SOURCE_EMPTY", f"load source has no data rows: {file_path}")
