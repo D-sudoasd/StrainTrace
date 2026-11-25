@@ -47,7 +47,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import cv2  # noqa: F401
 import matplotlib
@@ -1809,6 +1809,13 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.update_workflow_action_states()
 
     def _build_app_header(self, parent):
+        workbench_menu = tk.Menu(self.root, tearoff=0)
+        capture_menu = tk.Menu(workbench_menu, tearoff=0)
+        capture_menu.add_command(label="打开采集实验…", command=self._choose_capture_experiment)
+        capture_menu.add_command(label="跟随采集与在线分析…", command=lambda: self._choose_capture_experiment(live=True))
+        capture_menu.add_command(label="打开 Capture 工作台", command=self._open_capture_workbench)
+        workbench_menu.add_cascade(label="采集联动", menu=capture_menu)
+        self.root.configure(menu=workbench_menu)
         header = ttk.Frame(parent, style="App.TFrame")
         self.app_header = header
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -3389,6 +3396,8 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
     def select_image_folder(self):
         folder = filedialog.askdirectory(title="选择图像序列文件夹")
         if folder:
+            self._capture_selection = None
+            self._capture_prepared = None
             self.image_folder.set(folder)
             if not str(self.output_folder.get() or "").strip():
                 default_name = (
@@ -3399,6 +3408,77 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
                 self.output_folder.set(os.path.join(folder, default_name))
             self.remember_recent_paths(image_dir=folder, output_dir=self.output_folder.get())
             self.log(f"图像文件夹：{folder}")
+
+    def _choose_capture_experiment(self, *, live=False):
+        folder = filedialog.askdirectory(parent=self.root, title="选择 StrainTrace Capture 实验")
+        if not folder:
+            return
+        try:
+            from straintrace_capture import ExperimentReader
+            from straintrace_capture.handoff import launch_analysis
+
+            with ExperimentReader(folder) as reader:
+                cameras = [row["device"] for row in reader.cameras()]
+            camera = None
+            if len(cameras) > 1 and not live:
+                options = "\n".join(f"{item['model']} · {item['id']}" for item in cameras)
+                camera = simpledialog.askstring("选择相机", f"输入相机 ID\n{options}", parent=self.root,
+                                               initialvalue=cameras[0]["id"])
+                if not camera:
+                    return
+            if live:
+                launch_analysis(folder, camera_id=camera, live=True)
+            else:
+                self.open_capture_experiment(folder, camera)
+        except Exception as exc:
+            messagebox.showerror("无法打开采集实验", str(exc), parent=self.root)
+
+    def _open_capture_workbench(self):
+        from straintrace_capture.handoff import launch_capture
+
+        selection = getattr(self, "_capture_selection", None)
+        try:
+            launch_capture(selection[0] if selection else None)
+        except OSError as exc:
+            messagebox.showerror("无法启动 Capture", str(exc), parent=self.root)
+
+    def open_capture_experiment(self, folder, camera_id=None, reference_sequence=None):
+        from straintrace_capture import CaptureError
+        from straintrace_capture.handoff import analysis_paths, analysis_snapshot, derive_analysis_inputs, write_snapshot
+
+        if self.is_processing or self._completion_pending:
+            messagebox.showinfo("正在处理", "当前分析完成后可打开采集实验。", parent=self.root)
+            return
+        try:
+            binding = analysis_snapshot(folder, camera_id, reference_sequence)
+        except CaptureError as exc:
+            if exc.code != "CHOOSE_REFERENCE" or reference_sequence is not None:
+                raise
+            reference_sequence = simpledialog.askinteger("选择参考图像", "输入已提交参考帧的采集序号",
+                                                         minvalue=1, parent=self.root)
+            if reference_sequence is None:
+                return
+            binding = analysis_snapshot(folder, camera_id, reference_sequence)
+        root = binding["experiment_root"]
+        prepared = None
+        try:
+            analysis_paths(binding)
+        except CaptureError as exc:
+            if exc.code not in {"BAYER_DERIVATION_REQUIRED", "ALPHA_DERIVATION_REQUIRED"}:
+                raise
+            if not messagebox.askyesno("转换分析输入", "按相机像素格式生成独立的亮度图像序列并载入分析？", parent=self.root):
+                return
+            from uuid import uuid4
+
+            derived = Path(root) / "analysis-inputs" / str(uuid4())
+            prepared = derive_analysis_inputs(binding, derived, debayer=True, drop_alpha=True)
+            write_snapshot(prepared, derived / "capture_binding.json")
+        self._capture_selection = (root, binding["camera_id"], binding["frames"][0]["sequence"])
+        self._capture_prepared = prepared
+        self.image_folder.set(root)
+        self.output_folder.set(str(Path(root) / "analysis" / "offline"))
+        self.load_first_image()
+        self.log(f"Capture 实验 {binding['experiment_id']} · {binding['camera_id']}")
 
     def select_output_folder(self):
         folder = filedialog.askdirectory(title="选择输出文件夹")
@@ -3420,7 +3500,18 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
             messagebox.showwarning("缺少文件夹", "请先选择图像文件夹。")
             return
 
-        new_image_paths = collect_images(folder)
+        selection = getattr(self, "_capture_selection", None)
+        if selection and Path(folder).resolve() == Path(selection[0]):
+            from straintrace_capture.handoff import analysis_paths, analysis_snapshot
+
+            try:
+                binding = getattr(self, "_capture_prepared", None) or analysis_snapshot(*selection)
+                new_image_paths = analysis_paths(binding)
+            except Exception as exc:
+                messagebox.showerror("无法读取采集图像", str(exc), parent=self.root)
+                return
+        else:
+            new_image_paths = collect_images(folder)
         if not new_image_paths:
             messagebox.showerror("未找到图像", "该文件夹中没有找到 tif/tiff/png/jpg/bmp 图像。")
             return
@@ -5064,10 +5155,29 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.root.mainloop()
 
 
-def main():
+def main(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="straintrace-gui")
+    parser.add_argument("--capture", type=Path)
+    parser.add_argument("--camera")
+    parser.add_argument("--reference-sequence", type=int)
+    parser.add_argument("--live", action="store_true")
+    args, _ = parser.parse_known_args(argv)
+    if args.live:
+        if not args.capture:
+            parser.error("--live requires --capture")
+        from straintrace_capture.live_gui import run_live
+
+        return run_live(args.capture, args.camera, args.reference_sequence)
     enable_windows_dpi_awareness()
     root = tk.Tk()
     app = MultiROIGUI(root)
+    if args.capture:
+        try:
+            app.open_capture_experiment(args.capture, args.camera, args.reference_sequence)
+        except Exception as exc:
+            messagebox.showerror("无法打开采集实验", str(exc), parent=root)
     app.run()
 
 

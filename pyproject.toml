@@ -16,13 +16,18 @@ dependencies = ["opencv-python>=4.8", "numpy>=1.26", "pandas>=2", "matplotlib>=3
 [project.optional-dependencies]
 test = ["pytest>=8", "build>=1.2", "cffconvert>=2", "PyYAML>=6"]
 origin = ["originpro; sys_platform == 'win32'"]
+capture-pylon = ["pypylon>=4"]
+capture-gentl = ["harvesters>=1.4.3,<2"]
+capture-uvc = ["cv2-enumerate-cameras>=1.3.3,<2"]
 
 [project.scripts]
 straintrace = "ezdic_cli:main"
 ezdic-cli = "ezdic_cli:main"
+straintrace-capture = "straintrace_capture.cli:main"
 
 [project.gui-scripts]
 straintrace-gui = "dic_virtual_extensometer_gui_v7_multi_roi_range:main"
+straintrace-capture-gui = "straintrace_capture.gui:main"
 
 [project.urls]
 Repository = "https://github.com/D-sudoasd/StrainTrace"
@@ -31,12 +36,12 @@ Documentation = "https://github.com/D-sudoasd/StrainTrace#readme"
 
 [tool.setuptools]
 py-modules = ["ezdic_core", "ezdic_cli", "ezdic_benchmark", "ezdic_cli_entrypoint", "ezdic_frozen_entrypoint", "dic_virtual_extensometer_gui_v7_multi_roi_range"]
-packages = ["benchmarks", "ezdic_gui", "straintrace_data", "straintrace_campaign", "straintrace_campaign.adapters", "straintrace_agent"]
+packages = ["benchmarks", "ezdic_gui", "straintrace_data", "straintrace_campaign", "straintrace_campaign.adapters", "straintrace_agent", "straintrace_capture", "straintrace_capture.cameras"]
 package-dir = {straintrace_data = "schemas"}
 
 [tool.setuptools.package-data]
 benchmarks = ["cases_v1.json"]
-straintrace_data = ["run_config_v1.json", "campaign_config_v1.json"]
+straintrace_data = ["run_config_v1.json", "campaign_config_v1.json", "capture_config_v1.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

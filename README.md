@@ -190,7 +190,9 @@ Failed tracking frames stay `NaN`. Poisson uses role-averaged groups; tiny axial
 
 ## Desktop workbench
 
-The desktop uses **two independently resizable windows**. The analysis console
+StrainTrace Capture adds an independent camera workbench with live preview, phased acquisition and lossless experiment storage. Its committed images can open in the existing Analysis desktop or in a separate live DIC follower. [Capture installation, workflows and data contract](docs/CAPTURE.md)
+
+The Analysis desktop uses **two independently resizable windows**. The analysis console
 contains image inputs, parameters, quality checks, logs and progress. The
 image/results window contains ROI drawing, masks, curves and field maps.
 Closing the image window preserves its contents and allows analysis to continue;

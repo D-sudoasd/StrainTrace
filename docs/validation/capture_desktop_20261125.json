@@ -1,0 +1,94 @@
+{
+  "schema": "straintrace.capture-desktop-verification/v1",
+  "device_scope": "two simulated cameras with a synthetic speckle scene",
+  "capture": {
+    "geometry": {
+      "sim:0": [
+        480,
+        640
+      ],
+      "sim:1": [
+        480,
+        640
+      ]
+    },
+    "status": {
+      "state": "stopped",
+      "experiment_id": "64ed9b3a-37ee-472d-8142-aa89e7f9d7c5",
+      "phase": null,
+      "mode": null,
+      "elapsed_s": 6.692108399991412,
+      "queue_size": 0,
+      "queue_capacity": 32,
+      "queue_high_water": 2,
+      "buffered_raw_bytes": 0,
+      "scheduled_misses": 0,
+      "short_pre_windows": 0,
+      "disk_bytes_per_s": 15072120.469556268,
+      "cameras": {
+        "sim:0": {
+          "received": 82,
+          "saved": 82,
+          "saved_bytes": 50432132,
+          "intentionally_skipped": 0,
+          "app_unsaved": 0,
+          "native_counter_gaps": 0,
+          "native_counter_duplicates": 0,
+          "native_counter_resets": 0,
+          "hardware_identity_missing": 0,
+          "reported_driver_skips": 0,
+          "transport_errors": 0,
+          "mean_receive_fps": 12.253238456224832,
+          "mean_save_fps": 12.253238456224832
+        },
+        "sim:1": {
+          "received": 82,
+          "saved": 82,
+          "saved_bytes": 50432132,
+          "intentionally_skipped": 0,
+          "app_unsaved": 0,
+          "native_counter_gaps": 0,
+          "native_counter_duplicates": 0,
+          "native_counter_resets": 0,
+          "hardware_identity_missing": 0,
+          "reported_driver_skips": 0,
+          "transport_errors": 0,
+          "mean_receive_fps": 12.253238456224832,
+          "mean_save_fps": 12.253238456224832
+        }
+      },
+      "error": null,
+      "disk_free_bytes": 230505242624
+    },
+    "live": 0,
+    "verification": {
+      "ok": true,
+      "complete": false,
+      "state": "stopped",
+      "committed_frames": 164,
+      "issues": [],
+      "uncommitted_candidates": [],
+      "file_hashes_checked": true,
+      "reported_camera_losses": {},
+      "scheduled_misses": 0,
+      "short_pre_windows": 0
+    }
+  },
+  "live_analysis": {
+    "receipts_at_pause": 48,
+    "receipts_at_resume": 53,
+    "preview_points": 11
+  },
+  "raw_pixel_probe_checked": true,
+  "compact_preview_metadata_fits": true,
+  "insitulink_timing_import": {
+    "rows": 3,
+    "source_bound": true,
+    "exposure_s": [
+      0.05,
+      0.05,
+      0.05
+    ],
+    "time_basis": "known synthetic fixture"
+  }
+}

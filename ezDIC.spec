@@ -35,6 +35,21 @@ root_datas = [
     (source_file("SUPPORT.md"), "."),
     (source_file("schemas/run_config_v1.json"), "schemas"),
     (source_file("schemas/campaign_config_v1.json"), "schemas"),
+    (source_file("schemas/capture_config_v1.json"), "schemas"),
+    (source_file("docs/CAPTURE.md"), "docs"),
+    (source_file("docs/CAPTURE_RESEARCH.md"), "docs"),
+    (source_file("docs/CAPTURE_VALIDATION.md"), "docs"),
+    (source_file("docs/validation/capture_backends_20261125.json"), "docs/validation"),
+    (source_file("docs/validation/capture_desktop_20261125.json"), "docs/validation"),
+    (source_file("docs/validation/capture_performance_20261125.json"), "docs/validation"),
+    (source_file("assets/ui/capture-preview.png"), "assets/ui"),
+    (source_file("assets/ui/capture-compact.png"), "assets/ui"),
+    (source_file("assets/ui/capture-live-analysis.png"), "assets/ui"),
+    (source_file("assets/ui/capture-review.png"), "assets/ui"),
+    (source_file("examples/capture/install-smoke.json"), "examples/capture"),
+    (source_file("examples/capture/speckle.json"), "examples/capture"),
+    (source_file("examples/capture/live-rois.json"), "examples/capture"),
+    (source_file("examples/capture/daq-event.json"), "examples/capture"),
     (source_file("docs/API.md"), "docs"),
     (source_file("docs/CAMPAIGN_WORKFLOW.md"), "docs"),
     (source_file("docs/CAMPAIGN_AI_README.md"), "docs"),
@@ -86,7 +101,14 @@ benchmark_datas = [
     (source_file("benchmarks/run_benchmark.py"), "sources/benchmarks"),
     (source_file("benchmarks/synthetic_cases.py"), "sources/benchmarks"),
 ]
-common_datas = root_datas + source_datas + benchmark_datas + collect_data_files("matplotlib") + copy_metadata("scipy")
+capture_datas = [
+    (str(path), "sources/" + path.parent.relative_to(PROJECT_ROOT).as_posix())
+    for path in sorted((PROJECT_ROOT / "straintrace_capture").rglob("*.py"))
+]
+common_datas = (
+    root_datas + source_datas + benchmark_datas + capture_datas
+    + collect_data_files("matplotlib") + copy_metadata("scipy") + copy_metadata("cv2-enumerate-cameras")
+)
 common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
@@ -131,6 +153,11 @@ common_hiddenimports = [
     "straintrace_agent.regions",
     "straintrace_agent.reporting",
     "straintrace_agent.gui",
+    "straintrace_capture.cameras.simulated",
+    "straintrace_capture.cameras.uvc",
+    "straintrace_capture.cameras.pylon",
+    "straintrace_capture.cameras.gentl",
+    "cv2_enumerate_cameras",
 ]
 # The source workflow uses Tk and Matplotlib's Agg/Tk backends.  A developer
 # machine may have multiple optional Qt bindings installed; excluding them
@@ -161,6 +188,10 @@ common_excludes = [
     "pytest",
     "yaml",
     "jsonschema",
+    # Industrial SDKs and CTIs are installed separately in the source workflow.
+    "pypylon",
+    "harvesters",
+    "genicam",
 ]
 
 
@@ -195,6 +226,10 @@ gui_exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+capture_gui_exe = EXE(
+    gui_pyz, gui_analysis.scripts, [], exclude_binaries=True,
+    name="StrainTrace-Capture", console=False, upx=True,
+)
 
 
 cli_analysis = Analysis(
@@ -228,11 +263,17 @@ cli_exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+capture_cli_exe = EXE(
+    cli_pyz, cli_analysis.scripts, [], exclude_binaries=True,
+    name="StrainTrace-Capture-cli", console=True, upx=True,
+)
 
 
 coll = COLLECT(
     gui_exe,
     cli_exe,
+    capture_gui_exe,
+    capture_cli_exe,
     gui_analysis.binaries,
     gui_analysis.datas,
     cli_analysis.binaries,

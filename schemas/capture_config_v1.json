@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/D-sudoasd/StrainTrace/schemas/capture_config_v1.json",
+  "title": "StrainTrace Capture configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["config_version", "name", "cameras", "phases"],
+  "properties": {
+    "config_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "cameras": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[^:]+:.+"},
+          "settings": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}
+        }
+      }
+    },
+    "phases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/phase"}},
+    "queue_capacity": {"type": "integer", "minimum": 1, "default": 32},
+    "max_buffer_bytes": {"type": "integer", "minimum": 1, "default": 268435456},
+    "min_free_bytes": {"type": "integer", "minimum": 0, "default": 268435456},
+    "durability": {"enum": ["buffered", "write_through"], "default": "buffered"},
+    "segment_frames": {"type": "integer", "minimum": 0, "default": 0},
+    "cti_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "calibration_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "metadata": {"type": "object"}
+  },
+  "$defs": {
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["single", "timed", "continuous", "manual", "hardware", "event"]},
+        "role": {"enum": ["reference", "test", "calibration"], "default": "test"},
+        "frame_count": {"type": "integer", "minimum": 1},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "frame_timeout_s": {"type": "number", "exclusiveMinimum": 0, "default": 3},
+        "hardware_source": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
+          ]
+        },
+        "hardware_pairing": {"$ref": "#/$defs/hardware_pairing"},
+        "pre_frames": {"type": "integer", "minimum": 0},
+        "post_frames": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "timed"}}},
+          "then": {"required": ["fps"], "anyOf": [{"required": ["frame_count"]}, {"required": ["duration_s"]}]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "event"}}},
+          "then": {"required": ["fps", "post_frames"], "not": {"required": ["frame_count"]}},
+          "else": {"not": {"anyOf": [{"required": ["pre_frames"]}, {"required": ["post_frames"]}]}}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "hardware"}}},
+          "then": {"required": ["hardware_source"]},
+          "else": {"not": {"anyOf": [{"required": ["hardware_source"]}, {"required": ["hardware_pairing"]}]}}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "single"}}},
+          "then": {"properties": {"frame_count": {"const": 1}}, "not": {"required": ["duration_s"]}}
+        },
+        {
+          "if": {"properties": {"mode": {"enum": ["single", "continuous", "manual", "hardware"]}}},
+          "then": {"not": {"required": ["fps"]}}
+        }
+      ]
+    },
+    "hardware_pairing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "counter_feature", "first_counter"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1},
+        "counter_feature": {"enum": ["ChunkCounterValue", "ChunkFramecounter", "ChunkFrameID"]},
+        "first_counter": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "integer", "minimum": 0}},
+        "first_event_number": {"type": "integer", "minimum": 0, "default": 1}
+      }
+    }
+  }
+}

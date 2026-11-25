@@ -6,13 +6,16 @@ headless command contract as ``python ezdic_cli.py`` in source checkouts.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Sequence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    # Import only after the process has selected the console entrypoint.  The
-    # CLI module is GUI-independent and must remain usable without Tk.
-    from ezdic_cli import main as cli_main
+    if getattr(sys, "frozen", False) and Path(sys.executable).stem.casefold() == "straintrace-capture-cli":
+        from straintrace_capture.cli import main as cli_main
+    else:
+        from ezdic_cli import main as cli_main
 
     return int(cli_main(argv))
 

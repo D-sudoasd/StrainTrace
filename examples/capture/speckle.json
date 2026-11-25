@@ -1,0 +1,13 @@
+{
+  "config_version": 1,
+  "name": "Speckle rehearsal",
+  "cameras": [
+    {"id": "sim:0", "settings": {"width": 640, "height": 480, "pixel_format": "Mono12"}}
+  ],
+  "phases": [
+    {"mode": "single", "role": "reference"},
+    {"mode": "timed", "fps": 12, "duration_s": 8},
+    {"mode": "timed", "fps": 4, "frame_count": 8}
+  ],
+  "metadata": {"specimen": "simulated speckle field"}
+}

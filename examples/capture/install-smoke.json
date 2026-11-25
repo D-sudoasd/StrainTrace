@@ -1,0 +1,9 @@
+{
+  "config_version": 1,
+  "name": "Standalone installation smoke",
+  "cameras": [{"id": "sim:0", "settings": {"width": 128, "height": 120, "pixel_format": "Mono12"}}],
+  "phases": [
+    {"mode": "single", "role": "reference"},
+    {"mode": "continuous", "frame_count": 4}
+  ]
+}

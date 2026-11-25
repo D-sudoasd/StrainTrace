@@ -114,6 +114,10 @@ def smoke_test() -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if getattr(sys, "frozen", False) and Path(sys.executable).stem.casefold() == "straintrace-capture":
+        from straintrace_capture.gui import main as capture_main
+
+        return capture_main(arguments)
     if arguments and arguments[0] == "--campaign-io-worker":
         from straintrace_campaign.delivery import worker_main
         return int(worker_main(arguments[1:]))
@@ -124,7 +128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # normal launches.  This import is after the smoke branch by design.
     from dic_virtual_extensometer_gui_v7_multi_roi_range import main as gui_main
 
-    gui_main()
+    gui_main(arguments)
     return 0
 
 

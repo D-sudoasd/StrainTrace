@@ -1,0 +1,135 @@
+{
+  "schema": "straintrace.capture-backend-verification/v1",
+  "sdk_versions": {
+    "pypylon": "26.10",
+    "harvesters": "1.4.3",
+    "genicam": "1.6.0",
+    "cv2-enumerate-cameras": "1.4.0"
+  },
+  "cases": {
+    "pylon": {
+      "scope": "vendor_emulator",
+      "integrity": {
+        "ok": true,
+        "complete": true,
+        "state": "completed",
+        "committed_frames": 8,
+        "issues": [],
+        "uncommitted_candidates": [],
+        "file_hashes_checked": true,
+        "reported_camera_losses": {},
+        "scheduled_misses": 0,
+        "short_pre_windows": 0
+      },
+      "camera_results": [
+        {
+          "model": "Emulation",
+          "scope": "serial_number",
+          "format": "Mono12",
+          "shape": [
+            80,
+            96
+          ],
+          "dtype": "uint16",
+          "frames": 4,
+          "bit_depth": 12,
+          "exact_final_frame": true,
+          "observed_device_time": false
+        },
+        {
+          "model": "Emulation",
+          "scope": "serial_number",
+          "format": "Mono12",
+          "shape": [
+            80,
+            96
+          ],
+          "dtype": "uint16",
+          "frames": 4,
+          "bit_depth": 12,
+          "exact_final_frame": true,
+          "observed_device_time": false
+        }
+      ]
+    },
+    "gentl": {
+      "scope": "vendor_emulator",
+      "integrity": {
+        "ok": true,
+        "complete": true,
+        "state": "completed",
+        "committed_frames": 8,
+        "issues": [],
+        "uncommitted_candidates": [],
+        "file_hashes_checked": true,
+        "reported_camera_losses": {},
+        "scheduled_misses": 0,
+        "short_pre_windows": 0
+      },
+      "camera_results": [
+        {
+          "model": "Viky",
+          "scope": "serial_number",
+          "format": "RGBa8",
+          "shape": [
+            240,
+            320,
+            4
+          ],
+          "dtype": "uint8",
+          "frames": 4,
+          "bit_depth": 8,
+          "exact_final_frame": true,
+          "observed_device_time": false
+        },
+        {
+          "model": "Viky",
+          "scope": "serial_number",
+          "format": "RGBa8",
+          "shape": [
+            240,
+            320,
+            4
+          ],
+          "dtype": "uint8",
+          "frames": 4,
+          "bit_depth": 8,
+          "exact_final_frame": true,
+          "observed_device_time": false
+        }
+      ]
+    },
+    "uvc": {
+      "scope": "physical_camera",
+      "integrity": {
+        "ok": true,
+        "complete": true,
+        "state": "completed",
+        "committed_frames": 9,
+        "issues": [],
+        "uncommitted_candidates": [],
+        "file_hashes_checked": true,
+        "reported_camera_losses": {},
+        "scheduled_misses": 0,
+        "short_pre_windows": 0
+      },
+      "camera_results": [
+        {
+          "model": "Logitech BRIO",
+          "scope": "host_device_path",
+          "format": "BGR8",
+          "shape": [
+            480,
+            640,
+            3
+          ],
+          "dtype": "uint8",
+          "frames": 9,
+          "bit_depth": 8,
+          "exact_final_frame": true,
+          "observed_device_time": false
+        }
+      ]
+    }
+  }
+}

@@ -86,6 +86,13 @@ if (Test-Path -LiteralPath $AgentSourceRoot -PathType Container) {
     })
     $ModernSourceFiles += $AgentSourceFiles
 }
+$CaptureSourceRoot = Join-Path $Root "straintrace_capture"
+if (Test-Path -LiteralPath $CaptureSourceRoot -PathType Container) {
+    $ModernSourceFiles += @(Get-ChildItem -LiteralPath $CaptureSourceRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
+        $_.FullName.Substring($Root.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1)
+    })
+    $ModernSourceFiles += @("schemas\capture_config_v1.json", "docs\CAPTURE.md", "docs\CAPTURE_RESEARCH.md", "start_Capture.bat")
+}
 # A copied legacy fixture used by the historical launcher tests does not carry
 # the new core/schema files.  Only an actual modern source root enters the
 # strict branch; a partial modern root fails closed.
@@ -602,7 +609,14 @@ function Test-BundleInventory {
         "_internal\sources\benchmarks\run_benchmark.py",
         "_internal\sources\benchmarks\synthetic_cases.py"
     ) + $BundleFiles
-    foreach ($pkgDir in @("ezdic_gui", "straintrace_campaign", "straintrace_agent")) {
+    if (Test-Path -LiteralPath $CaptureSourceRoot -PathType Container) {
+        $required += @(
+            "StrainTrace-Capture.exe", "StrainTrace-Capture-cli.exe",
+            "_internal\schemas\capture_config_v1.json", "_internal\docs\CAPTURE.md", "_internal\docs\CAPTURE_RESEARCH.md",
+            "_internal\examples\capture\speckle.json"
+        )
+    }
+    foreach ($pkgDir in @("ezdic_gui", "straintrace_campaign", "straintrace_agent", "straintrace_capture")) {
         $pkgRoot = Join-Path $Root $pkgDir
         if (Test-Path -LiteralPath $pkgRoot -PathType Container) {
             $pkgFiles = @(Get-ChildItem -LiteralPath $pkgRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {

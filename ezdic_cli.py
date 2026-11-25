@@ -1181,6 +1181,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--cases", type=Path, help="exact locked benchmark document")
     benchmark.add_argument("--output", type=Path, help="benchmark output directory")
     subparsers.add_parser("agent", help="headless Agent-driven sample DIC workflow")
+    subparsers.add_parser("capture", help="discover, acquire and verify a Capture experiment")
     from straintrace_campaign.cli import add_campaign_parser
     add_campaign_parser(subparsers)
     return parser
@@ -1213,6 +1214,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments and arguments[0] == "campaign":
         from straintrace_campaign.cli import main as campaign_main
         return campaign_main(arguments[1:])
+    if arguments and arguments[0] == "capture":
+        from straintrace_capture.cli import main as capture_main
+
+        return capture_main(arguments[1:])
     if arguments and arguments[0] == "agent":
         from straintrace_agent.cli import main as agent_main
         import multiprocessing
