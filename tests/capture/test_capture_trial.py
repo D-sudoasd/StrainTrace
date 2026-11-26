@@ -209,7 +209,9 @@ def test_trial_reports_measured_rate_and_buffer_pressure_without_claiming_a_came
     registry = CameraRegistry(custom={"fixture": (lambda: [], SlowerCamera)})
     capture = CaptureSession(trial, output, registry=registry)
     capture.start()
-    assert capture.wait(10)["state"] == "completed"
+    outcome = capture.wait(30)
+    # Include the recorded failure so a slow shared runner is distinguishable from a real fault.
+    assert outcome["state"] == "completed", outcome
     report = trial_report(output)
     assert report["observed"] and not report["verification"]["reported_camera_losses"]
     assert [item["code"] for item in report["findings"]] == ["TRIAL_HIGH_BUFFER", "TRIAL_LOW_RECEIPT_RATE"]
