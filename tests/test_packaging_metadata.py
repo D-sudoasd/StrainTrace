@@ -435,6 +435,8 @@ def test_export_preset_buttons_fit_research_laptop_viewport(gui_app):
 
 def test_measurement_settings_are_primary_and_visible_on_laptop_viewport(gui_app):
     root, app = gui_app
+    # A native menu bar takes ~20 px from the measurement controls on a laptop screen.
+    assert not root.cget("menu")
     app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
@@ -496,6 +498,8 @@ def test_minimum_view_keeps_measurement_panel_and_image_canvas_useful(gui_app):
 
 def test_expanded_advanced_settings_scroll_without_hiding_base_measurement_controls(gui_app):
     root, app = gui_app
+    # A native menu bar takes ~20 px from the measurement controls on a laptop screen.
+    assert not root.cget("menu")
     app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")

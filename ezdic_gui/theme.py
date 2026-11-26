@@ -209,6 +209,8 @@ class ThemeMixin:
         self.style.configure("Compact.TButton", font=base_font, padding=(8, 4))
         self.style.configure("Primary.TButton", font=primary_font, padding=(14, 8), foreground="#ffffff", background=self.primary_color)
         self.style.configure("Secondary.TButton", font=base_font, padding=(9, 5), foreground=self.primary_text, background=self.card_bg)
+        self.style.configure("Secondary.TMenubutton", font=base_font, padding=(9, 4), foreground=self.primary_text, background=self.card_bg)
+        self.style.map("Secondary.TMenubutton", background=[("active", self.hover_bg)])
         self.style.configure("Danger.TButton", font=base_font, padding=(8, 5), foreground=self.warning_color, background=self.card_bg)
         self.style.map(
             "Primary.TButton",

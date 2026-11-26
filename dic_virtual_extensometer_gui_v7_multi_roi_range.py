@@ -1831,21 +1831,24 @@ class MultiROIGUI(ThemeMixin, CanvasMixin, ViewersMixin):
         self.update_workflow_action_states()
 
     def _build_app_header(self, parent):
-        workbench_menu = tk.Menu(self.root, tearoff=0)
-        capture_menu = tk.Menu(workbench_menu, tearoff=0)
-        capture_menu.add_command(label="打开采集实验…", command=self._choose_capture_experiment)
-        capture_menu.add_command(label="打开采集绑定…", command=self._choose_corrected_capture)
-        capture_menu.add_command(label="跟随采集与在线分析…", command=lambda: self._choose_capture_experiment(live=True))
-        capture_menu.add_command(label="打开 Capture 工作台", command=self._open_capture_workbench)
-        workbench_menu.add_cascade(label="采集联动", menu=capture_menu)
-        self.root.configure(menu=workbench_menu)
         header = ttk.Frame(parent, style="App.TFrame")
         self.app_header = header
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="StrainTrace", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="悬停或按 F1 查看当前控件说明", style="AppHint.TLabel").grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # A native window menu bar would take vertical space from the measurement
+        # controls on laptop screens, so the Capture links live in the header row.
+        self.capture_link_button = ttk.Menubutton(header, text="采集联动", style="Secondary.TMenubutton")
+        capture_menu = tk.Menu(self.capture_link_button, tearoff=0)
+        capture_menu.add_command(label="打开采集实验…", command=self._choose_capture_experiment)
+        capture_menu.add_command(label="打开采集绑定…", command=self._choose_corrected_capture)
+        capture_menu.add_command(label="跟随采集与在线分析…", command=lambda: self._choose_capture_experiment(live=True))
+        capture_menu.add_command(label="打开 Capture 工作台", command=self._open_capture_workbench)
+        self.capture_link_button.configure(menu=capture_menu)
+        self.capture_link_button.grid(row=1, column=2, sticky="e", padx=(8, 6), pady=(4, 0))
+        self.add_tooltip(self.capture_link_button, "打开 Capture 采集实验或绑定、跟随采集做在线分析，或启动 Capture 工作台。")
         self.beginner_guide_button = ttk.Button(header, text="新手指南", command=self.show_beginner_guide,
                                                 style="Secondary.TButton")
         self.beginner_guide_button.grid(row=1, column=3, columnspan=2, sticky="e", pady=(4, 0))
