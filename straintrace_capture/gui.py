@@ -38,7 +38,7 @@ from .calibration import (
 from .capture_review import check_review_identity, inspect_capture_review
 from .cameras._gentl_multipart import IMAGE_PART, SAVE_ALL_2D
 from .cameras.base import HOST_NEXT_RECEIPT
-from .config import CameraConfig, Phase, QualityRegion, hardware_mapping_error, repeat_source_directory
+from .config import CameraConfig, QualityRegion, hardware_mapping_error, repeat_source_directory
 from .continuation import CONTINUATION_REFERENCE, continuation_plan, continuation_reference, inspect_continuation
 from .continuation_analysis_gui import ContinuationReferenceWindow
 from .continuation_gui import ContinuationWindow
