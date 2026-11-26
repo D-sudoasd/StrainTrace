@@ -8,6 +8,15 @@ or publication claim is made by this note.
 
 ## Scope of this iteration
 
+### 26 November 2026 reliability fixes
+
+- Fractional extensometer origins use the same coordinates for reference sampling and initial gauge length. The field quality gate requires eligible, finite measurements. Runs retain weak-texture warnings in their manifests.
+- Campaign time alignment chooses the closest exact sample on dense axes and requires load support throughout an exposure window. A changed mask or tracking artifact invalidates dependent stages. Rescanning an imported acquisition under a second root preserves the first binding and records the other source as a candidate.
+- Capture preserves received frames when diagnostic logging fails and records unexpected writer termination as a failed acquisition. Live DIC checks recorded sensor geometry, continued runs retain their event selection, and completed JSON and timing/pulse CSV reports are published under their requested names.
+- Agent resume and verification check recorded checkpoint receipts and registered products. A changed field invalidates dependent extractions. Benchmark coverage counts finite measurements and reports finite-error misclassification separately from the locked ranking labels.
+- Installed-wheel analyses record the packaged schema and all required source files. The CLI reports invalid UTF-8 and invalid pyramid scales as configuration errors.
+- Windows portable builds preserve each numerical and camera wheel's private DLL directory, including when multiple wheels ship a DLL with the same name.
+
 ### 26 November 2026: Capture workbench and merge-review fixes
 
 StrainTrace Capture is added as a separate acquisition workbench
