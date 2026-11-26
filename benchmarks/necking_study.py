@@ -101,12 +101,15 @@ def _peak(X, Y, values, mask):
 def summarize_field(field, params, settings, solver_core):
     X, Y = field["X"], field["Y"]
     shape = X.shape
-    eligible = _array(field, "eligible", shape, True).astype(bool)
-    valid = _array(field, "valid", shape, False).astype(bool) & eligible
-    sv = _array(field, "strain_valid", shape, False).astype(bool) & valid
+    eligible = bench._boolean_mask(field.get("eligible", np.ones(shape, dtype=bool)), shape, "eligible")
+    valid = bench._boolean_mask(field["valid"], shape, "valid")
+    sv = bench._boolean_mask(field["strain_valid"], shape, "strain_valid")
     true_u, true_v, true_Eyy = bench.truth(X, Y, params)
     U, V = _array(field, "U", shape), _array(field, "V", shape)
     Eyy = _array(field, "Eyy_grid", shape)
+    if np.any(valid & ~eligible):
+        raise ValueError("correlation-valid point is ineligible")
+    bench._validate_strain_support(valid, sv, U, V, Eyy)
     subset_F = np.asarray(field["P"]) if "P" in field else None
     pos_jac = getattr(solver_core, "_positive_deformation_jacobian", None)
     if callable(pos_jac) and subset_F is not None and subset_F.shape == (*shape, 6):

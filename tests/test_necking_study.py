@@ -1,5 +1,6 @@
 """Check known-truth comparisons retain their spatial and validity meaning."""
 import copy
+import csv
 import json
 import numpy as np
 import pytest
@@ -53,6 +54,24 @@ def test_rejected_peak_is_reported_against_the_full_domain():
     # Full-grid oracle remains independently available across rejected peaks.
     assert all(np.isfinite(p["exact_displacement_full_Eyy"]) for p in points)
     assert all(np.isnan(p["exact_displacement_masked_Eyy"]) for p in points if p["y_px"] == 80)
+
+
+@pytest.mark.parametrize("mutation", ["strain_missing", "displacement_missing", "invalid_correlation", "ineligible", "non_boolean"])
+def test_summary_rejects_inconsistent_validity_before_reporting_coverage(mutation):
+    params, field = _truth_field_with_missing_peak()
+    if mutation == "strain_missing":
+        field["Eyy_grid"][0, 0] = np.nan
+    elif mutation == "displacement_missing":
+        field["U"][0, 0] = np.nan
+    elif mutation == "invalid_correlation":
+        field["valid"] = field["valid"].copy()
+        field["valid"][0] = False
+    elif mutation == "ineligible":
+        field["eligible"][0] = False
+    else:
+        field["valid"] = field["valid"].astype(str)
+    with pytest.raises(ValueError):
+        study.summarize_field(field, params, generator.PARAMETERS, core)
 
 
 def test_unknown_rejected_candidates_are_not_labelled_bad_displacements():
@@ -122,6 +141,53 @@ def test_pointwise_comparison_rejects_changed_numeric_evidence(tmp_path):
     points.write_text("case,x_px,y_px\nnarrow,32,40\n", encoding="utf-8")
     with pytest.raises(ValueError, match="content differs"):
         comparison.load_points(tmp_path/"report.json", report)
+
+
+def _comparison_points(tmp_path, updates=None):
+    row = {"case": "uniform", "x_px": "32", "y_px": "32", "eligible": "1",
+           "correlation_valid": "1", "strain_valid": "1", "u_px": "0.1", "v_px": "0",
+           "true_u_px": "0.1", "true_v_px": "0", "Eyy": "0.02", "true_Eyy": "0.02"}
+    row.update(updates or {})
+    path = tmp_path / "points.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerow(row)
+    return {"filename": path.name, "sha256": comparison.digest(path), "row_count": 1}
+
+
+@pytest.mark.parametrize("updates", [
+    {"correlation_valid": "unknown"},
+    {"eligible": "0"},
+    {"correlation_valid": "0", "strain_valid": "1"},
+    {"true_Eyy": "nan"},
+    {"Eyy": ""},
+    {"u_px": ""},
+    {"x_px": "inf"},
+])
+def test_pointwise_comparison_rejects_invalid_semantics_even_with_matching_hash(tmp_path, updates):
+    artifact = _comparison_points(tmp_path, updates)
+    with pytest.raises(ValueError, match="pointwise CSV"):
+        comparison.load_points(tmp_path / "report.json", {"pointwise_csv": artifact})
+
+
+def test_study_comparison_checks_summary_counts_against_point_evidence(tmp_path):
+    artifact = _comparison_points(tmp_path)
+    case = {"input_sha256": "images", "deformation": {}, "roi_xywh_px": [], "grid_sha256": "grid",
+            "local_unrelated_texture_mix": 0, "target_blur_sigma_px": 0,
+            "independent_gaussian_image_noise_sigma_gray": 0, "solver_parameters": {},
+            "point_count": 1, "correlation_valid_count": 0, "strain_valid_count": 1}
+    report = {"schema": study.SCHEMA, "benchmark_sha256": "script", "generator_sha256": "generator",
+              "texture_source_sha256": "texture", "environment": {}, "deformation_reference": "fixed",
+              "strain_definition": "Green-Lagrange Eyy", "diagnostic_error_cutoff_px": 0.5,
+              "cases": {"uniform": case}, "pointwise_csv": artifact}
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    before.write_text(json.dumps(report), encoding="utf-8")
+    after.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ValueError, match="counts differ"):
+        comparison.compare(before, after, tmp_path / "comparison.json")
+    assert not (tmp_path / "comparison.json").exists()
 
 
 def test_experimental_policy_difference_requires_explicit_permission():
