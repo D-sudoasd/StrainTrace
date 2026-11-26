@@ -489,6 +489,18 @@ class ExperimentWriter:
                 self._record["ended_utc_ns"] = time.time_ns()
             self._db.execute("UPDATE experiment SET record=? WHERE singleton=1", (json_text(self._record),))
 
+    def committed_frame_totals(self) -> dict[str, tuple[int, int]]:
+        """Read authoritative counts and TIFF bytes when a writer thread fails."""
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT camera_id, COUNT(*), SUM(
+                    json_extract(record, '$.file_bytes') + COALESCE(
+                        (SELECT SUM(json_extract(value, '$.file_bytes'))
+                         FROM json_each(record, '$.auxiliary_images')), 0))
+                FROM frames GROUP BY camera_id
+            """).fetchall()
+        return {camera: (count, size) for camera, count, size in rows}
+
     def event(self, kind: str, details: dict, *, event_id: str | None = None, once: bool = False) -> None:
         with self._lock, self._db:
             _insert_event(self._db, kind, details, event_id=event_id, once=once)
