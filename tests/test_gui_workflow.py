@@ -561,6 +561,26 @@ def test_disabled_button_hover_and_keyboard_help_close_without_action(workbench,
     assert escaped == [True]
 
 
+def test_open_context_help_updates_and_keyboard_help_survives_pointer_leave(workbench):
+    app = workbench
+    tip = app.start_button._tooltip
+    label = "请先检查设置"
+    tip.text = lambda _event: label
+    app.start_button.focus_force()
+    app.start_button.event_generate("<F1>")
+    wait_for(app, lambda: tip.shown_text == label)
+    window = tip.tip_window
+
+    label = "现在可以开始"
+    app.start_button.event_generate("<Leave>")
+    wait_for(app, lambda: tip.shown_text == label)
+    assert tip.tip_window is window
+    assert window.winfo_viewable()
+    app.start_button.event_generate("<Escape>")
+    app.root.update()
+    assert tip.tip_window is None and tip.refresh_id is None
+
+
 def test_beginner_guide_opens_the_selected_workflow_and_esc_closes_hover_help(workbench, monkeypatch):
     app = workbench
     app.beginner_guide_button.invoke()
@@ -784,6 +804,27 @@ def test_dropdown_keyboard_navigation_explains_option_before_confirmation(workbe
     assert box.get() == "低质量图像" and app.hard_corr.get() == gui.TRACKING_PRESETS["低质量图像"]["hard_corr"]
     assert tip.tip_window is None
 
+
+
+def test_dropdown_escape_closes_help_before_closing_the_options(workbench):
+    app = workbench
+    box = app.tracking_preset_box
+    tip = box._tooltip
+    original = box.get()
+    app.root.tk.call("ttk::combobox::Post", str(box))
+    app.root.update()
+    popup = app.root.tk.call("winfo", "toplevel", tip.listbox)
+    app.root.tk.call("event", "generate", tip.listbox, "<KeyPress-F1>")
+    wait_for(app, lambda: tip.tip_window is not None)
+    app.root.tk.call("event", "generate", tip.listbox, "<KeyPress-Escape>")
+    app.root.tk.call("event", "generate", tip.listbox, "<KeyRelease-Escape>")
+    app.root.update()
+    assert tip.tip_window is None and tip.after_id is None
+    assert int(app.root.tk.call("winfo", "ismapped", popup))
+    app.root.tk.call("event", "generate", tip.listbox, "<KeyPress-Escape>")
+    app.root.update()
+    assert not int(app.root.tk.call("winfo", "ismapped", popup))
+    assert box.get() == original
 
 
 def test_destroyed_or_hidden_widgets_cancel_pending_and_visible_help(workbench):
@@ -1209,6 +1250,28 @@ def test_extensometer_viewer_ordering_and_aliases_and_tooltip_cleanup(workbench,
     box.destroy()
     app.root.update()
     assert tip.motion_command is None and tip.selection_command is None and tip.hide_command is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows interpreter Tcl/Tk layout")
+def test_windows_virtual_environment_resolves_tk_scripts_from_base_installation(tmp_path, monkeypatch):
+    from ezdic_gui import theme
+
+    base = tmp_path / "base"
+    tcl = base / "tcl" / f"tcl{tk.TclVersion}"
+    tcl.mkdir(parents=True)
+    (tcl / "init.tcl").touch()
+    tk_scripts = base / "tcl" / f"tk{tk.TkVersion}"
+    tk_scripts.mkdir()
+    (tk_scripts / "tk.tcl").touch()
+    monkeypatch.setattr(theme.sys, "base_prefix", str(base))
+    monkeypatch.setattr(theme.sys, "prefix", str(tmp_path / ".venv"))
+    # Track the absent key through monkeypatch even though the implementation fills it in.
+    monkeypatch.setenv("TCL_LIBRARY", "")
+    monkeypatch.delenv("TCL_LIBRARY")
+    monkeypatch.setenv("TK_LIBRARY", r"C:\configured-tk")
+    monkeypatch.setattr(theme, "enable_windows_dpi_awareness", lambda: None)
+    monkeypatch.setattr(theme.tk, "Tk", lambda: (os.environ["TCL_LIBRARY"], os.environ["TK_LIBRARY"]))
+    assert theme.create_tk_root() == (str(tcl), r"C:\configured-tk")
 
 
 def test_modular_ezdic_gui_package_and_core_reexport_identities():

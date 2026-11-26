@@ -302,6 +302,18 @@ def assert_in_view(widget, canvas):
     assert top + widget.winfo_height() <= canvas.winfo_height()
 
 
+def _ensure_focus_procs(widget):
+    for _ in range(5):
+        if widget.tk.call("info", "commands", "tk_focusNext"):
+            return
+        widget.tk.call("auto_load", "tk_focusNext")
+        if not widget.tk.call("info", "commands", "tk_focusNext"):
+            try:
+                widget.tk.eval("source [file join $tk_library focus.tcl]")
+            except tk.TclError:
+                time.sleep(.2)
+
+
 def test_keyboard_traversal_reveals_controls_in_short_page(page):
     canvas = page.input_page._canvas
     assert canvas.winfo_height() > 20
@@ -314,6 +326,9 @@ def test_keyboard_traversal_reveals_controls_in_short_page(page):
     for widget in targets:
         widget.configure(takefocus=lambda *_args: True)
     page.update()
+    # Hosted Windows runners can transiently fail Tcl's auto-load of focus.tcl; load the
+    # procedures explicitly so this test checks the page's traversal order, not file access.
+    _ensure_focus_procs(page)
     assert page.auto_button.tk_focusNext() == page.preview_button
     page.tk.call("tk::TabToWindow", str(page.auto_button.tk_focusNext()))
     page.update()

@@ -1,7 +1,9 @@
 """UI typography, DPI scaling, light/dark color palettes, and ttk styling."""
 
 import os
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import font as tkfont, ttk
 
 UI_FONT_FAMILY = "Microsoft YaHei UI"
@@ -54,6 +56,19 @@ def enable_windows_dpi_awareness():
             pass
     except Exception:
         pass
+
+
+def create_tk_root():
+    """Initialize Tk from the installed interpreter when a Windows venv needs its scripts."""
+    enable_windows_dpi_awareness()
+    if os.name == "nt" and sys.prefix != sys.base_prefix and not getattr(sys, "frozen", False):
+        tcl_root = Path(sys.base_prefix) / "tcl"
+        for key, directory, script in (("TCL_LIBRARY", f"tcl{tk.TclVersion}", "init.tcl"),
+                                       ("TK_LIBRARY", f"tk{tk.TkVersion}", "tk.tcl")):
+            path = tcl_root / directory
+            if key not in os.environ and (path / script).is_file():
+                os.environ[key] = str(path)
+    return tk.Tk()
 
 
 class ThemeMixin:
@@ -194,6 +209,8 @@ class ThemeMixin:
         self.style.configure("Compact.TButton", font=base_font, padding=(8, 4))
         self.style.configure("Primary.TButton", font=primary_font, padding=(14, 8), foreground="#ffffff", background=self.primary_color)
         self.style.configure("Secondary.TButton", font=base_font, padding=(9, 5), foreground=self.primary_text, background=self.card_bg)
+        self.style.configure("Secondary.TMenubutton", font=base_font, padding=(9, 4), foreground=self.primary_text, background=self.card_bg)
+        self.style.map("Secondary.TMenubutton", background=[("active", self.hover_bg)])
         self.style.configure("Danger.TButton", font=base_font, padding=(8, 5), foreground=self.warning_color, background=self.card_bg)
         self.style.map(
             "Primary.TButton",

@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           $sdist = (Get-ChildItem dist/*.tar.gz | Select-Object -First 1).FullName
-          python -c "import sys, tarfile; names = [m.name.split('/', 1)[1] for m in tarfile.open(sys.argv[1], 'r:gz').getmembers() if '/' in m.name]; required = ['.zenodo.json', '.github/workflows/ci.yml', 'CONTRIBUTING.md', 'SUPPORT.md', 'examples/paired_dic_comparison.json', 'docs/validation/main_study_20261103.points.csv']; missing = [p for p in required if p not in names]; leaked = [n for n in names if 'test_desy_' in n or '/desy_' in n or '/audit_desy_' in n]; assert not missing, f'missing from sdist: {missing}'; assert not leaked, f'leaked private files in sdist: {leaked}'" $sdist
+          python -c "import sys, tarfile; names = [m.name.split('/', 1)[1] for m in tarfile.open(sys.argv[1], 'r:gz').getmembers() if '/' in m.name]; required = ['.zenodo.json', '.github/workflows/ci.yml', 'CONTRIBUTING.md', 'SUPPORT.md', 'examples/paired_dic_comparison.json', 'docs/validation/main_study_20261103.points.csv', 'scripts/validate_capture_industrial.py', 'scripts/pyinstaller/hook-pypylon.py']; missing = [p for p in required if p not in names]; leaked = [n for n in names if 'test_desy_' in n or '/desy_' in n or '/audit_desy_' in n]; assert not missing, f'missing from sdist: {missing}'; assert not leaked, f'leaked private files in sdist: {leaked}'" $sdist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install and run outside source
         shell: pwsh

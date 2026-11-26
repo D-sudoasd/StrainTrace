@@ -7,9 +7,12 @@ windowed executable; ``ezDIC-cli.exe`` is a console executable that exposes the
 same headless CLI contract as ``python ezdic_cli.py`` in a source checkout.
 """
 
+import argparse
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+import sys
 
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 
 # PyInstaller executes a spec in a generated namespace without ``__file__``;
@@ -19,6 +22,25 @@ PROJECT_ROOT = Path(SPECPATH).resolve()
 
 def source_file(relative_path: str) -> str:
     return str(PROJECT_ROOT / relative_path)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--industrial", action="store_true", help="bundle the Basler and GenTL user-space SDKs on Windows")
+industrial = parser.parse_args().industrial
+industrial_datas = []
+industrial_binaries = []
+industrial_hooks = []
+if industrial:
+    if sys.platform != "win32":
+        parser.error("The industrial portable build targets Windows.")
+    try:
+        for package in ("pypylon", "genicam", "harvesters"):
+            industrial_datas.extend(copy_metadata(package))
+    except PackageNotFoundError as exc:
+        parser.error(f"{exc.name} is missing. Install requirements-build-industrial.txt before building.")
+    industrial_datas.extend(collect_data_files("genicam", includes=["licenses/*"]))
+    industrial_binaries = collect_dynamic_libs("genicam")
+    industrial_hooks = [source_file("scripts/pyinstaller")]
 
 
 # Root-level documents are copied again by build_release.ps1 so the portable
@@ -35,6 +57,21 @@ root_datas = [
     (source_file("SUPPORT.md"), "."),
     (source_file("schemas/run_config_v1.json"), "schemas"),
     (source_file("schemas/campaign_config_v1.json"), "schemas"),
+    (source_file("schemas/capture_config_v1.json"), "schemas"),
+    (source_file("docs/CAPTURE.md"), "docs"),
+    (source_file("docs/CAPTURE_RESEARCH.md"), "docs"),
+    (source_file("docs/CAPTURE_VALIDATION.md"), "docs"),
+    (source_file("docs/validation/capture_backends_20261125.json"), "docs/validation"),
+    (source_file("docs/validation/capture_desktop_20261125.json"), "docs/validation"),
+    (source_file("docs/validation/capture_performance_20261125.json"), "docs/validation"),
+    (source_file("assets/ui/capture-preview.png"), "assets/ui"),
+    (source_file("assets/ui/capture-compact.png"), "assets/ui"),
+    (source_file("assets/ui/capture-live-analysis.png"), "assets/ui"),
+    (source_file("assets/ui/capture-review.png"), "assets/ui"),
+    (source_file("examples/capture/install-smoke.json"), "examples/capture"),
+    (source_file("examples/capture/speckle.json"), "examples/capture"),
+    (source_file("examples/capture/live-rois.json"), "examples/capture"),
+    (source_file("examples/capture/daq-event.json"), "examples/capture"),
     (source_file("docs/API.md"), "docs"),
     (source_file("docs/CAMPAIGN_WORKFLOW.md"), "docs"),
     (source_file("docs/CAMPAIGN_AI_README.md"), "docs"),
@@ -86,7 +123,15 @@ benchmark_datas = [
     (source_file("benchmarks/run_benchmark.py"), "sources/benchmarks"),
     (source_file("benchmarks/synthetic_cases.py"), "sources/benchmarks"),
 ]
-common_datas = root_datas + source_datas + benchmark_datas + collect_data_files("matplotlib") + copy_metadata("scipy")
+capture_datas = [
+    (str(path), "sources/" + path.parent.relative_to(PROJECT_ROOT).as_posix())
+    for path in sorted((PROJECT_ROOT / "straintrace_capture").rglob("*.py"))
+]
+common_datas = (
+    root_datas + source_datas + benchmark_datas + capture_datas
+    + collect_data_files("matplotlib") + copy_metadata("scipy") + copy_metadata("cv2-enumerate-cameras")
+    + industrial_datas
+)
 common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
@@ -131,6 +176,11 @@ common_hiddenimports = [
     "straintrace_agent.regions",
     "straintrace_agent.reporting",
     "straintrace_agent.gui",
+    "straintrace_capture.cameras.simulated",
+    "straintrace_capture.cameras.uvc",
+    "straintrace_capture.cameras.pylon",
+    "straintrace_capture.cameras.gentl",
+    "cv2_enumerate_cameras",
 ]
 # The source workflow uses Tk and Matplotlib's Agg/Tk backends.  A developer
 # machine may have multiple optional Qt bindings installed; excluding them
@@ -162,15 +212,16 @@ common_excludes = [
     "yaml",
     "jsonschema",
 ]
+common_excludes += (["pypylon.pylondataprocessing"] if industrial else ["pypylon", "harvesters", "genicam"])
 
 
 gui_analysis = Analysis(
     [source_file("ezdic_frozen_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=industrial_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
-    hookspath=[],
+    hookspath=industrial_hooks,
     hooksconfig={},
     runtime_hooks=[],
     excludes=common_excludes,
@@ -195,15 +246,19 @@ gui_exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+capture_gui_exe = EXE(
+    gui_pyz, gui_analysis.scripts, [], exclude_binaries=True,
+    name="StrainTrace-Capture", console=False, upx=True,
+)
 
 
 cli_analysis = Analysis(
     [source_file("ezdic_cli_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=industrial_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
-    hookspath=[],
+    hookspath=industrial_hooks,
     hooksconfig={},
     runtime_hooks=[],
     excludes=common_excludes,
@@ -228,17 +283,23 @@ cli_exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+capture_cli_exe = EXE(
+    cli_pyz, cli_analysis.scripts, [], exclude_binaries=True,
+    name="StrainTrace-Capture-cli", console=True, upx=True,
+)
 
 
 coll = COLLECT(
     gui_exe,
     cli_exe,
+    capture_gui_exe,
+    capture_cli_exe,
     gui_analysis.binaries,
     gui_analysis.datas,
     cli_analysis.binaries,
     cli_analysis.datas,
     strip=False,
-    upx=True,
+    upx=not industrial,
     upx_exclude=[],
-    name="ezDIC_Windows_x64",
+    name="ezDIC_Windows_x64_Industrial" if industrial else "ezDIC_Windows_x64",
 )

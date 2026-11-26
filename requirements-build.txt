@@ -4,3 +4,5 @@ pytest==9.0.2
 build==1.5.0
 PyYAML==6.0.3
 jsonschema==4.26.0
+cv2-enumerate-cameras==1.4.0
+tifffile==2025.6.11

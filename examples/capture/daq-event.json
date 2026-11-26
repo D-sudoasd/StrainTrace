@@ -1,0 +1,9 @@
+{
+  "config_version": 1,
+  "name": "DAQ window rehearsal",
+  "cameras": [{"id": "sim:0"}],
+  "phases": [
+    {"mode": "single", "role": "reference"},
+    {"mode": "event", "fps": 10, "duration_s": 60, "pre_frames": 15, "post_frames": 10}
+  ]
+}

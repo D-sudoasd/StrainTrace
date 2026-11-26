@@ -1,5 +1,6 @@
 from pathlib import Path
 import gc
+import json
 import os
 import shutil
 import subprocess
@@ -434,6 +435,8 @@ def test_export_preset_buttons_fit_research_laptop_viewport(gui_app):
 
 def test_measurement_settings_are_primary_and_visible_on_laptop_viewport(gui_app):
     root, app = gui_app
+    # A native menu bar takes ~20 px from the measurement controls on a laptop screen.
+    assert not root.cget("menu")
     app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
@@ -495,6 +498,8 @@ def test_minimum_view_keeps_measurement_panel_and_image_canvas_useful(gui_app):
 
 def test_expanded_advanced_settings_scroll_without_hiding_base_measurement_controls(gui_app):
     root, app = gui_app
+    # A native menu bar takes ~20 px from the measurement controls on a laptop screen.
+    assert not root.cget("menu")
     app.control_notebook.select(app.settings_page)
     root.deiconify()
     root.geometry("1366x768+0+0")
@@ -952,62 +957,94 @@ def test_recent_output_button_and_shortcuts_are_available(gui_app, tmp_path, mon
         assert root.bind(sequence), f"{sequence} should be bound for common GUI actions"
 
 
-def test_windows_launcher_bat_invokes_source_entry_in_smoke_mode():
-    launcher = ROOT / "start_ezDIC.bat"
-
-    assert launcher.exists()
-    text = launcher.read_text(encoding="utf-8")
-    assert 'pushd "%~dp0"' in text
-    assert "dic_virtual_extensometer_gui_v7_multi_roi_range.py" in text
-    assert "pause" in text.lower()
-
+@pytest.mark.parametrize(("launcher_name", "label", "entry"), (
+    ("start_ezDIC.bat", "EZDIC", "dic_virtual_extensometer_gui_v7_multi_roi_range.py"),
+    ("start_Capture.bat", "Capture", "straintrace_capture.gui"),
+))
+def test_windows_launcher_bat_invokes_source_entry_in_smoke_mode(launcher_name, label, entry):
+    launcher = ROOT / launcher_name
+    assert launcher.is_file()
     if os.name != "nt":
         pytest.skip("Windows launcher smoke test requires cmd.exe")
 
     env = os.environ.copy()
     env["EZDIC_LAUNCHER_SMOKE_TEST"] = "1"
     result = subprocess.run(
-        ["cmd.exe", "/d", "/c", str(launcher)],
+        ["cmd.exe", "/d", "/c", launcher_name],
         cwd=ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
         timeout=15,
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "EZDIC launcher smoke test" in output
-    assert "dic_virtual_extensometer_gui_v7_multi_roi_range.py" in output
+    assert f"{label} launcher smoke test" in output
+    assert entry in output
 
 
-def test_windows_launcher_recreates_stale_venv_before_running_entry(tmp_path):
+@pytest.mark.parametrize(("launcher", "entry"), (
+    ("start_ezDIC.bat", "dic_virtual_extensometer_gui_v7_multi_roi_range.py"),
+    ("start_Capture.bat", "straintrace_capture/gui.py"),
+))
+def test_windows_launcher_recreates_stale_venv_before_running_entry(tmp_path, launcher, entry):
     if os.name != "nt":
         pytest.skip("Windows launcher stale-venv test requires cmd.exe")
 
-    project = tmp_path / "launcher_project"
-    project.mkdir()
-    shutil.copy2(ROOT / "start_ezDIC.bat", project / "start_ezDIC.bat")
-    (project / "dic_virtual_extensometer_gui_v7_multi_roi_range.py").write_text(
-        "print('entry-ran')\n",
+    project = tmp_path / "launcher & source !"
+    (project / "scripts").mkdir(parents=True)
+    shutil.copy2(ROOT / launcher, project / launcher)
+    shutil.copy2(ROOT / "scripts/start_windows.ps1", project / "scripts/start_windows.ps1")
+    entry_path = project / entry
+    entry_path.parent.mkdir(exist_ok=True)
+    if launcher == "start_Capture.bat":
+        (entry_path.parent / "__init__.py").touch()
+    entry_path.write_text(
+        "import ctypes, json, sys\n"
+        "print('entry-ran', json.dumps(sys.argv[1:]))\n"
+        "assert not ctypes.windll.kernel32.GetConsoleWindow()\n",
         encoding="utf-8",
     )
 
     stale_python = project / ".venv" / "Scripts" / "python.exe"
     stale_python.parent.mkdir(parents=True)
-    stale_python.write_text("not a usable python executable\n", encoding="utf-8")
+    prior_bytes = b"not a usable python executable\n"
+    stale_python.write_bytes(prior_bytes)
+    # A present configuration with an invalid executable also has to recover.
+    (project / ".venv/pyvenv.cfg").write_text("home = missing\n", encoding="utf-8")
+    requirements = b"# Empty dependency list for the launcher fixture.\n"
+    (project / "requirements.txt").write_bytes(requirements)
+    state = tmp_path / "logs"
+    env = {**os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"], "EZDIC_STATE_DIR": str(state)}
+    env.update(PIP_NO_INDEX="1", PIP_DISABLE_PIP_VERSION_CHECK="1")
+    env.pop("EZDIC_LAUNCHER_SMOKE_TEST", None)
+    env.pop("PYTHONPATH", None)
+    selection = str(tmp_path / "test experiment ! with spaces")
 
     result = subprocess.run(
-        ["cmd.exe", "/d", "/c", str(project / "start_ezDIC.bat")],
+        ["cmd.exe", "/d", "/c", launcher, "--experiment", selection],
         cwd=project,
+        env=env,
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
         timeout=60,
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "entry-ran" in output
+    assert f"entry-ran {json.dumps(['--experiment', selection])}" in output
+    saved, = project.glob(".venv.backup-*")
+    assert (saved / "Scripts/python.exe").read_bytes() == prior_bytes
+    assert stale_python.read_bytes().startswith(b"MZ")
+    assert (project / ".venv/.ezDIC_requirements.txt").read_bytes() == requirements
+    log, = state.glob("startup-*.log")
+    body = log.read_text(encoding="utf-8-sig")
+    assert "entry-ran" in body and "Exit code 0" in body
 
 
 def test_build_release_smoke_recreates_stale_build_venv(tmp_path):

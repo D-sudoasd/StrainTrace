@@ -1,0 +1,982 @@
+{
+  "schema": "straintrace.capture-performance-comparison/v1",
+  "date": "2026-11-25",
+  "cpu_model": "AMD Ryzen 9 9950X3D",
+  "measurements": {
+    "workspace_before_batching": {
+      "schema": "straintrace.capture-benchmark/v1",
+      "environment": {
+        "platform": "Windows-11-10.0.26300-SP0",
+        "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+        "logical_cpus": 32,
+        "python": "3.12.10",
+        "opencv": "4.13.0",
+        "numpy": "2.4.1",
+        "available_memory_bytes": 65905455104,
+        "output_volume": "E:\\"
+      },
+      "cases": [
+        {
+          "name": "mono8",
+          "camera_count": 1,
+          "width": 512,
+          "height": 384,
+          "pixel_format": "Mono8",
+          "target_camera_fps": 30,
+          "duration_s": 8,
+          "elapsed_s": 12.177682999987155,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 30.659661002260233,
+              "p95_inter_frame_ms": 41.105940000000004
+            }
+          },
+          "peak_rss_bytes": 56860672,
+          "initial_rss_bytes": 43606016,
+          "verify_s": 0.6231484999880195,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 46,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:0": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "22f18762-3611-42b7-ac4f-8c6202b38316",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 11.124635000014678,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 814166.7569307262,
+            "cameras": {
+              "sim:0": {
+                "received": 47,
+                "saved": 46,
+                "saved_bytes": 9057308,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 4.224857714427304,
+                "mean_save_fps": 4.134967124758638
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:0 sequence 47"
+            },
+            "disk_free_bytes": 4342174535680
+          }
+        },
+        {
+          "name": "mono12-dual",
+          "camera_count": 2,
+          "width": 960,
+          "height": 720,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 15,
+          "duration_s": 8,
+          "elapsed_s": 13.903749299992342,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 15.982246920121126,
+              "p95_inter_frame_ms": 69.13175
+            },
+            "sim:1": {
+              "mean_fps": 15.970998264251945,
+              "p95_inter_frame_ms": 71.61977499999999
+            }
+          },
+          "peak_rss_bytes": 107450368,
+          "initial_rss_bytes": 50966528,
+          "verify_s": 0.4889854000066407,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 34,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:0": {
+                "app_unsaved": 1
+              },
+              "sim:1": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "ca65b80c-bd7a-4936-9f8d-6ee25e404979",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 11.474127800000133,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 4099944.224082937,
+            "cameras": {
+              "sim:0": {
+                "received": 18,
+                "saved": 17,
+                "saved_bytes": 23521642,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 1.5687466893997635,
+                "mean_save_fps": 1.481594095544221
+              },
+              "sim:1": {
+                "received": 18,
+                "saved": 17,
+                "saved_bytes": 23521642,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 1.5687466893997635,
+                "mean_save_fps": 1.481594095544221
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:0 sequence 18"
+            },
+            "disk_free_bytes": 4342047825920
+          }
+        },
+        {
+          "name": "mono16-large",
+          "camera_count": 1,
+          "width": 1600,
+          "height": 1200,
+          "pixel_format": "Mono16",
+          "target_camera_fps": 10,
+          "duration_s": 8,
+          "elapsed_s": 15.080542500014417,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 10.14056694548059,
+              "p95_inter_frame_ms": 103.293665
+            }
+          },
+          "peak_rss_bytes": 203493376,
+          "initial_rss_bytes": 55410688,
+          "verify_s": 1.3983428000065032,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 71,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:0": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "91e6aa3b-6818-4567-a8f5-666a3ba95f5f",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 14.411172299995087,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 18937110.758164555,
+            "cameras": {
+              "sim:0": {
+                "received": 72,
+                "saved": 71,
+                "saved_bytes": 272905966,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 4.996123736583494,
+                "mean_save_fps": 4.9267331291309455
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:0 sequence 72"
+            },
+            "disk_free_bytes": 4341734936576
+          }
+        },
+        {
+          "name": "dual-endurance",
+          "camera_count": 2,
+          "width": 640,
+          "height": 480,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 12,
+          "duration_s": 60,
+          "elapsed_s": 7.051437199988868,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 12.483773495181937,
+              "p95_inter_frame_ms": 85.91312500000001
+            },
+            "sim:1": {
+              "mean_fps": 12.51435696567098,
+              "p95_inter_frame_ms": 86.28261499999999
+            }
+          },
+          "peak_rss_bytes": 87703552,
+          "initial_rss_bytes": 64663552,
+          "verify_s": 0.7212702000106219,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 52,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:1": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "52e91ead-dfb4-4b72-97ab-e0ea8df766b8",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 6.477925299986964,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 4936974.497076148,
+            "cameras": {
+              "sim:0": {
+                "received": 27,
+                "saved": 27,
+                "saved_bytes": 16605702,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 4.16800113456917,
+                "mean_save_fps": 4.16800113456917
+              },
+              "sim:1": {
+                "received": 26,
+                "saved": 25,
+                "saved_bytes": 15375650,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 4.013630722177719,
+                "mean_save_fps": 3.859260309786269
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:1 sequence 26"
+            },
+            "disk_free_bytes": 4341702594560
+          }
+        }
+      ]
+    },
+    "workspace_after_batching": {
+      "schema": "straintrace.capture-benchmark/v1",
+      "environment": {
+        "platform": "Windows-11-10.0.26300-SP0",
+        "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+        "logical_cpus": 32,
+        "python": "3.12.10",
+        "opencv": "4.13.0",
+        "numpy": "2.4.1",
+        "available_memory_bytes": 65905455104,
+        "output_volume": "E:\\"
+      },
+      "cases": [
+        {
+          "name": "mono8",
+          "camera_count": 1,
+          "width": 512,
+          "height": 384,
+          "pixel_format": "Mono8",
+          "target_camera_fps": 30,
+          "duration_s": 8,
+          "elapsed_s": 9.04153379998752,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 30.12268593447538,
+              "p95_inter_frame_ms": 37.094919999999995
+            }
+          },
+          "peak_rss_bytes": 52330496,
+          "initial_rss_bytes": 43159552,
+          "verify_s": 2.9121036999858916,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 241,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "28011ce9-94ff-4619-a079-4c2410a33f6f",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 8.340289499989012,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 6,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 5689540.872659458,
+            "cameras": {
+              "sim:0": {
+                "received": 241,
+                "saved": 241,
+                "saved_bytes": 47452418,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 28.89587945362298,
+                "mean_save_fps": 28.89587945362298
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 4341579063296
+          }
+        },
+        {
+          "name": "mono12-dual",
+          "camera_count": 2,
+          "width": 960,
+          "height": 720,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 15,
+          "duration_s": 8,
+          "elapsed_s": 5.374271500011673,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 15.482446582656332,
+              "p95_inter_frame_ms": 67.772175
+            },
+            "sim:1": {
+              "mean_fps": 15.2656391482384,
+              "p95_inter_frame_ms": 67.941525
+            }
+          },
+          "peak_rss_bytes": 109465600,
+          "initial_rss_bytes": 53968896,
+          "verify_s": 0.6500592999800574,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 56,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:1": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "a84d26d1-1a9d-4f48-8436-bce235cf9a07",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 4.622673100006068,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 16761526.139475077,
+            "cameras": {
+              "sim:0": {
+                "received": 29,
+                "saved": 29,
+                "saved_bytes": 40125154,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 6.273426515918231,
+                "mean_save_fps": 6.273426515918231
+              },
+              "sim:1": {
+                "received": 28,
+                "saved": 27,
+                "saved_bytes": 37357902,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 6.057101463645189,
+                "mean_save_fps": 5.840776411372147
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:1 sequence 28"
+            },
+            "disk_free_bytes": 4341495578624
+          }
+        },
+        {
+          "name": "mono16-large",
+          "camera_count": 1,
+          "width": 1600,
+          "height": 1200,
+          "pixel_format": "Mono16",
+          "target_camera_fps": 10,
+          "duration_s": 8,
+          "elapsed_s": 10.86574589999509,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 10.118873746078652,
+              "p95_inter_frame_ms": 103.72611500000001
+            }
+          },
+          "peak_rss_bytes": 100655104,
+          "initial_rss_bytes": 55533568,
+          "verify_s": 1.6596003999875393,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 81,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "b9a70e0c-02f2-490d-84b8-43b1df9be991",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 9.22133249999024,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 6,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 33763387.883511364,
+            "cameras": {
+              "sim:0": {
+                "received": 81,
+                "saved": 81,
+                "saved_bytes": 311343426,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 8.78397997253496,
+                "mean_save_fps": 8.78397997253496
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 4341168504832
+          }
+        },
+        {
+          "name": "dual-endurance",
+          "camera_count": 2,
+          "width": 640,
+          "height": 480,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 12,
+          "duration_s": 60,
+          "elapsed_s": 56.68090419998043,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 12.017342934491293,
+              "p95_inter_frame_ms": 86.66555999999999
+            },
+            "sim:1": {
+              "mean_fps": 12.018904157285334,
+              "p95_inter_frame_ms": 88.39269999999999
+            }
+          },
+          "peak_rss_bytes": 91426816,
+          "initial_rss_bytes": 64450560,
+          "verify_s": 112.34005319999414,
+          "verification": {
+            "ok": true,
+            "complete": false,
+            "state": "failed",
+            "committed_frames": 1226,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {
+              "sim:0": {
+                "app_unsaved": 1
+              },
+              "sim:1": {
+                "app_unsaved": 1
+              }
+            },
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "failed",
+            "experiment_id": "63df87c5-4f9b-49b9-b3d5-acfe4239ce2d",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 54.00680460000876,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 32,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 13961608.756239535,
+            "cameras": {
+              "sim:0": {
+                "received": 614,
+                "saved": 613,
+                "saved_bytes": 377010938,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 11.368937757889501,
+                "mean_save_fps": 11.350421572616066
+              },
+              "sim:1": {
+                "received": 614,
+                "saved": 613,
+                "saved_bytes": 377010938,
+                "intentionally_skipped": 0,
+                "app_unsaved": 1,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 11.368937757889501,
+                "mean_save_fps": 11.350421572616066
+              }
+            },
+            "error": {
+              "code": "RAW_BUFFER_FULL",
+              "message": "raw queue exhausted at sim:0 sequence 614"
+            },
+            "disk_free_bytes": 4340407439360
+          }
+        }
+      ]
+    },
+    "ssd_after_batching": {
+      "schema": "straintrace.capture-benchmark/v1",
+      "environment": {
+        "platform": "Windows-11-10.0.26300-SP0",
+        "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+        "logical_cpus": 32,
+        "python": "3.12.10",
+        "opencv": "4.13.0",
+        "numpy": "2.4.1",
+        "available_memory_bytes": 65905455104,
+        "output_volume": "C:\\"
+      },
+      "cases": [
+        {
+          "name": "mono8",
+          "camera_count": 1,
+          "width": 512,
+          "height": 384,
+          "pixel_format": "Mono8",
+          "target_camera_fps": 30,
+          "duration_s": 8,
+          "elapsed_s": 8.079817799996817,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 29.994266595940182,
+              "p95_inter_frame_ms": 41.86797999999999
+            }
+          },
+          "peak_rss_bytes": 52002816,
+          "initial_rss_bytes": 43118592,
+          "verify_s": 2.2419673000113107,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 241,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "2c711081-ad22-4bc6-bf15-c17291a7bd90",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 8.047867899993435,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 1,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 5896271.980314029,
+            "cameras": {
+              "sim:0": {
+                "received": 241,
+                "saved": 241,
+                "saved_bytes": 47452418,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 29.945819562992156,
+                "mean_save_fps": 29.945819562992156
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 213218869248
+          }
+        },
+        {
+          "name": "mono12-dual",
+          "camera_count": 2,
+          "width": 960,
+          "height": 720,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 15,
+          "duration_s": 8,
+          "elapsed_s": 8.18984140001703,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 15.065212597455448,
+              "p95_inter_frame_ms": 76.03844500000001
+            },
+            "sim:1": {
+              "mean_fps": 15.031757594269413,
+              "p95_inter_frame_ms": 75.81133
+            }
+          },
+          "peak_rss_bytes": 70991872,
+          "initial_rss_bytes": 53567488,
+          "verify_s": 3.0439879999903496,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 242,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "9035b505-36da-4b9d-9bc9-fd35d9b24eef",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 8.15296939999098,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 2,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 41069391.47844348,
+            "cameras": {
+              "sim:0": {
+                "received": 121,
+                "saved": 121,
+                "saved_bytes": 167418746,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 14.841218464542976,
+                "mean_save_fps": 14.841218464542976
+              },
+              "sim:1": {
+                "received": 121,
+                "saved": 121,
+                "saved_bytes": 167418746,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 14.841218464542976,
+                "mean_save_fps": 14.841218464542976
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 212874174464
+          }
+        },
+        {
+          "name": "mono16-large",
+          "camera_count": 1,
+          "width": 1600,
+          "height": 1200,
+          "pixel_format": "Mono16",
+          "target_camera_fps": 10,
+          "duration_s": 8,
+          "elapsed_s": 8.111648000020068,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 10.006381194367414,
+              "p95_inter_frame_ms": 111.791805
+            }
+          },
+          "peak_rss_bytes": 83132416,
+          "initial_rss_bytes": 60571648,
+          "verify_s": 1.1612259999965318,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 81,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "92294634-fb33-4443-a8ab-30bb7b7b961d",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 8.087402600009227,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 1,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 38497332.38204869,
+            "cameras": {
+              "sim:0": {
+                "received": 81,
+                "saved": 81,
+                "saved_bytes": 311343426,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 10.015576570889099,
+                "mean_save_fps": 10.015576570889099
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 212549120000
+          }
+        },
+        {
+          "name": "dual-endurance",
+          "camera_count": 2,
+          "width": 640,
+          "height": 480,
+          "pixel_format": "Mono12",
+          "target_camera_fps": 12,
+          "duration_s": 60,
+          "elapsed_s": 60.69233150000218,
+          "receipt_cadence": {
+            "sim:0": {
+              "mean_fps": 11.998613787966896,
+              "p95_inter_frame_ms": 94.22048
+            },
+            "sim:1": {
+              "mean_fps": 11.983161068466773,
+              "p95_inter_frame_ms": 97.211475
+            }
+          },
+          "peak_rss_bytes": 79114240,
+          "initial_rss_bytes": 67821568,
+          "verify_s": 16.799698899994837,
+          "verification": {
+            "ok": true,
+            "complete": true,
+            "state": "completed",
+            "committed_frames": 1439,
+            "issues": [],
+            "uncommitted_candidates": [],
+            "file_hashes_checked": true,
+            "reported_camera_losses": {},
+            "scheduled_misses": 0,
+            "short_pre_windows": 0
+          },
+          "status": {
+            "state": "completed",
+            "experiment_id": "92ffcedd-0f51-43bc-ac72-1a6522e67639",
+            "phase": null,
+            "mode": null,
+            "elapsed_s": 60.669562800001586,
+            "queue_size": 0,
+            "queue_capacity": 32,
+            "queue_high_water": 7,
+            "buffered_raw_bytes": 0,
+            "scheduled_misses": 0,
+            "short_pre_windows": 0,
+            "disk_bytes_per_s": 14587585.16057704,
+            "cameras": {
+              "sim:0": {
+                "received": 720,
+                "saved": 720,
+                "saved_bytes": 442818720,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 11.867565328820552,
+                "mean_save_fps": 11.867565328820552
+              },
+              "sim:1": {
+                "received": 719,
+                "saved": 719,
+                "saved_bytes": 442203694,
+                "intentionally_skipped": 0,
+                "app_unsaved": 0,
+                "native_counter_gaps": 0,
+                "native_counter_duplicates": 0,
+                "native_counter_resets": 0,
+                "hardware_identity_missing": 0,
+                "reported_driver_skips": 0,
+                "transport_errors": 0,
+                "mean_receive_fps": 11.851082599197191,
+                "mean_save_fps": 11.851082599197191
+              }
+            },
+            "error": null,
+            "disk_free_bytes": 211270696960
+          }
+        }
+      ]
+    }
+  }
+}

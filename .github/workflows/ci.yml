@@ -110,6 +110,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Installed campaign workflow failed." }
           python -B examples/agent/create_demo.py --output "$env:RUNNER_TEMP\agent-wheel-demo" --run --cli "$env:RUNNER_TEMP\campaign-installed\Scripts\straintrace.exe"
           if ($LASTEXITCODE -ne 0) { throw "Installed Agent DIC workflow failed." }
+          $capture = Join-Path $env:RUNNER_TEMP "campaign-installed\Scripts\straintrace-capture.exe"
+          & $capture run --config examples/capture/install-smoke.json --output "$env:RUNNER_TEMP\capture-wheel-demo"
+          if ($LASTEXITCODE -ne 0) { throw "Installed Capture workflow failed." }
+          & $capture verify "$env:RUNNER_TEMP\capture-wheel-demo"
+          if ($LASTEXITCODE -ne 0) { throw "Installed Capture verification failed." }
 
       - name: Build onedir GUI and CLI bundle
         shell: pwsh
@@ -154,6 +159,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Frozen campaign workflow failed." }
           python -B examples/agent/create_demo.py --output "$env:RUNNER_TEMP\agent-frozen-demo" --run --cli $cli
           if ($LASTEXITCODE -ne 0) { throw "Frozen Agent DIC workflow failed." }
+          $capture = Join-Path $bundle "StrainTrace-Capture-cli.exe"
+          if (!(Test-Path (Join-Path $bundle "StrainTrace-Capture.exe"))) { throw "Packaged Capture GUI missing." }
+          & $capture run --config examples/capture/install-smoke.json --output "$env:RUNNER_TEMP\capture-frozen-demo"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Capture workflow failed." }
+          & $capture verify "$env:RUNNER_TEMP\capture-frozen-demo"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Capture verification failed." }
           $frozenBenchmarkRoot = Join-Path $env:RUNNER_TEMP "ezdic-frozen-benchmark"
           & $cli benchmark --output $frozenBenchmarkRoot
           if ($LASTEXITCODE -ne 0) { throw "Packaged CLI benchmark failed with exit code $LASTEXITCODE" }

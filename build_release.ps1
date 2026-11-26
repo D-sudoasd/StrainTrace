@@ -6,7 +6,8 @@ param(
     [switch]$BundleTest,
     [string]$BundlePath,
     [switch]$UpgradePip,
-    [switch]$KeepTempArtifacts
+    [switch]$KeepTempArtifacts,
+    [switch]$Industrial
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,11 +17,13 @@ $Root = [IO.Path]::GetFullPath($Root)
 $VenvDir = Join-Path $Root ".venv-build"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $BuildRoot = Join-Path $Root "build"
+$PackageBuild = Join-Path $BuildRoot $(if ($Industrial) { "industrial" } else { "standard" })
 $DistRoot = Join-Path $Root "dist"
-$DistDir = Join-Path $DistRoot "ezDIC_Windows_x64"
+$BundleName = if ($Industrial) { "ezDIC_Windows_x64_Industrial" } else { "ezDIC_Windows_x64" }
+$DistDir = Join-Path $DistRoot $BundleName
 $ReleaseRoot = Join-Path $Root "release"
-$ReleaseDir = Join-Path $ReleaseRoot "ezDIC_Windows_x64"
-$ZipPath = Join-Path $ReleaseRoot "ezDIC_Windows_x64_v$Version.zip"
+$ReleaseDir = Join-Path $ReleaseRoot $BundleName
+$ZipPath = Join-Path $ReleaseRoot "$($BundleName)_v$Version.zip"
 $MainScriptName = "ezdic_frozen_entrypoint.py"
 $CliScriptName = "ezdic_cli_entrypoint.py"
 
@@ -85,6 +88,13 @@ if (Test-Path -LiteralPath $AgentSourceRoot -PathType Container) {
         $_.FullName.Substring($Root.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1)
     })
     $ModernSourceFiles += $AgentSourceFiles
+}
+$CaptureSourceRoot = Join-Path $Root "straintrace_capture"
+if (Test-Path -LiteralPath $CaptureSourceRoot -PathType Container) {
+    $ModernSourceFiles += @(Get-ChildItem -LiteralPath $CaptureSourceRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
+        $_.FullName.Substring($Root.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1)
+    })
+    $ModernSourceFiles += @("schemas\capture_config_v1.json", "docs\CAPTURE.md", "docs\CAPTURE_RESEARCH.md", "start_Capture.bat")
 }
 # A copied legacy fixture used by the historical launcher tests does not carry
 # the new core/schema files.  Only an actual modern source root enters the
@@ -602,7 +612,14 @@ function Test-BundleInventory {
         "_internal\sources\benchmarks\run_benchmark.py",
         "_internal\sources\benchmarks\synthetic_cases.py"
     ) + $BundleFiles
-    foreach ($pkgDir in @("ezdic_gui", "straintrace_campaign", "straintrace_agent")) {
+    if (Test-Path -LiteralPath $CaptureSourceRoot -PathType Container) {
+        $required += @(
+            "StrainTrace-Capture.exe", "StrainTrace-Capture-cli.exe",
+            "_internal\schemas\capture_config_v1.json", "_internal\docs\CAPTURE.md", "_internal\docs\CAPTURE_RESEARCH.md",
+            "_internal\examples\capture\speckle.json"
+        )
+    }
+    foreach ($pkgDir in @("ezdic_gui", "straintrace_campaign", "straintrace_agent", "straintrace_capture")) {
         $pkgRoot = Join-Path $Root $pkgDir
         if (Test-Path -LiteralPath $pkgRoot -PathType Container) {
             $pkgFiles = @(Get-ChildItem -LiteralPath $pkgRoot -Filter "*.py" -File -Recurse | Sort-Object FullName | ForEach-Object {
@@ -853,7 +870,8 @@ Ensure-BuildVenv
 if ($UpgradePip) {
     Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "--upgrade", "pip") -Label "pip upgrade"
 }
-Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "-r", (Join-Path $Root "requirements-build.txt")) -Label "build requirements installation"
+$requirements = if ($Industrial) { "requirements-build-industrial.txt" } else { "requirements-build.txt" }
+Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-m", "pip", "install", "-r", (Join-Path $Root $requirements)) -Label "build requirements installation"
 
 $compileFiles = @($ModernSourceFiles | Where-Object { $_ -like "*.py" } | ForEach-Object { Join-Path $Root $_ })
 Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments (@("-B", "-m", "py_compile") + $compileFiles) -Label "all entrypoint/module compilation"
@@ -868,11 +886,13 @@ try {
     $benchmarkReportPath = Join-Path $benchmarkRoot "benchmark_report.json"
     $benchmarkReport = Assert-BenchmarkV6Report -ReportPath $benchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "source"
 
-    Remove-SafeBuildPath -Path $BuildRoot -Label "build output"
-    Remove-SafeBuildPath -Path $DistRoot -Label "dist output"
-    [void](Assert-SafeBuildPath -Path $BuildRoot -Label "build output creation target")
+    Remove-SafeBuildPath -Path $PackageBuild -Label "build output"
+    Remove-SafeBuildPath -Path $DistDir -Label "dist output"
+    [void](Assert-SafeBuildPath -Path $PackageBuild -Label "build output creation target")
     [void](Assert-SafeBuildPath -Path $DistRoot -Label "dist output creation target")
-    Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "-m", "PyInstaller", (Join-Path $Root "ezDIC.spec"), "--clean", "--noconfirm") -Label "PyInstaller"
+    $packArgs = @("-B", "-m", "PyInstaller", (Join-Path $Root "ezDIC.spec"), "--clean", "--noconfirm", "--distpath", $DistRoot, "--workpath", $PackageBuild)
+    if ($Industrial) { $packArgs += @("--", "--industrial") }
+    Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments $packArgs -Label "PyInstaller"
 
     [void](Assert-NoReparseTree -Path $DistDir -Label "dist bundle")
     if (!(Test-Path -LiteralPath $DistDir -PathType Container)) { throw "PyInstaller output was not found: $DistDir" }
@@ -931,6 +951,9 @@ try {
     Invoke-NativeChecked -Label "frozen CLI locked v6 benchmark" -CommandParts @($cliExe, "benchmark", "--output", $frozenBenchmarkRoot)
     $frozenBenchmarkReportPath = Join-Path $frozenBenchmarkRoot "benchmark_report.json"
     $frozenBenchmarkReport = Assert-BenchmarkV6Report -ReportPath $frozenBenchmarkReportPath -CasesPath (Join-Path $Root "benchmarks\cases_v1.json") -Label "frozen CLI"
+    if ($Industrial) {
+        Invoke-PythonCommand -CommandParts @($VenvPython) -Arguments @("-B", "scripts/validate_capture_industrial.py", $ReleaseDir, (Join-Path $frozenMarkerRoot "industrial")) -Label "frozen industrial camera smoke"
+    }
 
     if (Test-Path -LiteralPath $ZipPath) { Remove-SafeBuildPath -Path $ZipPath -Label "release archive" }
     [void](Assert-NoReparseTree -Path $ReleaseDir -Label "release package before compression")

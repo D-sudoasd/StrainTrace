@@ -8,6 +8,30 @@ or publication claim is made by this note.
 
 ## Scope of this iteration
 
+### 26 November 2026: Capture workbench and merge-review fixes
+
+StrainTrace Capture is added as a separate acquisition workbench
+(`straintrace_capture`, `start_Capture.bat`) beside the existing Analysis
+workbench: simulated, UVC, Basler/pypylon and GenTL camera adapters, guided
+setup and trials, single/timed/continuous/hardware-triggered/event-window
+acquisition, lossless TIFF archives with frame and trigger identity, verified
+transfer/export, and hand-off to live and offline DIC. See
+[the Capture guide](docs/CAPTURE.md) and
+[the validation record](docs/CAPTURE_VALIDATION.md). Hardware-specific
+acceptance with physical cameras and triggers is still a documented device
+rehearsal; it was not measured by this iteration.
+
+Merge-review fixes: the Windows CI collection error for `tifffile`; live
+results keep the load-source time unit, encoding and clock origin; sibling
+workbenches launch independently of the caller's directory; the industrial
+build files are part of the source distribution. Follow-up fixes: a hardware
+wait that outlives a slow operator-channel poll reports the normal
+`WAIT_HARDWARE_TIMEOUT` instead of leaking `CONTROL_TIMEOUT`; operator
+command files use distinct `.part` temporaries and retry a denied Windows
+rename; the Capture links in Analysis moved from a native menu bar to the
+header so the measurement controls keep their height on 1366x768 laptops.
+No numerical DIC behavior or locked benchmark value changed.
+
 ### 30 October 2026: numerical, delivery and desktop regression fixes
 
 Core strain masks now reject folded/collapsed deformation consistently with

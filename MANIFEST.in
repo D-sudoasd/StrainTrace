@@ -1,6 +1,7 @@
 include README.md README_使用说明.txt LICENSE.txt NOTICE_Attribution_and_Usage.txt CITATION.cff VERSION.txt .zenodo.json CONTRIBUTING.md SUPPORT.md
 include RELEASE_NOTES*.md
-include requirements*.txt build_release.ps1 *.spec start_ezDIC.bat
+include requirements*.txt build_release.ps1 *.spec start_ezDIC.bat start_Capture.bat
+include scripts/start_windows.ps1
 include .github/workflows/ci.yml
 recursive-include docs *.md *.json *.txt *.cff *.csv
 recursive-include paper *.md *.bib *.png *.svg *.py *.pdf *.json
@@ -13,9 +14,12 @@ recursive-include assets/readme *.svg *.png *.json
 include scripts/check_joss_artifacts.py
 include scripts/validate_campaign_baseline.py
 include scripts/validate_agent_upgrade.py
+include scripts/benchmark_capture.py scripts/validate_capture_desktop.py
+include scripts/validate_capture_industrial.py scripts/pyinstaller/hook-pypylon.py
 include examples/paired_dic_comparison.json
 recursive-include examples/campaign *.py
 recursive-include examples/agent *.py *.json *.csv
+recursive-include examples/capture *.json
 include straintrace_campaign/CONTRACT.md
 exclude tests/test_desy_*.py
 exclude scripts/*desy*.py

@@ -49,16 +49,18 @@ class ToolTip:
         self.wraplength = wraplength
         self.delay_ms = delay_ms
         self.after_id = None
+        self.refresh_id = None
         self.tip_window = None
         self.event = None
         self.pending_text = None
         self.shown_text = None
+        self._keyboard_open = False
 
         self.widget._tooltip_text = text if isinstance(text, str) else ""
         self.widget._tooltip = self
         self.widget.bind("<Enter>", self.schedule, add="+")
         self.widget.bind("<Motion>", self.schedule, add="+")
-        self.widget.bind("<Leave>", self.hide, add="+")
+        self.widget.bind("<Leave>", self.leave, add="+")
         self.widget.bind("<ButtonPress>", self.hide, add="+")
         self.widget.bind("<MouseWheel>", self.hide, add="+")
         self.widget.bind("<KeyPress>", self.hide, add="+")
@@ -66,7 +68,13 @@ class ToolTip:
         self.widget.bind("<Unmap>", self.hide, add="+")
         self.widget.bind("<Destroy>", self.dispose, add="+")
         self.widget.bind("<F1>", self.show_help, add="+")
+        self.widget.bind("<Shift-F1>", self._pin_hovered_help, add="+")
         self.widget.bind("<Escape>", self.dismiss, add="+")
+        if not getattr(self.owner, "_pointer_help_bound", False):
+            self.owner.bind("<F1>", self._help_for_window, add="+")
+            self.owner.bind("<Shift-F1>", self._pin_hovered_help, add="+")
+            self.owner.bind("<ButtonPress>", self._clear_pinned_help, add="+")
+            self.owner._pointer_help_bound = True
 
     def resolve_text(self, event=None):
         # The registered _tooltip_text describes the whole control. Hovering a
@@ -75,6 +83,9 @@ class ToolTip:
         return self.text(event) if callable(self.text) else self.text
 
     def schedule(self, event=None):
+        active = getattr(self.owner, "_active_tooltip", None)
+        if self._keyboard_open or (active is not None and active._keyboard_open):
+            return
         text = self.resolve_text(event)
         self.event = event
         if not text:
@@ -89,16 +100,59 @@ class ToolTip:
 
     def show_help(self, event=None):
         self.hide()
+        self._keyboard_open = True
         self.event = event
         self.show()
         if self.tip_window is not None:
             return "break"
+        self._keyboard_open = False
+
+    def leave(self, event=None):
+        if not self._keyboard_open:
+            self.hide()
 
     def dismiss(self, event=None):
         visible = self.tip_window is not None
         self.hide()
         if visible:
             return "break"
+
+    @staticmethod
+    def dismiss_window(window):
+        tip = getattr(window, "_active_tooltip", None)
+        return tip.dismiss() if tip else None
+
+    @staticmethod
+    def _clear_pinned_help(event):
+        active = getattr(event.widget.winfo_toplevel(), "_active_tooltip", None)
+        if active is not None and active._keyboard_open:
+            active.hide()
+
+    @staticmethod
+    def _pin_hovered_help(event):
+        active = getattr(event.widget.winfo_toplevel(), "_active_tooltip", None)
+        if active is not None and not active._keyboard_open:
+            return active.show_help(active.event)
+        return ToolTip._help_for_window(event)
+
+    @staticmethod
+    def _help_for_window(key_event):
+        window = key_event.widget.winfo_toplevel()
+        x, y = window.winfo_pointerxy()
+        try:
+            widget = window.winfo_containing(x, y)
+        except (KeyError, tk.TclError):
+            return None
+        while widget is not None and widget.winfo_toplevel() == window:
+            tip = getattr(widget, "_tooltip", None)
+            if tip is not None:
+                event = tk.Event()
+                event.type = tk.EventType.Motion
+                event.x_root, event.y_root = x, y
+                event.x, event.y = x - widget.winfo_rootx(), y - widget.winfo_rooty()
+                return tip.show_help(event)
+            widget = widget.master
+        return None
 
     def unschedule(self):
         if self.after_id is not None:
@@ -142,36 +196,83 @@ class ToolTip:
             screen_x, screen_y, screen_w, screen_h = self.screen_bounds(anchor_x, anchor_y)
 
             previous = getattr(self.owner, "_active_tooltip", None)
+            if previous is not None and previous._keyboard_open and not self._keyboard_open:
+                return
             if previous is not None and previous is not self:
                 previous.hide()
             self.tip_window = tk.Toplevel(self.widget)
             self.tip_window.withdraw()
             self.tip_window.wm_overrideredirect(True)
             self.tip_window.wm_attributes("-topmost", True)
-            self._build_card(text, min(self.wraplength, screen_w - 40))
-            self.tip_window.update_idletasks()
-            width = self.tip_window.winfo_reqwidth()
-            height = self.tip_window.winfo_reqheight()
-            region = getattr(self.event, "help_region", None)
-            if region is not None:
-                region_x, region_width = region
-                x = region_x + region_width + 8
-                if x + width > screen_x + screen_w - 8:
-                    x = region_x - width - 8
-                y = anchor_y
-            else:
-                x, y = anchor_x + 16, anchor_y + 20
-            x = min(max(screen_x + 8, x), screen_x + screen_w - width - 8)
-            if y + height > screen_y + screen_h - 8:
-                y = anchor_y - height - 12
-            y = min(max(screen_y + 8, y), screen_y + screen_h - height - 8)
-            self.tip_window.wm_geometry(f"+{x}+{y}")
+            self._anchor = (anchor_x, anchor_y, screen_x, screen_y, screen_w, screen_h)
+            width = round(self.wraplength * self.widget.winfo_fpixels("1i") / 96)
+            self._build_card(text, min(width, screen_w - 40))
+            self._place()
             self.tip_window.deiconify()
             self.shown_text = text
             self.owner._active_tooltip = self
+            if callable(self.text) or hasattr(self.widget, "instate"):
+                self.refresh_id = self.owner.after(300, self._refresh_text)
         except tk.TclError:
             self.hide()
-            return
+
+    def _place(self):
+        anchor_x, anchor_y, screen_x, screen_y, screen_w, screen_h = self._anchor
+        window = self.tip_window
+        window.update_idletasks()
+        width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+        region = getattr(self.event, "help_region", None)
+        if region is not None:
+            region_x, region_width = region
+            x, y = region_x + region_width + 8, anchor_y
+            if x + width > screen_x + screen_w - 8:
+                x = region_x - width - 8
+        else:
+            x, y = anchor_x + 16, anchor_y + 20
+        x = max(screen_x + 8, min(x, screen_x + screen_w - width - 8))
+        if y + height > screen_y + screen_h - 8:
+            y = anchor_y - height - 12
+        y = max(screen_y + 8, min(y, screen_y + screen_h - height - 8))
+        window.wm_geometry(f"+{x}+{y}")
+
+    def _refresh_text(self):
+        self.refresh_id = None
+        try:
+            text = self.resolve_text(self.event)
+            if not text:
+                self.hide()
+                return
+            heading = self._heading_text()
+            rearrange = heading != self._heading.cget("text")
+            if rearrange:
+                self._update_heading(heading)
+            if text != self.shown_text:
+                self._body.configure(text=text)
+                self.shown_text = text
+                rearrange = True
+            if rearrange:
+                self._place()
+            self.refresh_id = self.owner.after(300, self._refresh_text)
+        except tk.TclError:
+            self.hide()
+
+    def _heading_text(self):
+        title = self.title
+        if title is None and "text" in self.widget.keys() and not (
+            "textvariable" in self.widget.keys() and self.widget.cget("textvariable")
+        ):
+            caption = str(self.widget.cget("text"))
+            title = caption if 1 < len(caption) <= 20 and "\n" not in caption else ""
+        if hasattr(self.widget, "instate") and self.widget.instate(["disabled"]):
+            return f"{title} · 当前不可用" if title else "当前不可用"
+        return title or ""
+
+    def _update_heading(self, heading):
+        self._heading.configure(text=heading)
+        if heading:
+            self._heading.pack(before=self._body, anchor="w", pady=(0, 3))
+        else:
+            self._heading.pack_forget()
 
     def _build_card(self, text, wraplength):
         style = ttk.Style(self.widget)
@@ -181,23 +282,26 @@ class ToolTip:
         frame = tk.Frame(self.tip_window, background=background,
                          highlightbackground=border, highlightthickness=1, padx=11, pady=8)
         frame.pack(fill=tk.BOTH, expand=True)
-        title = self.title
-        if title is None and "text" in self.widget.keys() and not (
-            "textvariable" in self.widget.keys() and self.widget.cget("textvariable")
-        ):
-            caption = str(self.widget.cget("text"))
-            title = caption if 1 < len(caption) <= 20 and "\n" not in caption else ""
-        if title:
-            ttk.Label(frame, text=title, style="HelpTitle.TLabel", background=background,
-                      foreground=foreground, wraplength=wraplength).pack(anchor="w", pady=(0, 3))
-        ttk.Label(frame, text=text, style="Help.TLabel", background=background, foreground=foreground,
-                  justify=tk.LEFT, wraplength=wraplength).pack(anchor="w")
-        ttk.Label(frame, text="Esc 关闭", style="HelpKey.TLabel", background=background).pack(anchor="w", pady=(5, 0))
+        self._heading = ttk.Label(frame, style="HelpTitle.TLabel", background=background,
+                                  foreground=foreground, wraplength=wraplength)
+        self._body = ttk.Label(frame, text=text, style="Help.TLabel", background=background, foreground=foreground,
+                               justify=tk.LEFT, wraplength=wraplength)
+        self._body.pack(anchor="w")
+        self._update_heading(self._heading_text())
+        controls = "Esc 收起" if self._keyboard_open or getattr(self.event, "help_region", None) else "Shift+F1 固定 · Esc 收起"
+        ttk.Label(frame, text=controls, style="HelpKey.TLabel", background=background).pack(anchor="w", pady=(5, 0))
 
     def hide(self, event=None):
         self.unschedule()
+        if self.refresh_id is not None:
+            try:
+                self.owner.after_cancel(self.refresh_id)
+            except tk.TclError:
+                pass
+            self.refresh_id = None
         if getattr(self.owner, "_active_tooltip", None) is self:
             self.owner._active_tooltip = None
+        self._keyboard_open = False
         self.pending_text = None
         self.shown_text = None
         if self.tip_window is not None:
@@ -206,6 +310,8 @@ class ToolTip:
             except tk.TclError:
                 pass
             self.tip_window = None
+            self._body = None
+            self._heading = None
 
     def dispose(self, event=None):
         self.hide()
@@ -231,6 +337,7 @@ class ChoiceToolTip(ToolTip):
         self.motion_command = widget.register(self.on_choice_motion)
         self.selection_command = widget.register(self.on_choice_selection)
         self.help_command = widget.register(self.show_choice_help)
+        self.dismiss_command = widget.register(self.dismiss)
         self.hide_command = widget.register(self.hide_choices)
 
     def set_choices(self, choices):
@@ -256,8 +363,9 @@ class ChoiceToolTip(ToolTip):
         for sequence, script in (
             ("<Motion>", f"{self.motion_command} %y %X %Y"),
             ("<Map>", self.selection_command),
-            ("<KeyRelease>", self.selection_command),
+            *((f"<KeyRelease-{key}>", self.selection_command) for key in ("Up", "Down", "Home", "End", "Prior", "Next")),
             ("<F1>", f"{self.help_command}; break"),
+            ("<Escape>", f'if {{[{self.dismiss_command}] eq "break"}} {{break}}'),
             ("<<ListboxSelect>>", self.selection_command),
             ("<Leave>", self.hide_command),
             ("<Unmap>", self.hide_command),
@@ -321,7 +429,7 @@ class ChoiceToolTip(ToolTip):
     def dispose(self, event=None):
         self._disposed = True
         super().dispose(event)
-        for attr in ("motion_command", "selection_command", "help_command", "hide_command"):
+        for attr in ("motion_command", "selection_command", "help_command", "dismiss_command", "hide_command"):
             cmd = getattr(self, attr, None)
             if cmd:
                 try:
