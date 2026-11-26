@@ -12,7 +12,6 @@ from tkinter import filedialog, ttk
 from ezdic_gui.controls import localized_combobox, wrap_label_on_resize
 from ezdic_gui.tooltips import ChoiceToolTip, ToolTip
 
-from .config import CaptureError
 from .gui import BG
 from .live_curve import CURVE_MODES
 from .live_curve_gui import CURVE_HELP, CurveFrameWindow, LiveCurve, point_description
