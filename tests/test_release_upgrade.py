@@ -49,6 +49,23 @@ def test_source_frozen_entrypoint_smoke_is_pre_tk_and_side_effect_free(tmp_path)
     assert marker.parent == tmp_path
 
 
+def test_failed_smoke_returns_an_exit_code_and_records_the_import_error(tmp_path):
+    entry = tmp_path / "ezdic_frozen_entrypoint.py"
+    shutil.copy2(ROOT / entry.name, entry)
+    (tmp_path / "ezdic_benchmark.py").write_text(
+        "raise ImportError('missing smoke dependency')\n", encoding="utf-8",
+    )
+    marker = tmp_path / "failed.json"
+    result = subprocess.run(
+        [sys.executable, "-B", str(entry), "--smoke-test"], cwd=tmp_path,
+        env={**os.environ, "EZDIC_FROZEN_SMOKE_MARKER": str(marker)},
+        capture_output=True, timeout=20,
+    )
+    assert result.returncode == 1
+    assert json.loads(marker.read_bytes()) == {"smoke": "failed", "error": "missing smoke dependency"}
+    assert result.stderr.strip() == b"Smoke test failed: missing smoke dependency"
+
+
 def test_frozen_entrypoint_defers_gui_import_until_normal_launch():
     text = (ROOT / "ezdic_frozen_entrypoint.py").read_text(encoding="utf-8")
     assert '"--smoke-test"' in text

@@ -12,7 +12,9 @@ from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_data_files, collect_delvewheel_libs_directory, collect_dynamic_libs, copy_metadata,
+)
 
 
 # PyInstaller executes a spec in a generated namespace without ``__file__``;
@@ -132,6 +134,13 @@ common_datas = (
     + collect_data_files("matplotlib") + copy_metadata("scipy") + copy_metadata("cv2-enumerate-cameras")
     + industrial_datas
 )
+# These Windows wheels load DLLs relative to their own package. The same DLL
+# basename can occur in all three, so dependency scanning alone loses locations.
+common_binaries = list(industrial_binaries)
+for package in ("numpy", "pandas", "cv2_enumerate_cameras"):
+    common_datas, common_binaries = collect_delvewheel_libs_directory(
+        package, datas=common_datas, binaries=common_binaries,
+    )
 common_hiddenimports = [
     "ezdic_core",
     "ezdic_cli",
@@ -218,7 +227,7 @@ common_excludes += (["pypylon.pylondataprocessing"] if industrial else ["pypylon
 gui_analysis = Analysis(
     [source_file("ezdic_frozen_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=industrial_binaries,
+    binaries=common_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
     hookspath=industrial_hooks,
@@ -255,7 +264,7 @@ capture_gui_exe = EXE(
 cli_analysis = Analysis(
     [source_file("ezdic_cli_entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=industrial_binaries,
+    binaries=common_binaries,
     datas=common_datas,
     hiddenimports=common_hiddenimports,
     hookspath=industrial_hooks,

@@ -120,6 +120,25 @@ jobs:
         shell: pwsh
         run: python -B -m PyInstaller .\ezDIC.spec --clean --noconfirm
 
+      - name: Verify package-relative Windows DLLs
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import sysconfig
+
+          installed = Path(sysconfig.get_path("platlib"))
+          bundled = Path("dist/ezDIC_Windows_x64/_internal")
+          libraries = [
+              dll.relative_to(installed)
+              for name in ("numpy.libs", "pandas.libs", "cv2_enumerate_cameras.libs")
+              for dll in (installed / name).glob("*.dll")
+          ]
+          missing = [str(path) for path in libraries if not (bundled / path).is_file()]
+          assert not missing, f"Missing package-relative DLLs: {missing}"
+          '@ | python -I -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run real frozen GUI smoke and packaged CLI help
         shell: pwsh
         run: |
