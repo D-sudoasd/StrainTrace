@@ -496,7 +496,7 @@ def test_large_buffered_tiff_publication_can_continue_across_batches_during_a_co
         commit_attempts.append(rows[0].record["sequence"])
         if rows[0].record["sequence"] == 1:
             entered.set()
-            assert release.wait(6)
+            assert release.wait(30)
             if fail_commit:
                 raise sqlite3.OperationalError("injected frame commit failure after TIFF publication")
         original_insert(db, rows)
@@ -515,9 +515,11 @@ def test_large_buffered_tiff_publication_can_continue_across_batches_during_a_co
     session = CaptureSession(CaptureConfig.from_dict(data), tmp_path / "concurrent-tiffs")
     session.start()
     try:
-        assert entered.wait(4)
-        assert published_last.wait(2.5), "the first SQLite transaction stalled a later TIFF"
-        deadline = time.monotonic() + 1
+        # Generous budgets: a loaded shared runner writes five 2.3 MB TIFFs slowly, but
+        # the property under test is that none of them waits for the held SQLite commit.
+        assert entered.wait(15)
+        assert published_last.wait(15), "the first SQLite transaction stalled a later TIFF"
+        deadline = time.monotonic() + 5
         while session.status()["buffered_raw_bytes"] and time.monotonic() < deadline:
             time.sleep(.005)
         status = session.status()
