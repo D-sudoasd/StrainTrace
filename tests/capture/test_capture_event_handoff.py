@@ -9,7 +9,7 @@ from ezdic_cli import main as analysis_cli
 from straintrace_capture import CaptureConfig, CaptureError, ExperimentReader, SequenceSelection, export_sequence, verify_sequence
 from straintrace_capture.cameras.base import Device, Image
 from straintrace_capture.cli import main as capture_cli
-from straintrace_capture.handoff import analysis_snapshot
+from straintrace_capture.handoff import analysis_paths, analysis_snapshot
 from straintrace_capture.storage import ExperimentWriter
 
 
@@ -21,7 +21,8 @@ UTC = 1_795_570_200_123_456_789
 MONO = 790_059_000_000
 
 
-def event_experiment(root, *, with_reference=True, post_only=False, offset=None, reference_event=False):
+def event_experiment(root, *, with_reference=True, post_only=False, offset=None, reference_event=False,
+                     sensor_offsets=None, changed_shape=False):
     phases = [
         {"mode": "single", "role": "reference" if with_reference else "test"},
         {"mode": "event", "fps": 4, "pre_frames": 0 if post_only else 1, "post_frames": 2, "event_count": 2},
@@ -40,10 +41,11 @@ def event_experiment(root, *, with_reference=True, post_only=False, offset=None,
     writer = ExperimentWriter(root, config)
     try:
         writer.register_camera(Device(CAMERA, "sim", "Simulated", "Sim", "0", "fixture"), {})
-        if offset is not None:
-            for phase in (1, 2):
+        offsets = sensor_offsets if sensor_offsets is not None else ({1: 0, 2: offset} if offset is not None else {})
+        if offsets:
+            for phase, phase_offset in offsets.items():
                 writer.event("phase_started", {"phase": phase, "camera_features": {
-                    CAMERA: {"offset_x": {"value": offset if phase == 2 else 0}},
+                    CAMERA: {"offset_x": {"value": phase_offset}},
                 }})
         for number, (context, tick) in enumerate(((FIRST, 25), (SECOND, 35 if post_only else 45)), 1):
             writer.event("signal_received", {"phase": 2, "id": context, "source": "operator", "payload": {},
@@ -57,6 +59,8 @@ def event_experiment(root, *, with_reference=True, post_only=False, offset=None,
         for seq, (phase, role, event_id, position, dx) in enumerate(records, 1):
             pixels = cv2.warpAffine(texture, np.float32([[1, 0, dx], [0, 1, 0]]),
                                     (176, 144), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT)
+            if changed_shape and seq == len(records):
+                pixels = pixels[:, :-1].copy()
             image = Image(pixels, "Mono8", 8, "mono", UTC + seq * 10, MONO + seq * 10)
             frames.append(writer.prepare_frame(CAMERA, seq, phase, role, image, None, event_id, position, 0))
         writer.commit_frames(frames)
@@ -140,6 +144,24 @@ def test_event_baseline_fallback_and_geometry_guard(tmp_path):
     with pytest.raises(CaptureError) as changed:
         analysis_snapshot(source, event_context_id=SECOND)
     assert changed.value.code == "SEQUENCE_SENSOR_CHANGED"
+
+
+def test_regular_handoff_rejects_a_changed_recorded_sensor_window(tmp_path):
+    source = event_experiment(tmp_path / "offset", offset=8)
+    with pytest.raises(CaptureError) as changed:
+        analysis_paths(analysis_snapshot(source))
+    assert changed.value.code == "SEQUENCE_SENSOR_CHANGED"
+
+    # An absent reference readback must not mask a mismatch between two later phases.
+    source = event_experiment(tmp_path / "unknown-reference", sensor_offsets={2: 8, 3: 12})
+    with pytest.raises(CaptureError) as changed:
+        analysis_paths(analysis_snapshot(source))
+    assert changed.value.code == "SEQUENCE_SENSOR_CHANGED"
+
+    source = event_experiment(tmp_path / "shape", changed_shape=True)
+    with pytest.raises(CaptureError) as changed:
+        analysis_paths(analysis_snapshot(source))
+    assert changed.value.code == "FRAME_GEOMETRY_CHANGED"
 
 
 def test_reference_from_an_earlier_reference_event_keeps_its_own_provenance(tmp_path):

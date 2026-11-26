@@ -19,7 +19,7 @@ from .continuation_analysis import offline_from_live_reference, read_live_refere
 from .gui import ACCENT, BG, set_theme
 from .handoff import launch_analysis, launch_capture, launch_corrected_analysis
 from .image_inputs import (
-    analysis_part_options, frame_part_selector, read_analysis_image, select_frame_image, validate_analysis_part, verified_image_path,
+    analysis_part_options, frame_part_selector, read_analysis_image, select_frame_image, validate_analysis_part,
 )
 from .live import LiveAnalysis, read_linked_reference_image
 from .live_curve import CURVE_MODES, CurvePoint, available_curve_modes
@@ -575,8 +575,8 @@ class LiveWorkbench:
                     return
                 self._set_part_options(frames[0])
                 row = select_frame_image(frames[0], self.image_part)
-                path = verified_image_path(reader, row)
-            pixels = read_analysis_image(path, row, debayer=row["color_model"] == "bayer")
+                path = reader.image_path(row)
+            pixels = read_analysis_image(path, row, debayer=row["color_model"] == "bayer", verify=True)
             self._update_image(row, pixels)
             self._display_key = row["frame_id"]
             self.view.set_title(f"参考帧 {row['sequence']}" + (f" · {self.image_part}" if self.image_part else ""))

@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -261,6 +262,7 @@ def test_killed_copy_releases_destination_lease_and_can_resume(experiment, tmp_p
     source, _, _ = experiment
     target, ready = tmp_path / "resume-after-exit", tmp_path / "copy-paused"
     program = """
+import os
 import sys
 import time
 from pathlib import Path
@@ -268,21 +270,31 @@ from straintrace_capture import copy_experiment
 
 def pause(update):
     if update.files_done >= 2:
-        Path(sys.argv[3]).touch()
+        Path(sys.argv[3]).write_text(str(os.getpid()), encoding="ascii")
         time.sleep(30)
 
 copy_experiment(sys.argv[1], sys.argv[2], progress=pause)
 """
     process = subprocess.Popen([sys.executable, "-B", "-c", program, str(source), str(target), str(ready)],
                                stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    writer_pid = None
     try:
         deadline = time.monotonic() + 10
-        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+        while writer_pid is None and process.poll() is None and time.monotonic() < deadline:
+            try:
+                writer_pid = int(ready.read_text(encoding="ascii"))
+            except (OSError, ValueError):
+                pass
             time.sleep(.025)
-        assert process.poll() is None and ready.exists() and not target.exists()
+        assert process.poll() is None and writer_pid is not None and not target.exists()
     finally:
         if process.poll() is None:
-            process.kill()
+            # On Windows a venv executable can be a launcher whose child is
+            # the interpreter holding the lease. Terminate the actual writer.
+            if writer_pid is not None and writer_pid != process.pid:
+                os.kill(writer_pid, signal.SIGTERM)
+            else:
+                process.kill()
         process.wait(timeout=5)
         process.stderr.close()
     assert inspect_transfer(source, target)["can_resume"]

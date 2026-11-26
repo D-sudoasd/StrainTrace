@@ -172,6 +172,15 @@ def test_large_result_pages_keep_row_payloads_in_scratch_storage(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_report_can_append_after_paging_without_overwriting_rows():
+    with closing(ArchiveQualityReport(3, 3)) as report:
+        for sequence in (1, 2):
+            report.append({"sequence": sequence, "metrics": {}, "fallback": None, "flags": []})
+        assert report.page(0, 1)[0]["sequence"] == 1
+        report.append({"sequence": 3, "metrics": {}, "fallback": None, "flags": []})
+        assert [row["sequence"] for row in report.page(0, 3)] == [1, 2, 3]
+
+
 def test_whole_experiment_reuses_one_result_store_and_preserves_per_scope_coverage(archive, tmp_path):
     root, identity = archive
     with closing(scan_archive_quality_batch(root, identity, scratch=tmp_path)) as sampled:

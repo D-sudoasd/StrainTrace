@@ -14,7 +14,7 @@ from straintrace_capture.continuation_analysis import (
     continuation_snapshot, offline_from_live_reference, prepare_continuation_binding, prepare_live_reference,
     preview_continuation, read_continuation_binding, read_live_reference,
 )
-from straintrace_capture.handoff import analysis_paths, analysis_settings, write_snapshot
+from straintrace_capture.handoff import analysis_paths, analysis_settings, derive_analysis_inputs, write_snapshot
 from straintrace_capture.image_inputs import decode_samples
 from straintrace_capture.live import LiveAnalysis
 from straintrace_capture.live_results import LiveResultLog, export_live_csv
@@ -103,8 +103,9 @@ def test_borrowed_reference_is_first_in_headless_dic_and_reopens_after_moving_tr
     assert manifest["inputs"][0]["sha256"] == snapshot["frames"][0]["sha256"]
     write_snapshot({**settings, "start_frame_1based": 2, "reference_frame_1based": 2,
                     "field_roi_reference_frame_1based": 2}, tmp_path / "wrong-zero.json")
-    wrong = subprocess.run([*run[:-1], str(tmp_path / "wrong-zero.json")], capture_output=True, text=True, timeout=45)
-    assert wrong.returncode and "CAPTURE_REFERENCE_RANGE" in wrong.stdout + wrong.stderr
+    wrong = subprocess.run([*run[:-1], str(tmp_path / "wrong-zero.json")], capture_output=True, timeout=45)
+    assert wrong.returncode != 0
+    assert json.loads(wrong.stderr)["error_code"] == "CAPTURE_REFERENCE_RANGE"
     assert _files(home) == original
 
 
@@ -148,6 +149,98 @@ def test_color_transform_uses_analysis_order_when_ledger_sequences_repeat(tmp_pa
     assert [p.name for p in paths] == ["000000000001.tiff", "000000000002.tiff", "000000000003.tiff"]
     for file, expected in zip(paths, samples, strict=True):
         np.testing.assert_array_equal(decode_samples(file), expected[..., 0])
+
+
+def test_event_continuation_binding_preserves_selected_event_on_reopen(tmp_path):
+    parent, child = tmp_path / "parent", tmp_path / "child"
+    reference, first, second = _images()
+    identity = _record(parent, (reference,), "reference")
+    config = CaptureConfig.from_dict({
+        "config_version": 1, "name": "Events", "cameras": [{"id": "sim:0"}],
+        "phases": [{"mode": "manual", "frame_count": 1},
+                   {"mode": "event", "fps": 4, "post_frames": 2, "event_count": 2}],
+        "metadata": {"continuation_of": identity},
+    })
+    writer = ExperimentWriter(child, config)
+    try:
+        features = {name: {"value": value} for name, value in
+                    (("width", 176), ("height", 144), ("offset_x", 0), ("offset_y", 0))}
+        writer.register_camera(Device("sim:0", "sim", "Fixture", "Speckle camera", "same", "fixture"), features)
+        for number, signal in enumerate(("event-one", "event-two"), 1):
+            writer.event("signal_received", {"phase": 2, "id": signal, "source": "operator", "payload": {},
+                         "received_utc_ns": 1_700_000_000_000_000_000 + number,
+                         "received_monotonic_ns": 100 + number, "event_number": number}, event_id=signal)
+        for sequence, (phase, signal, pixels) in enumerate(((1, None, first), (2, "event-one", first),
+                                                            (2, "event-two", first), (2, "event-two", second)), 1):
+            image = Image(pixels, "Mono8", 8, "mono", 1_700_000_000_000_000_100 + sequence, 200 + sequence)
+            writer.commit_frames([writer.prepare_frame("sim:0", sequence, phase, "test", image, None,
+                                                       signal, "post" if signal else None, 0)])
+        writer.set_state("completed")
+    finally:
+        writer.close()
+
+    selected = continuation_snapshot(child, parent, "sim:0", 1, event_context_id="event-two")
+    assert [row["sequence"] for row in selected["frames"]] == [1, 3, 4]
+    binding = prepare_continuation_binding(selected)
+    reopened, _ = read_continuation_binding(binding)
+    assert reopened["event"] == selected["event"]
+    assert [row["frame_id"] for row in reopened["frames"]] == [row["frame_id"] for row in selected["frames"]]
+    source = analysis_settings(reopened, {})["capture_source"]
+    assert source["event"]["signal_id"] == "event-two"
+    assert [row.get("event_position") for row in source["frames"]] == [None, "post", "post"]
+
+    encoded = binding.read_text(encoding="utf-8")
+    for key in ("signal_time", "event_position"):
+        data = json.loads(encoded)
+        if key == "signal_time":
+            data["event"]["signal_utc_ns"] += 1
+        else:
+            data["frames"][1]["event_position"] = "pre"
+        binding.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(CaptureError) as changed:
+            read_continuation_binding(binding)
+        assert changed.value.code == "CAPTURE_BINDING_INVALID"
+
+
+@pytest.mark.parametrize(("color", "pixel_format"), [("rgba", "RGBa8"), ("bayer", "BayerRG8")])
+def test_derivation_checks_the_same_encoded_bytes_it_decodes(tmp_path, monkeypatch, color, pixel_format):
+    from straintrace_capture import image_inputs
+
+    images = tmp_path / "capture" / "images"
+    images.mkdir(parents=True)
+    original, replacement = images / "original.tiff", images / "replacement.tiff"
+    shape = (16, 16, 4) if color == "rgba" else (16, 16)
+    assert cv2.imwrite(str(original), np.full(shape, 40, dtype=np.uint8))
+    assert cv2.imwrite(str(replacement), np.full(shape, 140, dtype=np.uint8))
+    snapshot = {"experiment_root": str(images.parent), "frames": [{
+        "frame_id": "fixture/sim:0/1", "sequence": 1, "color_model": color, "pixel_format": pixel_format,
+        "absolute_path": str(original), "sha256": sha256_file(original),
+    }]}
+    decode = image_inputs.decode_samples
+    switched = False
+
+    def change_before_decode(path, **options):
+        nonlocal switched
+        if path == original and not switched:
+            switched = True
+            original.write_bytes(replacement.read_bytes())
+        return decode(path, **options)
+
+    monkeypatch.setattr(image_inputs, "decode_samples", change_before_decode)
+    with pytest.raises(CaptureError) as changed:
+        derive_analysis_inputs(snapshot, tmp_path / "derived", debayer=True, drop_alpha=True)
+    assert switched and changed.value.code == "CAPTURE_IMAGE_CHANGED"
+
+
+def test_write_snapshot_does_not_leave_partial_json_when_serialization_fails(tmp_path):
+    output = tmp_path / "snapshot.json"
+    with pytest.raises(ValueError):
+        write_snapshot({"value": float("nan")}, output)
+    assert not output.exists() and not list(tmp_path.glob(".capture-report-*.part"))
+    assert write_snapshot({"value": 3}, output) == output
+    with pytest.raises(FileExistsError):
+        write_snapshot({"value": 4}, output)
+    assert json.loads(output.read_text(encoding="utf-8")) == {"value": 3}
 
 
 def _live_writer(root, parent_id):

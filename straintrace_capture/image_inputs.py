@@ -74,16 +74,21 @@ def verified_image_path(reader, frame: dict) -> Path:
     raise CaptureError("CAPTURE_IMAGE_CHANGED", frame["path"])
 
 
+def _verified_bytes(path: Path, digest: str, encoded: bytes | None = None) -> bytes:
+    if encoded is None:
+        try:
+            encoded = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise CaptureError("FRAME_UNAVAILABLE", str(path)) from exc
+    if sha256(encoded).hexdigest() != digest:
+        raise CaptureError("CAPTURE_IMAGE_CHANGED", str(path))
+    return encoded
+
+
 def decode_samples(path: Path, *, color_model: str | None = None, expected_sha256: str | None = None,
                    encoded: bytes | None = None) -> np.ndarray:
     if expected_sha256 is not None:
-        if encoded is None:
-            try:
-                encoded = path.read_bytes()
-            except FileNotFoundError as exc:
-                raise CaptureError("FRAME_UNAVAILABLE", str(path)) from exc
-        if sha256(encoded).hexdigest() != expected_sha256:
-            raise CaptureError("CAPTURE_IMAGE_CHANGED", str(path))
+        encoded = _verified_bytes(path, expected_sha256, encoded)
     if color_model in ("rgba", "bgra"):
         from PIL import Image as PillowImage
 
@@ -98,11 +103,16 @@ def decode_samples(path: Path, *, color_model: str | None = None, expected_sha25
     return data
 
 
+def _recorded_digest(path: Path, row: dict) -> str:
+    digest = row.get("sha256")
+    if not isinstance(digest, str):
+        raise CaptureError("INVALID_LEDGER", f"no image digest recorded for {path}")
+    return digest
+
+
 def recorded_image(path: Path, row: dict, *, verify=False) -> Image:
     color = row["color_model"]
-    digest = row.get("sha256") if verify else None
-    if verify and not isinstance(digest, str):
-        raise CaptureError("INVALID_LEDGER", f"no image digest recorded for {path}")
+    digest = _recorded_digest(path, row) if verify else None
     pixels = decode_samples(path, color_model=color, expected_sha256=digest)
     color = {"rgb": "bgr", "rgba": "bgra"}.get(color, color)
     stamps = row["timestamps"]
@@ -111,23 +121,25 @@ def recorded_image(path: Path, row: dict, *, verify=False) -> Image:
                  metadata=row.get("backend_metadata") or {})
 
 
-def bayer_luminance(path: Path, pixel_format: str) -> np.ndarray:
+def bayer_luminance(path: Path, pixel_format: str, *, expected_sha256: str | None = None) -> np.ndarray:
     match = re.fullmatch(r"Bayer(RG|GR|BG|GB)(8|10|12|14|16)(?:p|[Pp]acked)?", pixel_format)
     if match is None:
         raise CaptureError("BAYER_FORMAT_UNKNOWN", f"no mosaic pattern for {pixel_format!r}")
     pattern = {"RG": "RGGB", "GR": "GRBG", "BG": "BGGR", "GB": "GBRG"}[match[1]]
     code = getattr(cv2, f"COLOR_Bayer{pattern}2GRAY")
-    return cv2.cvtColor(decode_samples(path), code)
+    return cv2.cvtColor(decode_samples(path, expected_sha256=expected_sha256), code)
 
 
-def read_analysis_image(path: Path, frame: dict, *, debayer: bool = False) -> np.ndarray:
+def read_analysis_image(path: Path, frame: dict, *, debayer: bool = False, verify: bool = False) -> np.ndarray:
     color = frame["color_model"]
+    digest = _recorded_digest(path, frame) if verify else None
     if color == "bayer":
         if not debayer:
             raise CaptureError("BAYER_DERIVATION_REQUIRED", "enable Bayer luminance conversion or use a monochrome capture format")
-        return bayer_luminance(path, frame["pixel_format"])
+        return bayer_luminance(path, frame["pixel_format"], expected_sha256=digest)
     if color in ("rgba", "bgra"):
-        return cv2.cvtColor(decode_samples(path, color_model=color), cv2.COLOR_BGRA2GRAY)
+        return cv2.cvtColor(decode_samples(path, color_model=color, expected_sha256=digest), cv2.COLOR_BGRA2GRAY)
     import ezdic_core as core
 
-    return core.read_gray_image(path)
+    encoded = _verified_bytes(path, digest) if verify else None
+    return core.read_gray_image(path, encoded=encoded)
