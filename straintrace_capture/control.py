@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -13,10 +14,22 @@ from .storage import ExperimentReader, TERMINAL_STATES, json_text
 
 
 def _publish(path: Path, data: dict) -> None:
-    partial = path.with_suffix(".tmp")
+    # Keep each published file's temporary name distinct from every other command file and
+    # never matched by the *.request scan, so a half-written file is never executed.
+    partial = path.with_name(path.name + ".part")
+    partial.unlink(missing_ok=True)
     with partial.open("x", encoding="utf-8") as stream:
         stream.write(json_text(data))
-    partial.rename(path)
+    for attempt in range(10):
+        try:
+            os.replace(partial, path)
+            return
+        except PermissionError:
+            # Windows can briefly deny the rename while a scanner or reader holds the file.
+            if attempt == 9:
+                partial.unlink(missing_ok=True)
+                raise
+            time.sleep(0.02)
 
 
 def _clear_status_poll(response: Path) -> None:

@@ -9,6 +9,7 @@ from .storage import TERMINAL_STATES, ExperimentReader
 
 
 WAIT_POLL_S = .2
+MIN_STATUS_POLL_S = .25
 WAIT_MAX_AGE_MS = 750
 _UNAVAILABLE_WITHOUT_CONFIGURATION = frozenset({
     "driver_unavailable", "line_catalog_unavailable", "wait_output_not_configured", "output_polarity_unconfirmed",
@@ -68,9 +69,12 @@ def wait_for_hardware(root, phase: int, timeout: float) -> dict:
     while (remaining := deadline - time.perf_counter()) > 0:
         sent = time.perf_counter()
         try:
-            reply = send_command(root, "status", timeout=remaining)
+            # A slow host can need longer than the few milliseconds left for one status round trip.
+            reply = send_command(root, "status", timeout=max(remaining, MIN_STATUS_POLL_S))
         except CaptureError as exc:
-            if exc.code == "CONTROL_TIMEOUT" and latest is not None and time.perf_counter() >= deadline:
+            if exc.code == "CONTROL_TIMEOUT" and time.perf_counter() >= deadline - MIN_STATUS_POLL_S:
+                # The caller's own deadline expired while polling: report the normal
+                # wait timeout (with any evidence seen) instead of leaking a transport error.
                 break
             raise
         round_trip_ms = (time.perf_counter() - sent) * 1000
