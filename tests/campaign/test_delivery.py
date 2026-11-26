@@ -388,6 +388,24 @@ def test_keystone_import_rejects_wrong_checksum_and_duplicate_frames(tmp_path: P
     assert not (project_dir / "imports/keystone").exists()
 
 
+@pytest.mark.parametrize("claim", [None, "", {}, {"sha256": ""}])
+def test_keystone_import_rejects_missing_checksum_claim(tmp_path: Path, claim: object) -> None:
+    source = _write_keystone_source(tmp_path)
+    manifest_path = source / "CHECKSUMS.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["samples/5_Grip_5mm/condition/coupon-dic/frames.jsonl"] = claim
+    _write_json(manifest_path, manifest)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    report = delivery._verify_keystone_source(source)
+    assert not report["valid"]
+    assert report["claims_rehashed"] is False
+    with pytest.raises(ValueError, match="checksum"):
+        delivery.import_keystone(project_dir, source)
+    assert not (project_dir / "imports/keystone").exists()
+
+
 def test_zip_validation_rejects_traversal_backslashes_and_symlinks(tmp_path: Path) -> None:
     traversal_zip = tmp_path / "traversal.zip"
     with zipfile.ZipFile(traversal_zip, "w") as zf:

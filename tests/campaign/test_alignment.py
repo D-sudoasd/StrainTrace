@@ -470,3 +470,80 @@ def test_alignment_imported_preserves_metadata_and_distinct_stage_dirs(tmp_path:
     assert row["quality_status"] == "ACCEPTED_GAUGES_PRESENT"
     assert row["reasons"] == ["minor_note"]
     assert row["custom_note"] == "keep-me"
+
+
+def test_dense_exact_timestamp_uses_the_matching_force_and_dic_sample(tmp_path: Path) -> None:
+    second_time = T0 + 1e-6
+    acquisition = _acquisition(
+        tmp_path,
+        [_dic_row(1, T0, (0.01, 0.02, 0.03)),
+         _dic_row(2, second_time, (0.04, 0.05, 0.06))],
+        [{"frame": 10, "native_cbf_frame": 10, "scan_id": None,
+          "scan_id_is_global_fio": False, "timestamp_unix_s": second_time}],
+    )
+    load_path = _load(tmp_path / "force.csv", [
+        {"timestamp_unix_s": T0, "force_N": 100},
+        {"timestamp_unix_s": second_time, "force_N": 200},
+    ])
+
+    row = _read_aligned(tmp_path, alignment.align(acquisition, tmp_path, load_path))[0]
+
+    assert row["force_interpolation_status"] == "EXACT_TIME_SAMPLE"
+    assert row["force_support_indices"] == [1]
+    assert row["force_N"] == 200
+    assert row["dic_support_status"] == "DIC_EXACT_TIME_SAMPLE"
+    assert row["dic_source_frame"] == 2
+    assert row["engineering_strain"] == pytest.approx(0.05)
+
+
+def test_imported_native_counter_does_not_join_conflicting_string_scan_ids(tmp_path: Path) -> None:
+    accepted = [{
+        "frame": 72, "native_cbf_frame": 436, "scan_id": "scan-A",
+        "scan_id_is_global_fio": True, "force_N": 600.0,
+        "engineering_strain": 0.025, "valid_gauge_count": 3,
+    }]
+    axis = [{
+        "frame": 72, "native_cbf_frame": 436, "scan_id": "scan-B",
+        "scan_id_is_global_fio": True, "force_N": 999.0,
+    }]
+    acquisition = _acquisition(tmp_path, accepted, axis, status="IMPORTED_ACCEPTED")
+    load_path = _load(tmp_path / "force.csv", [{"timestamp_unix_s": T0, "force_N": 700}])
+
+    row = _read_aligned(tmp_path, alignment.align(acquisition, tmp_path, load_path))[0]
+
+    assert row["dic_support_status"] == "SOURCE_SCAN_IDENTITY_CONFLICT"
+    assert row["force_N"] is None
+    assert row["engineering_strain"] is None
+
+    acquisition["measurement_frames"][0]["scan_id"] = "scan-A"
+    matched = _read_aligned(tmp_path, alignment.align(acquisition, tmp_path, load_path))[0]
+    assert matched["dic_support_status"] == "IMPORTED_ACCEPTED_EXACT_IDENTITY"
+    assert matched["force_N"] == 600
+    assert matched["engineering_strain"] == 0.025
+
+
+@pytest.mark.parametrize(("start_offset", "end_offset"), [(-1e-6, 1e-6), (1.0, 1.0 + 1e-6)])
+def test_window_mean_rejects_any_exposure_outside_load_support(
+    tmp_path: Path, start_offset: float, end_offset: float,
+) -> None:
+    from straintrace_campaign import workflow
+
+    acquisition = _acquisition(tmp_path, [], [{
+        "frame": 1, "native_cbf_frame": 1, "scan_id": None,
+        "scan_id_is_global_fio": False, "timestamp_unix_s": T0 + 0.5,
+        "exposure_start_unix_s": T0 + start_offset,
+        "exposure_end_unix_s": T0 + end_offset,
+    }])
+    load_path = _load(tmp_path / "force.csv", [
+        {"timestamp_unix_s": T0, "force_N": 100},
+        {"timestamp_unix_s": T0 + 1, "force_N": 200},
+    ])
+
+    row = _read_aligned(tmp_path, alignment.align(acquisition, tmp_path, load_path, mode="window_mean"))[0]
+    preview = workflow.preview_alignment(acquisition, load_path=load_path, mode="window_mean")
+
+    assert row["force_interpolation_status"] == "OUTSIDE_TIME_RANGE"
+    assert row["force_N"] is None
+    assert row["stress_MPa"] is None
+    assert preview["rows"][0]["status"] == "OUTSIDE_TIME_RANGE"
+    assert preview["rows"][0]["alignable"] is False

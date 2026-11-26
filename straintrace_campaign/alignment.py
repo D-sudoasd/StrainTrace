@@ -125,6 +125,24 @@ def _gauge_values(row: Mapping[str, Any]) -> dict[str, float | None]:
     return found
 
 
+def _scan_identity(value: Any) -> int | str | None:
+    """Normalize numeric IDs without discarding valid nonnumeric scan IDs."""
+    if type(value) is int:
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if re.fullmatch(r"[+-]?\d+", text):
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    numeric = _integer(text)
+    if numeric is not None and abs(numeric) <= 2**53:
+        return numeric
+    return text
+
+
 def _aggregate_strain(row: Mapping[str, Any]) -> tuple[float | None, float | None]:
     engineering = _number(row.get("engineering_strain"))
     if engineering is None:
@@ -254,8 +272,8 @@ def _dic_rows_for_axis(
             source_cbf = _integer(source.get("native_cbf_frame"))
             axis_global = _bool(axis.get("scan_id_is_global_fio"))
             source_global = _bool(source.get("scan_id_is_global_fio"))
-            axis_scan = _integer(axis.get("scan_id")) if axis_global else None
-            source_scan = _integer(source.get("scan_id")) if source_global else None
+            axis_scan = _scan_identity(axis.get("scan_id")) if axis_global else None
+            source_scan = _scan_identity(source.get("scan_id")) if source_global else None
             if axis_cbf is not None and source_cbf is not None and axis_cbf != source_cbf:
                 direct_mapping.append(None)
                 direct_status.append("SOURCE_FRAME_IDENTITY_CONFLICT")
@@ -617,7 +635,10 @@ def align(
         frame_no = _integer(axis.get("frame"))
         if frame_no is None:
             raise CampaignError("ALIGNMENT_FRAME_ID_MISSING", f"axis row {index} has no integer frame identity")
-        accepted_source = dic.get("source_row") if result_imported and isinstance(dic.get("source_row"), Mapping) else axis
+        if result_imported:
+            accepted_source = dic.get("source_row") if isinstance(dic.get("source_row"), Mapping) else {}
+        else:
+            accepted_source = axis
         source_force = _number(accepted_source.get("force_N"))
         source_stress = _number(accepted_source.get("stress_MPa"))
         source_area = _number(accepted_source.get("area_mm2"))

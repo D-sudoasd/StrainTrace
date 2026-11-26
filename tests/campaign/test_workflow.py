@@ -226,6 +226,64 @@ def test_scan_is_idempotent_and_only_invalidates_roi_when_image_identity_changes
     assert after_image_change["metadata"]["stale_roi_proposals"]
 
 
+def test_imported_acquisition_does_not_replace_bound_images_from_another_root(tmp_path: Path, monkeypatch):
+    root_a = tmp_path / "source-a"
+    root_b = tmp_path / "source-b"
+    image_a = root_a / "batch_01" / "dic_000001.tif"
+    image_b = root_b / "batch_01" / "dic_000001.tif"
+    for image, content in ((image_a, b"synthetic-a"), (image_b, b"synthetic-b")):
+        image.parent.mkdir(parents=True)
+        image.write_bytes(content)
+    project = tmp_path / "project"
+    workflow.init_project(project, "synthetic", {"a": root_a, "b": root_b})
+    rows = project / "imports" / "accepted.jsonl"
+    write_jsonl_atomic(rows, [{"frame": 1, "native_cbf_frame": 10, "stress_MPa": 4.0}])
+    rel = rows.relative_to(project).as_posix()
+    project_data = workflow.load_project(project)
+    project_data["acquisitions"].append({
+        "acquisition_id": "imported-one", "name": "batch_01", "relative_path": "batch_01",
+        "source_kind": "imported_keystone", "physical_specimen_id": None,
+        "dimensions": {"area_mm2": None, "width_mm": None, "thickness_mm": None, "status": "unknown", "source": None},
+        "analysis_mode": "extensometer", "image_frames": [], "measurement_frames": [],
+        "roi": None, "approval": None, "analysis_config": {},
+        "result": {"status": "IMPORTED_ACCEPTED", "fingerprint": "a" * 64, "rows_path": rel,
+                   "artifacts": [rel], "checksums": {rel: sha256_file(rows)}, "provenance": {}, "summary": {}},
+        "alignment": None, "metadata": {"keystone_import": {"source_version_id": "v1"}},
+    })
+    workflow._write_project(project, project_data)
+    axis_a = [{"frame": 1, "native_cbf_frame": 10, "scan_id": 1, "scan_id_is_global_fio": True}]
+    axis_b = [{"frame": 1, "native_cbf_frame": 20, "scan_id": 2, "scan_id_is_global_fio": True}]
+
+    def discover(root, **kwargs):
+        if Path(root).resolve() == root_a.resolve():
+            return [_discovered(image_a, measurement_frames=axis_a)]
+        discovered = _discovered(image_b, measurement_frames=axis_b)
+        discovered["metadata"]["discovery_issues"] = [{"code": "SYNTHETIC_SOURCE_WARNING"}]
+        return [discovered]
+
+    adapter = SimpleNamespace(discover=discover)
+    roi_module = _fake_roi_module()
+    monkeypatch.setattr(workflow, "_module", lambda name: {"adapters": adapter, "roi": roi_module}[name])
+    workflow.scan(project, "a")
+    workflow.propose_rois(project, "imported-one")
+    workflow.approve_rois(project, "imported-one", "reviewer", True)
+    bound = workflow.load_project(project)["acquisitions"][0]
+    assert bound["image_frames"][0]["path"] == str(image_a.resolve())
+    assert bound["measurement_frames"] == axis_a
+
+    workflow.scan(project, "b")
+    after = workflow.load_project(project)["acquisitions"][0]
+    for field in ("image_frames", "measurement_frames", "roi", "approval", "result"):
+        assert after[field] == bound[field]
+    assert after["metadata"]["discovery_root_alias"] == "a"
+    candidates = after["metadata"]["discovery_source_candidates"]
+    assert len(candidates) == 1 and candidates[0]["root_alias"] == "b"
+    assert candidates[0]["image_frames"][0]["path"] == str(image_b.resolve())
+    assert candidates[0]["measurement_frames"] == axis_b
+    assert candidates[0]["discovery_metadata"]["discovery_issues"] == [{"code": "SYNTHETIC_SOURCE_WARNING"}]
+    assert workflow.scan(project, "b") == []
+
+
 def test_run_requires_review_reuses_valid_stage_and_recovers_corrupt_stage(tmp_path: Path, monkeypatch):
     project, source, image = _new_project(tmp_path)
     adapter = SimpleNamespace(discover=lambda *args, **kwargs: [_discovered(image)])
@@ -254,6 +312,119 @@ def test_run_requires_review_reuses_valid_stage_and_recovers_corrupt_stage(tmp_p
     third = workflow.run(project, acq["acquisition_id"])
     assert third["fingerprint"] == first["fingerprint"]
     assert len(calls) == 2
+
+
+def test_relative_mask_change_invalidates_tracking_and_export(tmp_path: Path, monkeypatch):
+    from straintrace_campaign import numerics as real_numerics
+
+    project, _source, image = _new_project(tmp_path)
+    mask = project / "mask.png"
+    mask.write_bytes(b"synthetic-mask-v1")
+    other_cwd = tmp_path / "other-cwd"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    adapter = SimpleNamespace(discover=lambda *args, **kwargs: [_discovered(image)])
+    roi_module = _fake_roi_module()
+    calls: list[str] = []
+    numerical_engine = _fake_numerics(project, calls)
+    numerical_engine.fingerprint = real_numerics.fingerprint
+    delivery = SimpleNamespace(export_project=lambda *args, **kwargs: {"published": False})
+    monkeypatch.setattr(workflow, "_module", lambda name: {
+        "adapters": adapter, "roi": roi_module, "numerics": numerical_engine, "delivery": delivery,
+    }[name])
+
+    acquisition_id = workflow.scan(project, "raw")[0]["acquisition_id"]
+    workflow.update_acquisition(project, acquisition_id, {
+        "analysis_mode": "fullfield", "analysis_config": {"mask": {"path": "mask.png"}},
+    })
+    workflow.propose_rois(project, acquisition_id)
+    workflow.approve_rois(project, acquisition_id, "reviewer", True)
+    first = workflow.run(project, acquisition_id)
+    first_rows = (project / first["rows_path"]).read_bytes()
+    workflow.export(project, tmp_path / "before-change")
+
+    mask.write_bytes(b"synthetic-mask-v2")
+    with pytest.raises(CampaignError) as exc:
+        workflow.export(project, tmp_path / "after-change")
+    assert exc.value.code == "EXPORT_STALE_RESULT"
+    second = workflow.run(project, acquisition_id)
+    assert len(calls) == 2
+    assert second["fingerprint"] != first["fingerprint"]
+    assert (project / first["rows_path"]).read_bytes() == first_rows
+    assert workflow.run(project, acquisition_id)["fingerprint"] == second["fingerprint"]
+    assert len(calls) == 2
+
+
+def test_alignment_rejects_corrupted_tracking_result_even_if_cached(tmp_path: Path, monkeypatch):
+    from straintrace_campaign import alignment as real_alignment
+
+    project, source, image = _new_project(tmp_path)
+    adapter = SimpleNamespace(discover=lambda *args, **kwargs: [_discovered(image)])
+    roi_module = _fake_roi_module()
+    numerical_engine = _fake_numerics(project, [])
+    monkeypatch.setattr(workflow, "_module", lambda name: {
+        "adapters": adapter, "roi": roi_module, "numerics": numerical_engine, "alignment": real_alignment,
+    }[name])
+    acquisition_id = workflow.scan(project, "raw")[0]["acquisition_id"]
+    workflow.propose_rois(project, acquisition_id)
+    workflow.approve_rois(project, acquisition_id, "reviewer", True)
+    result = workflow.run(project, acquisition_id)
+    load = source / "force.csv"
+    load.write_text("timestamp_unix_s,force_N\n1770000000,20\n", encoding="utf-8")
+    workflow.align(project, acquisition_id, load)
+
+    source_bytes = (project / result["rows_path"]).read_bytes()
+    (project / result["rows_path"]).write_text('{"frame":1,"engineering_strain":9.0}\n', encoding="utf-8")
+    with pytest.raises(CampaignError) as exc:
+        workflow.align(project, acquisition_id, load)
+    assert exc.value.code == "ALIGNMENT_STALE_RESULT"
+
+    (project / result["rows_path"]).write_bytes(source_bytes)
+    load.write_text("timestamp_unix_s,force_N\n1770000000,21\n", encoding="utf-8")
+    align = real_alignment.align
+
+    def change_source_during_alignment(*args, **kwargs):
+        record = align(*args, **kwargs)
+        (project / result["rows_path"]).write_text('{"frame":1,"engineering_strain":8.0}\n', encoding="utf-8")
+        return record
+
+    monkeypatch.setattr(real_alignment, "align", change_source_during_alignment)
+    with pytest.raises(CampaignError) as exc:
+        workflow.align(project, acquisition_id, load)
+    assert exc.value.code == "ALIGNMENT_STALE_RESULT"
+
+
+def test_incomplete_numerical_stage_does_not_replace_completed_result(tmp_path: Path, monkeypatch):
+    from straintrace_campaign.storage import stage_record_reusable
+
+    project, _source, image = _new_project(tmp_path)
+    adapter = SimpleNamespace(discover=lambda *args, **kwargs: [_discovered(image)])
+    roi_module = _fake_roi_module()
+    calls: list[str] = []
+    numerical_engine = _fake_numerics(project, calls)
+    monkeypatch.setattr(workflow, "_module", lambda name: {
+        "adapters": adapter, "roi": roi_module, "numerics": numerical_engine,
+    }[name])
+    acquisition_id = workflow.scan(project, "raw")[0]["acquisition_id"]
+    workflow.propose_rois(project, acquisition_id)
+    workflow.approve_rois(project, acquisition_id, "reviewer", True)
+    complete = workflow.run(project, acquisition_id)
+    incomplete = {**complete, "status": "FAILED"}
+    assert not stage_record_reusable(project, incomplete, incomplete["fingerprint"])
+
+    workflow.update_acquisition(project, acquisition_id, {"analysis_config": {"synthetic_retry": True}})
+    analyze = numerical_engine.analyze
+
+    def failed_analysis(*args, **kwargs):
+        return {**analyze(*args, **kwargs), "status": "FAILED"}
+
+    numerical_engine.analyze = failed_analysis
+    with pytest.raises(CampaignError) as exc:
+        workflow.run(project, acquisition_id)
+    assert exc.value.code == "NUMERICS_STAGE_INCOMPLETE"
+    current = workflow.load_project(project)["acquisitions"][0]
+    assert current["result"] == complete
+    assert current["metadata"]["workflow_result_stale"] is True
 
 
 def test_roi_retry_archives_baseline_and_writes_explicit_frame_join_comparison(tmp_path: Path, monkeypatch):
@@ -440,6 +611,12 @@ def test_cancel_event_and_immutable_imported_results(tmp_path: Path, monkeypatch
     second = workflow.import_keystone(project, source / "keystone")
     assert second[0]["acquisition_id"] == "keystone-id"
     assert len(delivered) == 1
+    imported_path.write_text('{"frame":1,"stress_MPa":999}\n', encoding="utf-8")
+    with pytest.raises(CampaignError) as exc:
+        workflow.import_keystone(project, source / "keystone")
+    assert exc.value.code == "IMPORT_EXISTING_RESULT_INVALID"
+    assert len(delivered) == 1
+    imported_path.write_bytes(original)
     workflow.update_acquisition(project, "keystone-id", {"analysis_config": {"search_radius_px": 5}})
     after_update = next(a for a in workflow.load_project(project)["acquisitions"] if a["acquisition_id"] == "keystone-id")
     assert after_update["result"]["status"] == "IMPORTED_ACCEPTED"
@@ -695,6 +872,14 @@ def test_workflow_align_normalizes_options_and_defaults_load_time_column(tmp_pat
     workflow.align(project, acq["acquisition_id"], load, measurement_time_field="time_s", load_time_column="time_s")
     assert len(seen_kwargs) == 1
     assert seen_kwargs[0]["load_time_column"] == "time_s"
+
+    previous = workflow.load_project(project)["acquisitions"][0]["alignment"]
+    load.write_text("time_s,clock_id,force_N\n0,c1,11\n", encoding="utf-8")
+    aligner.align = lambda *args, **kwargs: {**fake_align(*args, **kwargs), "status": "FAILED"}
+    with pytest.raises(CampaignError) as exc:
+        workflow.align(project, acq["acquisition_id"], load, measurement_time_field="time_s")
+    assert exc.value.code == "ALIGNMENT_STAGE_INCOMPLETE"
+    assert workflow.load_project(project)["acquisitions"][0]["alignment"] == previous
 
 
 def test_workflow_preview_alignment_is_read_only_and_supports_image_only_and_window_mode(tmp_path: Path, monkeypatch):

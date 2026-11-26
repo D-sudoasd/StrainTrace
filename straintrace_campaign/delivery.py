@@ -199,6 +199,7 @@ def _verify_keystone_source(version: Path) -> dict[str, Any]:
     validation = _read_json(validation_path)
     if not isinstance(manifest, dict):
         return {"valid": False, "errors": ["Keystone CHECKSUMS.json must be an object"]}
+    rehashed_count = 0
     for relative, claim in manifest.items():
         try:
             target = _relative_file(version, relative)
@@ -209,7 +210,12 @@ def _verify_keystone_source(version: Path) -> dict[str, Any]:
             errors.append(f"Keystone checksum target missing: {relative}")
             continue
         expected = claim.get("sha256") if isinstance(claim, dict) else claim
-        if expected and _sha256(target) != expected:
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            errors.append(f"Keystone checksum claim invalid: {relative}")
+            continue
+        actual = _sha256(target)
+        rehashed_count += 1
+        if actual != expected.lower():
             errors.append(f"Keystone checksum mismatch: {relative}")
     actual_files = {
         rel for path in version.rglob("*")
@@ -237,7 +243,7 @@ def _verify_keystone_source(version: Path) -> dict[str, Any]:
         "acquisition_count": len(catalog),
         "frame_count": validation.get("frames_written"),
         "checksummed_file_count": len(manifest),
-        "claims_rehashed": True,
+        "claims_rehashed": bool(manifest) and rehashed_count == len(manifest),
     }
 
 

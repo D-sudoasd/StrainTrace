@@ -827,10 +827,12 @@ def analyze(acquisition: Mapping[str, Any], project_dir: str | os.PathLike[str],
             "tracking_template_policy": "fixed_reference" if mode == "extensometer" else "fixed_reference_field",
             "tracking_sidecar_artifacts": sidecar_relatives if mode == "extensometer" else [],
         }
-        _notify(progress, 1.0, status="complete", acquisition_id=acquisition.get("acquisition_id"), frame_count=len(rows))
+        normalized_status = "COMPLETED" if engine_status.casefold() in {"completed", "completed_with_warnings"} else engine_status.upper()
+        progress_status = "complete" if normalized_status == "COMPLETED" else normalized_status.casefold()
+        _notify(progress, 1.0, status=progress_status, acquisition_id=acquisition.get("acquisition_id"), frame_count=len(rows))
         _check_cancel(cancel)
         return {
-            "status": "COMPLETED" if engine_status in {"COMPLETED", "completed", "completed_with_warnings"} else engine_status.upper(),
+            "status": normalized_status,
             "fingerprint": input_fingerprint,
             "rows_path": rows_relative,
             "artifacts": artifacts,
