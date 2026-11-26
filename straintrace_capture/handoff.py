@@ -367,12 +367,14 @@ def _workbench_command(executable: str, module: str) -> list[str]:
     return [sys.executable, "-m", module]
 
 
-def _launch_workbench(command: list[str]) -> subprocess.Popen:
+def _launch_workbench(command: list[str], *, stdout=None, stderr=None) -> subprocess.Popen:
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     # An absolute source-script launch adds its directory to the parent's
     # import path only. The sibling process must also be able to resolve -m.
     directory = None if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
-    return subprocess.Popen(command, creationflags=flags, cwd=directory)
+    # Callers that need the child's console output (diagnostics, tests) pass pipes;
+    # CREATE_NO_WINDOW children otherwise have no console to inherit.
+    return subprocess.Popen(command, creationflags=flags, cwd=directory, stdout=stdout, stderr=stderr)
 
 
 def launch_analysis(root: str | Path, *, camera_id: str | None = None, live: bool = False,
