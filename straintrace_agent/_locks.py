@@ -62,29 +62,43 @@ def _project_lock(root: Path, *, purpose: str):
                 details=existing,
             ) from exc
         except OSError:
-            # Filesystems without hardlink support fall back to O_CREAT|O_EXCL.
-            try:
-                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError as exc:
-                existing = _read_lock_details(lock)
-                raise AgentError(
-                    "PROJECT_LOCKED",
-                    "another writer owns this project; stale-lock recovery is an explicit operation",
-                    path=str(lock),
-                    details=existing,
-                ) from exc
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(payload_bytes)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                acquired = True
-            except BaseException:
+            # Windows rename fails if the target exists, so it publishes the
+            # already-fsynced payload atomically even without hardlink support.
+            if os.name == "nt":
                 try:
-                    _unlink_with_retry(lock)
-                except OSError:
-                    pass
-                raise
+                    os.rename(temp_lock, lock)
+                    acquired = True
+                except FileExistsError as exc:
+                    existing = _read_lock_details(lock)
+                    raise AgentError(
+                        "PROJECT_LOCKED",
+                        "another writer owns this project; stale-lock recovery is an explicit operation",
+                        path=str(lock), details=existing,
+                    ) from exc
+            else:
+                # POSIX rename may overwrite a lock; use exclusive creation.
+                # Some filesystems have no portable atomic no-replace rename.
+                try:
+                    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError as exc:
+                    existing = _read_lock_details(lock)
+                    raise AgentError(
+                        "PROJECT_LOCKED",
+                        "another writer owns this project; stale-lock recovery is an explicit operation",
+                        path=str(lock), details=existing,
+                    ) from exc
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(payload_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    acquired = True
+                except BaseException:
+                    try:
+                        _unlink_with_retry(lock)
+                    except OSError:
+                        pass
+                    raise
     finally:
         try:
             _unlink_with_retry(temp_lock)
@@ -162,8 +176,12 @@ def _pid_state(pid: int, expected_start_token: str | None) -> bool | None:
                 return None
             if code.value != 259:  # STILL_ACTIVE
                 return False
+            # With no recorded token, an active PID is conservatively alive.
+            # This also prevents recovery of a legacy empty lock held by it.
+            if expected_start_token is None:
+                return True
             actual_start = _process_start_token(pid)
-            if actual_start is None or expected_start_token is None:
+            if actual_start is None:
                 return None
             if actual_start != expected_start_token:
                 return False  # PID has been reused by a different process.
@@ -197,8 +215,11 @@ def recover_lock(project: str | os.PathLike[str], *, expected_pid: int) -> dict[
             if lock.stat().st_size == 0:
                 time.sleep(0.05)
                 if lock.is_file() and lock.read_bytes() == b"":
-                    if _pid_state(expected_pid, None) is True:
+                    state = _pid_state(expected_pid, None)
+                    if state is True:
                         raise AgentError("LOCK_OWNER_ALIVE", f"PID {expected_pid} is still alive; lock cannot be recovered", path=str(lock))
+                    if state is None:
+                        raise AgentError("LOCK_OWNER_UNKNOWN", f"cannot safely determine whether PID {expected_pid} is alive", path=str(lock))
                     if lock.is_file() and lock.read_bytes() == b"":
                         _unlink_with_retry(lock)
                         return {"project": str(root), "recovered_pid": expected_pid, "recovered": True, "empty_lock_recovered": True}

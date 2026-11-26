@@ -120,6 +120,7 @@ from ._outputs import (
 from ._verify import (
     _require_current_run_binding as _require_current_run_binding,
     _require_recorded_run_integrity as _require_recorded_run_integrity,
+    _require_retained_artifacts_integrity as _require_retained_artifacts_integrity,
     verify as verify,
 )
 from .mechanics import (
@@ -457,6 +458,24 @@ def run(
         run_root.mkdir(parents=True, exist_ok=True)
         (run_root / "checkpoints").mkdir(exist_ok=True)
         (run_root / "plots").mkdir(exist_ok=True)
+        manifest_path = run_root / "manifest.json"
+        prior_manifest = _read_json(manifest_path) if manifest_path.is_file() else None
+        state_path = run_root / "run_state.json"
+        prior_state = _read_json(state_path) if state_path.is_file() else {}
+        prior_receipts = None
+        if prior_manifest is not None:
+            if prior_manifest.get("run_fingerprint") != run_fingerprint:
+                raise AgentError("RUN_STALE_BINDING", "existing run manifest does not match the requested run")
+            prior_receipts = prior_manifest.get("checkpoint_receipts")
+            if not isinstance(prior_receipts, Mapping):
+                raise AgentError("RUN_MANIFEST_INVALID", "existing run manifest has invalid checkpoint receipts", path=str(manifest_path))
+            regenerated_fields = {
+                f"fields_csv/{_frame_key(int(record['native_frame']))}.csv" for record in records
+            } if field_csv else set()
+            _require_retained_artifacts_integrity(run_root, prior_manifest, regenerated_paths=regenerated_fields)
+        # A process can stop after writing a new sidecar and before publishing
+        # the next manifest. Accept unregistered frames only in that case.
+        allow_unregistered = prior_manifest is None or prior_state.get("status") in {"running", "failed"}
         previous_pointer = dict(pointer)
         pointer["current_run"] = run_root.relative_to(root).as_posix()
         _atomic_json(root / "CURRENT.json", pointer)
@@ -471,6 +490,37 @@ def run(
             "code_sha256": code_sha, "started_unix_s": time.time(), "completed_frames": 0,
         })
         rows: list[dict[str, Any]] = []
+        recomputed_frames: set[int] = set()
+
+        def finish_cancelled(remaining_frames: int) -> dict[str, Any]:
+            _atomic_json(run_root / "run_state.json", {
+                "schema": RUN_SCHEMA, "status": "cancelled", "run_id": run_id,
+                "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha,
+                "code_sha256": code_sha, "completed_frames": len(rows), "updated_unix_s": time.time(),
+            })
+            _write_progress(run_root, {
+                "event": "run_cancelled", "completed_frames": len(rows), "remaining_frames": remaining_frames,
+            }, progress)
+            result = {
+                "project": str(root), "run_id": run_id, "status": "cancelled",
+                "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed",
+                "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root),
+            }
+            if prior_manifest is not None:
+                try:
+                    _require_recorded_run_integrity(run_root, prior_manifest)
+                except AgentError as exc:
+                    # Unprocessed or newly replaced sidecars cannot be signed
+                    # against an older manifest. Preserve the old evidence and
+                    # let a later resume validate/recompute individual frames.
+                    return {**result, "outputs_updated": False, "output_issue": exc.as_dict()}
+            _build_outputs(
+                root, run_root, config, plan, records, rows, mechanics_status,
+                run_fingerprint, input_sha, code_sha, field_csv=False, plots=False,
+                include_checkpoints=report_include_checkpoints, build_report=cancel_build_report,
+            )
+            return {**result, "outputs_updated": True}
+
         try:
             _write_progress(run_root, {
                 "event": "run_started", "run_id": run_id, "frame_count": len(records),
@@ -478,9 +528,12 @@ def run(
             }, progress)
             for position, record in enumerate(records, 1):
                 native = int(record["native_frame"])
+                if cancel_file.exists():
+                    return finish_cancelled(len(records) - position + 1)
                 existing = _checkpoint_valid(
                     run_root, record, position, int(reference_record["native_frame"]),
                     run_fingerprint, input_sha, code_sha, parameters,
+                    prior_receipts=prior_receipts, allow_unregistered=allow_unregistered,
                 )
                 if existing is not None:
                     meta = existing[1]
@@ -490,25 +543,7 @@ def run(
                         rows.append(row)
                         _write_progress(run_root, {"event": "frame_reused", "native_frame": native, "position": position, "total": len(records)}, progress)
                         continue
-                if cancel_file.exists():
-                    _atomic_json(run_root / "run_state.json", {
-                        "schema": RUN_SCHEMA, "status": "cancelled", "run_id": run_id,
-                        "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha,
-                        "code_sha256": code_sha, "completed_frames": len(rows), "updated_unix_s": time.time(),
-                    })
-                    _write_progress(run_root, {"event": "run_cancelled", "completed_frames": len(rows), "remaining_frames": len(records) - position + 1}, progress)
-                    _build_outputs(
-                        root, run_root, config, plan, records, rows, mechanics_status,
-                        run_fingerprint, input_sha, code_sha,
-                        field_csv=False, plots=False,
-                        include_checkpoints=report_include_checkpoints,
-                        build_report=cancel_build_report,
-                    )
-                    return {
-                        "project": str(root), "run_id": run_id, "status": "cancelled",
-                        "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed",
-                        "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root),
-                    }
+                recomputed_frames.add(native)
                 _write_progress(run_root, {"event": "frame_started", "native_frame": native, "position": position, "total": len(records)}, progress)
                 try:
                     if record.get("status") == "unreadable":
@@ -597,24 +632,7 @@ def run(
                     rows.append(summary_row)
                     _write_progress(run_root, {"event": "frame_complete", "native_frame": native, "position": position, "status": status_text, "quality": quality}, progress)
                 except _RunCancelled:
-                    _atomic_json(run_root / "run_state.json", {
-                        "schema": RUN_SCHEMA, "status": "cancelled", "run_id": run_id,
-                        "run_fingerprint": run_fingerprint, "input_fingerprint": input_sha,
-                        "code_sha256": code_sha, "completed_frames": len(rows), "updated_unix_s": time.time(),
-                    })
-                    _write_progress(run_root, {"event": "run_cancelled", "completed_frames": len(rows), "remaining_frames": len(records) - position + 1}, progress)
-                    _build_outputs(
-                        root, run_root, config, plan, records, rows, mechanics_status,
-                        run_fingerprint, input_sha, code_sha,
-                        field_csv=False, plots=False,
-                        include_checkpoints=report_include_checkpoints,
-                        build_report=cancel_build_report,
-                    )
-                    return {
-                        "project": str(root), "run_id": run_id, "status": "cancelled",
-                        "scientific_ok": False, "numerical_quality_passed": False, "scientific_acceptance": "not_assessed",
-                        "completed_frames": len(rows), "total_frames": len(records), "run_dir": str(run_root),
-                    }
+                    return finish_cancelled(len(records) - position + 1)
                 except AgentError as exc:
                     mechanics_row = _mechanics_at(
                         record.get("time_s"), mechanics, config,
@@ -642,6 +660,8 @@ def run(
                     )
                     rows.append(row)
                     _write_progress(run_root, {"event": "frame_failed", "native_frame": native, "position": position, "error": error.as_dict()}, progress)
+            if cancel_file.exists():
+                return finish_cancelled(0)
             if _sha256(Path(reference_record["path"])) != reference_sha_before:
                 raise AgentError("INPUT_CHANGED_DURING_RUN", "reference image changed during analysis")
             failed = sum(row.get("status") not in {"complete"} for row in rows)
@@ -654,12 +674,26 @@ def run(
                 "passed_frames": passed, "failed_frames": failed, "updated_unix_s": time.time(),
             }
             _atomic_json(run_root / "run_state.json", run_state)
+            sources_changed = False
+            if prior_manifest is not None:
+                for native in recomputed_frames:
+                    name = f"{_frame_key(native)}.json"
+                    previous_receipt = prior_receipts.get(name)
+                    path = run_root / "checkpoints" / name
+                    if not isinstance(previous_receipt, Mapping) or not path.is_file() or _sha256(path) != previous_receipt.get("sha256"):
+                        sources_changed = True
+                        break
+            had_plots = any(
+                isinstance(name, str) and name.startswith("plots/")
+                for name in (prior_manifest.get("artifacts") or {})
+            ) if prior_manifest else False
             output = _build_outputs(
                 root, run_root, config, plan, records, rows, mechanics_status,
                 run_fingerprint, input_sha, code_sha,
-                field_csv=field_csv, plots=make_plots,
+                field_csv=field_csv, plots=make_plots or (sources_changed and had_plots),
                 include_checkpoints=report_include_checkpoints,
                 build_report=build_report,
+                invalidate_extractions=sources_changed,
             )
             _write_progress(run_root, {
                 "event": "run_finished", "status": run_status, "passed_frames": passed, "failed_frames": failed,
@@ -673,6 +707,7 @@ def run(
                 "scientific_acceptance": "not_assessed", "experimental_uncertainty_calibrated": False,
                 "passed_frames": passed, "failed_frames": failed, "total_frames": len(records),
                 "run_dir": str(run_root), "artifacts": output["artifacts"],
+                "stale_derived_artifacts": output.get("stale_derived_artifacts", []),
             }
         except BaseException as exc:
             error_info = exc.as_dict() if isinstance(exc, AgentError) else {"error_code": type(exc).__name__, "message": str(exc)}
@@ -810,7 +845,7 @@ def extract(
         pointer, run_root = _load_run_pointer(root)
         plan = _read_json(_plan_path(root, pointer))
         state = _read_json(run_root / "run_state.json")
-        records, _, _ = _require_current_run_binding(root, config, run_root, plan, state)
+        records, _, _ = _require_current_run_binding(root, config, run_root, plan, state, allow_stale_derived=True)
         output: dict[str, Any] = {"run_id": run_root.name, "component": component, "coordinate_system": coordinate_system}
         checkpoint_root = run_root / "checkpoints"
         metadata_by_native = {int(meta["native_frame"]): meta for meta in _iter_checkpoint_metadata(run_root)}
@@ -1273,9 +1308,25 @@ def auto_analyze(
     if result["run"].get("status") == "cancelled":
         result["status"] = "cancelled"
         run_root = Path(result["run"]["run_dir"])
-        result["report"] = {"report_html": str(run_root / "report" / "index.html"), "partial": True}
+        report_path = run_root / "report" / "index.html"
+        result["report"] = {
+            "report_html": str(report_path) if report_path.is_file() else None,
+            "partial": True, "updated": result["run"].get("outputs_updated", True),
+        }
         return result
     expected_run = str(result["run"]["run_id"])
+    if result["run"].get("stale_derived_artifacts"):
+        with _project_lock(root, purpose="auto_finalize"):
+            _require_expected_run(root, expected_run)
+            result["verification"] = verify(root)
+            result["status"] = "attention_required"
+            result["report"] = {"report_html": None, "reason": "Existing extractions must be regenerated from the changed checkpoints."}
+            _atomic_json(root / "automation.json", {
+                "schema": "straintrace.automation/v1", "objective": discovery["objective"],
+                "status": result["status"], "run_id": expected_run,
+                "verification_valid": result["verification"].get("valid"), "scientific_acceptance": "not_assessed",
+            })
+        return result
     result["report"] = report(root, include_checkpoints=True, expected_run_id=expected_run)
     if isinstance(result["run"].get("artifacts"), dict):
         result["run"]["artifacts"]["report_html"] = result["report"]["report_html"]

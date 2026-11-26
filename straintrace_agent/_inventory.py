@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import sys
 import time
@@ -100,6 +100,13 @@ def _explicit_frame_map(path: Path, image_root: Path, image_paths: Sequence[Path
         candidate = candidate.resolve(strict=False)
         if candidate not in known:
             # A basename is accepted only if unique in the image directory.
+            # Never reinterpret an explicit (possibly mistyped) directory as
+            # a different source image with the same basename.
+            if (len(PurePosixPath(raw_path).parts) != 1
+                    or len(PureWindowsPath(raw_path).parts) != 1
+                    or PurePosixPath(raw_path).is_absolute()
+                    or PureWindowsPath(raw_path).is_absolute()):
+                raise AgentError("FRAME_MAP_PATH_UNKNOWN", f"frame map row does not identify one source image: {raw_path}", path=str(path))
             matches = by_basename.get(Path(raw_path).name.casefold(), [])
             if len(matches) != 1:
                 raise AgentError("FRAME_MAP_PATH_UNKNOWN", f"frame map row does not identify one source image: {raw_path}", path=str(path))
