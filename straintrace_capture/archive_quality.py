@@ -48,15 +48,18 @@ class ArchiveQualityReport:
         return len(self._alerts)
 
     def append(self, row):
-        offset = self._rows.tell()
-        self._rows.write(json_text(row).encode("utf-8") + b"\n")
-        self._offsets.append(offset)
-        if row["flags"]:
-            self._alerts.append(offset)
-            if self.first_alert is None:
-                self.first_alert = row["sequence"]
-        self.verified += row["metrics"] is not None
-        self.fallbacks += row["fallback"] is not None
+        encoded = json_text(row).encode("utf-8") + b"\n"
+        with self._row_lock:
+            self._rows.seek(0, 2)
+            offset = self._rows.tell()
+            self._rows.write(encoded)
+            self._offsets.append(offset)
+            if row["flags"]:
+                self._alerts.append(offset)
+                if self.first_alert is None:
+                    self.first_alert = row["sequence"]
+            self.verified += row["metrics"] is not None
+            self.fallbacks += row["fallback"] is not None
 
     def page(self, start, count, *, alerts_only=False):
         offsets = self._alerts if alerts_only else self._offsets

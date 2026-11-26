@@ -317,7 +317,11 @@ def bracket_time(
         return {"status": "NO_TIME_SUPPORT", "indices": [], "weights": []}
     low = bisect.bisect_left(times, query)
     candidates = [index for index in (low - 1, low) if 0 <= index < len(times)]
-    exact = next((index for index in candidates if abs(times[index] - query) <= EXACT_TIME_TOL_S), None)
+    # Prefer the closest sample.  When adjacent timestamps are closer than
+    # the tolerance, examining the left neighbour first can otherwise select
+    # it even when the query exactly equals the right-hand sample.
+    closest = min(candidates, key=lambda index: abs(times[index] - query), default=None)
+    exact = closest if closest is not None and abs(times[closest] - query) <= EXACT_TIME_TOL_S else None
     if exact is not None:
         if not valid[exact]:
             return {"status": "INVALID_EXACT_SAMPLE", "indices": [exact], "weights": [1.0]}
@@ -353,21 +357,14 @@ def window_mean_support(
         return {"status": "EXPOSURE_WINDOW_MISSING", "value": None, "indices": [], "weights": []}
     if end <= start:
         return {"status": "INVALID_EXPOSURE_WINDOW", "value": None, "indices": [], "weights": []}
-    if not times or start < times[0] - EXACT_TIME_TOL_S or end > times[-1] + EXACT_TIME_TOL_S:
+    # Unlike a point match, a window mean requires support for the entire
+    # nonzero exposure. A time tolerance here can silently clip a short window
+    # or even turn an unsupported window into a constant boundary value.
+    if not times or start < times[0] or end > times[-1]:
         return {"status": "OUTSIDE_TIME_RANGE", "value": None, "indices": [], "weights": []}
 
-    if len(times) == 1:
-        if not valid[0] or values[0] is None:
-            return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [0], "weights": []}
-        return {"status": "EXPOSURE_WINDOW_MEAN", "value": float(values[0]), "indices": [0], "weights": [1.0]}
-
-    eff_start = max(float(start), float(times[0]))
-    eff_end = min(float(end), float(times[-1]))
-    if eff_end <= eff_start:
-        boundary = 0 if eff_start <= times[0] else len(times) - 1
-        if not valid[boundary] or values[boundary] is None:
-            return {"status": "INVALID_LOAD_BRACKET", "value": None, "indices": [boundary], "weights": []}
-        return {"status": "EXPOSURE_WINDOW_MEAN", "value": float(values[boundary]), "indices": [boundary], "weights": [1.0]}
+    eff_start = float(start)
+    eff_end = float(end)
 
     coefficients: dict[int, float] = {}
     idx = max(0, min(len(times) - 2, bisect.bisect_right(times, eff_start) - 1))

@@ -153,10 +153,12 @@ def _analysis_inputs_folder(experiment):
 def prepare_continuation_binding(preview):
     """Recheck the chosen inputs and publish the independent Analysis binding."""
     source = preview["external_reference"]
+    event = preview.get("event")
     snapshot = continuation_snapshot(preview["experiment_root"], source["directory"], preview["camera_id"],
-                                     source["sequence"], image_part=preview["image_part"])
+                                     source["sequence"], image_part=preview["image_part"],
+                                     event_context_id=event["signal_id"] if event is not None else None)
     if (snapshot["experiment_id"] != preview["experiment_id"] or snapshot["external_reference"] != source
-            or _identities(snapshot) != _identities(preview)):
+            or analysis_source(snapshot) != analysis_source(preview)):
         raise CaptureError("CONTINUATION_REFERENCE_CHANGED", "实验或原图记录已变化，请重新预览后选择。")
     first_test = snapshot["frames"][1]
     if sha256_file(Path(first_test["absolute_path"])) != first_test["sha256"]:
@@ -211,14 +213,20 @@ def read_continuation_binding(path):
         data = json.loads(encoded)
         if data["schema"] != BINDING_SCHEMA:
             raise ValueError("invalid continuation analysis schema")
+        event = data.get("event")
+        if "event" in data and not isinstance(event, dict):
+            raise ValueError("invalid continuation event scope")
         source = _reference_directory(root, data["reference"])
         snapshot = continuation_snapshot(root, source, data["camera_id"], data["reference"]["sequence"],
-                                         image_part=data["image_part"])
-        if data["experiment_id"] != snapshot["experiment_id"]:
-            raise ValueError("capture binding identifies another experiment")
-        for receipt, row in zip(data["frames"], snapshot["frames"], strict=True):
+                                         image_part=data["image_part"],
+                                         event_context_id=event["signal_id"] if event is not None else None)
+        if data["experiment_id"] != snapshot["experiment_id"] or snapshot.get("event") != event:
+            raise ValueError("capture binding identifies another experiment or event")
+        sources = analysis_source(snapshot)["frames"]
+        for receipt, row, expected in zip(data["frames"], snapshot["frames"], sources, strict=True):
             if ((receipt["frame_id"], receipt["raw_sha256"], receipt.get("experiment_id")) !=
-                    (row["frame_id"], row["sha256"], row.get("source_experiment_id"))):
+                    (row["frame_id"], row["sha256"], row.get("source_experiment_id"))
+                    or receipt.get("event_position") != expected.get("event_position")):
                 raise ValueError("capture binding differs from committed frame identity")
             derived = row["color_model"] in ("bayer", "rgba", "bgra")
             if derived:

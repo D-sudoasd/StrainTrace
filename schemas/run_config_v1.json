@@ -249,7 +249,7 @@
     "pyramid": {
       "type": "object",
       "additionalProperties": false,
-      "properties": {"levels": {"type": "integer", "minimum": 1, "maximum": 8}, "scale": {"$ref": "#/$defs/fraction", "exclusiveMinimum": 0}}
+      "properties": {"levels": {"type": "integer", "minimum": 1, "maximum": 8}, "scale": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}}
     },
     "normalization": {
       "type": "object",

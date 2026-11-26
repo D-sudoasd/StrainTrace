@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -248,17 +250,26 @@ def test_config_tamper_isolated_to_config_hash_mismatch(tmp_path: Path) -> None:
 def test_code_tamper_isolated_to_code_fingerprint_mismatch(tmp_path: Path) -> None:
     manifest_path, _, _ = _run_tamper_fixture(tmp_path)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    schema_path = ROOT / "schemas" / "run_config_v1.json"
-    original = schema_path.read_bytes()
-    try:
-        schema_path.write_bytes(original + b"\n")
-        tampered = _run_cli("verify-manifest", "--manifest", str(manifest_path))
-        assert tampered.returncode == ezdic_cli.EXIT_GATE_ERROR
-        summary = json.loads(tampered.stdout)
-        assert any(error["code"] == "CODE_FINGERPRINT_MISMATCH" for error in summary["errors"])
-        assert payload["code_files"]
-    finally:
-        schema_path.write_bytes(original)
+    checkout = tmp_path / "runtime"
+    for entry in payload["code_files"]:
+        copied = checkout / entry["path"]
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / entry["path"], copied)
+
+    def verify_copy():
+        return subprocess.run(
+            [sys.executable, "-m", "ezdic_cli", "verify-manifest", "--manifest", str(manifest_path)],
+            cwd=checkout, env={**os.environ, "PYTHONPATH": str(ROOT)}, text=True, capture_output=True,
+        )
+
+    verified = verify_copy()
+    assert verified.returncode == ezdic_cli.EXIT_SUCCESS, verified.stderr
+    with (checkout / "schemas" / "run_config_v1.json").open("ab") as stream:
+        stream.write(b"\n")
+    tampered = verify_copy()
+    assert tampered.returncode == ezdic_cli.EXIT_GATE_ERROR
+    summary = json.loads(tampered.stdout)
+    assert any(error["code"] == "CODE_FINGERPRINT_MISMATCH" for error in summary["errors"])
 
 
 def test_masked_fullfield_exports_and_mask_content_verification(tmp_path: Path) -> None:

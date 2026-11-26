@@ -28,11 +28,43 @@ def load_points(report_path, report):
     if digest(path) != artifact["sha256"]:
         raise ValueError("pointwise CSV content differs from its report")
     with path.open(encoding="utf-8", newline="") as stream:
-        rows = list(csv.DictReader(stream))
+        reader = csv.DictReader(stream)
+        columns = reader.fieldnames or []
+        required = {"case", "x_px", "y_px", "eligible", "correlation_valid", "strain_valid",
+                    "u_px", "v_px", "true_u_px", "true_v_px", "Eyy", "true_Eyy"}
+        if len(columns) != len(set(columns)) or not required.issubset(columns):
+            raise ValueError("pointwise CSV has missing or duplicate columns")
+        rows = list(reader)
     if len(rows) != artifact["row_count"]:
         raise ValueError("pointwise row count differs from its report")
     result = {}
-    for row in rows:
+    for index, row in enumerate(rows, start=2):
+        if None in row or any(value is None for value in row.values()) or not row["case"].strip():
+            raise ValueError(f"invalid pointwise CSV row {index}")
+        for key in ("eligible", "correlation_valid", "strain_valid"):
+            if row[key] not in {"0", "1"}:
+                raise ValueError(f"pointwise CSV row {index}: {key} must be 0 or 1")
+        if row["correlation_valid"] == "1" and row["eligible"] != "1":
+            raise ValueError(f"pointwise CSV row {index}: valid correlation is ineligible")
+        if row["strain_valid"] == "1" and row["correlation_valid"] != "1":
+            raise ValueError(f"pointwise CSV row {index}: valid strain lacks valid correlation")
+        for key in ("x_px", "y_px", "true_u_px", "true_v_px", "true_Eyy"):
+            try:
+                value = float(row[key])
+            except ValueError as exc:
+                raise ValueError(f"pointwise CSV row {index}: {key} must be finite") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"pointwise CSV row {index}: {key} must be finite")
+        for key in ("u_px", "v_px", "Eyy"):
+            if row[key]:
+                try:
+                    value = float(row[key])
+                except ValueError as exc:
+                    raise ValueError(f"pointwise CSV row {index}: {key} must be finite or empty") from exc
+                if not math.isfinite(value):
+                    raise ValueError(f"pointwise CSV row {index}: {key} must be finite or empty")
+            elif row["strain_valid"] == "1":
+                raise ValueError(f"pointwise CSV row {index}: valid strain lacks {key}")
         points = result.setdefault(row["case"], {})
         position = (float(row["x_px"]), float(row["y_px"]))
         if position in points:
@@ -96,6 +128,18 @@ def compare(before_path, after_path, output, *, allow_experimental_policy_differ
             if case["solver_parameters"].get("experimental_full_search", False) != report.get("search_policy", {}).get("experimental_full_search", False):
                 raise ValueError("Case solver parameters disagree with the declared search policy")
     ap, bp = load_points(before_path, a), load_points(after_path, b)
+    for report, points in ((a, ap), (b, bp)):
+        if set(points) != set(report["cases"]):
+            raise ValueError("Pointwise CSV case set differs from its report")
+        for name, case in report["cases"].items():
+            rows = list(points[name].values())
+            counts = {
+                "point_count": len(rows),
+                "correlation_valid_count": sum(row["correlation_valid"] == "1" for row in rows),
+                "strain_valid_count": sum(row["strain_valid"] == "1" for row in rows),
+            }
+            if any(case[key] != value for key, value in counts.items()):
+                raise ValueError(f"Pointwise CSV counts differ from report for case {name}")
     result = {
         "schema": "straintrace-necking-study-comparison-v1",
         "before_report_sha256": digest(before_path), "after_report_sha256": digest(after_path),

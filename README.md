@@ -335,6 +335,8 @@ py -3.11 -m ezdic_cli verify-manifest --manifest <output_dir>\run_manifest.json
 py -3.11 -m ezdic_cli benchmark --output $env:TEMP\ezdic-benchmark
 ```
 
+Benchmark reports never overwrite an existing `benchmark_report.csv` or `benchmark_report.json`; choose a fresh output directory for each completed run.
+
 Exit codes are stable: `0` means configuration, execution, scientific gate,
 and manifest verification all passed; `2` means configuration/usage or
 preflight failure; `3` means an I/O, solver, export, or other runtime failure;

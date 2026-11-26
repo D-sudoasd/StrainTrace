@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import csv
 import importlib
+import inspect
 import io
 import math
 import os
@@ -261,6 +262,43 @@ def scan(
                     raise CampaignError("ACQUISITION_IDENTITY_AMBIGUOUS", f"relative path {acq['relative_path']!r} matches multiple imported acquisitions")
             if current is not None:
                 if current["source_kind"] == "imported_keystone":
+                    metadata = current.setdefault("metadata", {})
+                    bound_alias = metadata.get("discovery_root_alias")
+                    bound_root = metadata.get("discovery_root_path")
+                    scanned_root = root.resolve().as_posix().casefold()
+                    different_binding = bool(bound_alias) and (
+                        bound_alias != root_alias or (bound_root is not None and bound_root != scanned_root)
+                    )
+                    unattributed_images_conflict = (
+                        not bound_alias and bool(current["image_frames"]) and bool(acq["image_frames"])
+                        and _image_identity_hash(current["image_frames"]) != _image_identity_hash(acq["image_frames"])
+                    )
+                    if different_binding or unattributed_images_conflict:
+                        # A relative path may recur under multiple roots. Once
+                        # a source is attached, preserve it and record other
+                        # discoveries as candidates rather than replacing it.
+                        source = {
+                            "root_alias": root_alias,
+                            "root_path": scanned_root,
+                            "adapter": adapter,
+                            "image_frames": _clone(acq["image_frames"]),
+                            "measurement_frames": _clone(acq["measurement_frames"]),
+                            "discovery_metadata": _clone(acq["metadata"]),
+                        }
+                        candidate_fingerprint = fingerprint_data("discovery_source_candidate_v1", source)
+                        candidates = metadata.setdefault("discovery_source_candidates", [])
+                        if not any(item.get("fingerprint") == candidate_fingerprint for item in candidates):
+                            candidates.append({
+                                **source, "status": "UNCONFIRMED_SOURCE_BINDING",
+                                "fingerprint": candidate_fingerprint, "observed_at_utc": _now_utc(),
+                            })
+                            metadata.setdefault("source_conflicts", []).append({
+                                "kind": "discovery_root_binding_conflict", "root_alias": root_alias,
+                                "candidate_fingerprint": candidate_fingerprint, "observed_at_utc": _now_utc(),
+                            })
+                            validate_acquisition(current)
+                            updated.append(current)
+                        continue
                     # Exact relative-path matches may attach newly discovered
                     # image sources to an imported acquisition. Accepted rows,
                     # measurement identity, dimensions, and acquisition ID stay
@@ -433,10 +471,18 @@ def import_keystone(path: str | os.PathLike[str], source: str | os.PathLike[str]
                 continue
             if prior.get("source_version_sha256") != version_digest:
                 raise CampaignError("IMPORT_SOURCE_VERSION_CHANGED", f"Keystone version {version_id!r} changed after import; accepted rows remain immutable")
-            return _clone([
+            existing_import = [
                 item for item in project["acquisitions"]
                 if item.get("metadata", {}).get("keystone_import", {}).get("source_version_id") == version_id
-            ])
+            ]
+            if len(existing_import) != prior.get("acquisition_count"):
+                raise CampaignError("IMPORT_EXISTING_RESULT_INVALID", f"existing Keystone import {version_id!r} has an incomplete acquisition inventory")
+            for item in existing_import:
+                record = item.get("result")
+                if isinstance(record, Mapping) and record.get("status") == "IMPORTED_ACCEPTED":
+                    if not stage_record_reusable(root, record, record["fingerprint"]):
+                        raise CampaignError("IMPORT_EXISTING_RESULT_INVALID", f"existing imported artifacts are missing or altered for {item['acquisition_id']}")
+            return _clone(existing_import)
         delivery = _module("delivery")
         try:
             staged_import_dir = artifact_path(root, f"imports/keystone/{version_id}")
@@ -832,11 +878,19 @@ def _notify(progress: Callable[[dict[str, Any]], None] | None, event: dict[str, 
         progress(event)
 
 
-def _expected_analysis_fingerprint(numerics: Any, acq: Mapping[str, Any]) -> str:
+def _expected_analysis_fingerprint(numerics: Any, acq: Mapping[str, Any], root: Path) -> str:
     fn = getattr(numerics, "fingerprint", None)
     if not callable(fn):
         raise CampaignError("NUMERICS_INTERFACE_INVALID", "numerics.fingerprint(acquisition) is required")
-    module_fingerprint = fn(acq)
+    # Relative configuration paths are interpreted against the project by
+    # analyze(). Give a project-aware fingerprint the same base directory,
+    # while retaining compatibility with the original one-argument contract.
+    try:
+        inspect.signature(fn).bind(acq, project_dir=root)
+    except (TypeError, ValueError):
+        module_fingerprint = fn(acq)
+    else:
+        module_fingerprint = fn(acq, project_dir=root)
     return fingerprint_data("analysis", {
         "numerics_fingerprint": module_fingerprint,
         "numerics_code_sha256": _module_code_sha256(numerics),
@@ -1192,21 +1246,25 @@ def _alignment_options_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
     })
 
 
-def _validate_acquisition_freshness(root: Path, acq: dict[str, Any]) -> None:
+def _validate_result_freshness(root: Path, acq: dict[str, Any], *, action: str) -> None:
     metadata = acq.get("metadata", {})
     result = acq.get("result")
     if result is not None:
         if result.get("status") == "IMPORTED_ACCEPTED":
             if not stage_record_reusable(root, result, result["fingerprint"]):
-                raise CampaignError("EXPORT_IMPORTED_RESULT_INVALID", f"imported accepted rows or checksums are invalid for {acq['acquisition_id']}")
+                raise CampaignError(f"{action}_IMPORTED_RESULT_INVALID", f"imported accepted rows or checksums are invalid for {acq['acquisition_id']}")
         else:
             if metadata.get("workflow_result_stale"):
-                raise CampaignError("EXPORT_STALE_RESULT", f"tracking output is stale for {acq['acquisition_id']}; approve and rerun tracking")
+                raise CampaignError(f"{action}_STALE_RESULT", f"tracking output is stale for {acq['acquisition_id']}; approve and rerun tracking")
             _ensure_approval(acq)
             numerics = _module("numerics")
-            expected = _expected_analysis_fingerprint(numerics, acq)
+            expected = _expected_analysis_fingerprint(numerics, acq, root)
             if result.get("fingerprint") != expected or not stage_record_reusable(root, result, expected):
-                raise CampaignError("EXPORT_STALE_RESULT", f"tracking fingerprint or artifacts are stale for {acq['acquisition_id']}; rerun tracking")
+                raise CampaignError(f"{action}_STALE_RESULT", f"tracking fingerprint or artifacts are stale for {acq['acquisition_id']}; rerun tracking")
+
+
+def _validate_acquisition_freshness(root: Path, acq: dict[str, Any]) -> None:
+    _validate_result_freshness(root, acq, action="EXPORT")
     alignment = acq.get("alignment")
     if alignment is None:
         return
@@ -1253,7 +1311,7 @@ def _run_one(
             _notify(progress, {"event": "stage_reused", "stage": "tracking", "acquisition_id": acq["acquisition_id"], "status": "IMPORTED_ACCEPTED"})
             return _clone(imported)
     _ensure_approval(acq)
-    expected = _expected_analysis_fingerprint(numerics, acq)
+    expected = _expected_analysis_fingerprint(numerics, acq, root)
     current = acq.get("result")
     if stage_record_reusable(root, current, expected):
         metadata = acq.setdefault("metadata", {})
@@ -1286,9 +1344,11 @@ def _run_one(
         raise CampaignError("NUMERICS_RESULT_INVALID", "numerics.analyze must return a stage record")
     finalized = finalize_stage_record(root, result, fingerprint=expected)
     pending = acq.get("metadata", {}).get("pending_roi_sensitivity")
-    if isinstance(pending, Mapping):
-        if finalized.get("status") not in {"COMPLETE", "COMPLETED"}:
+    if finalized.get("status") not in {"COMPLETE", "COMPLETED"}:
+        if isinstance(pending, Mapping):
             raise CampaignError("ROI_SENSITIVITY_CANDIDATE_INCOMPLETE", "previous completed tracking result was retained because the ROI retry did not complete")
+        raise CampaignError("NUMERICS_STAGE_INCOMPLETE", f"tracking did not complete: {finalized.get('status')!r}; previous result was retained")
+    if isinstance(pending, Mapping):
         comparison = _write_roi_sensitivity_comparison(root, acq, pending, finalized)
         acq.setdefault("metadata", {}).setdefault("roi_sensitivity_comparisons", []).append(comparison)
         acq["metadata"].pop("pending_roi_sensitivity", None)
@@ -1567,6 +1627,7 @@ def align(
     with acquire_project_lock(root):
         project = _read_project(root)
         acq = _find_acquisition(project, acquisition_id)
+        _validate_result_freshness(root, acq, action="ALIGNMENT")
         aligner = _module("alignment")
         source_fingerprint = sha256_file(load)
         expected = _expected_alignment_fingerprint(aligner, acq, load, normalized_options)
@@ -1576,9 +1637,12 @@ def align(
         raw = _external_call("alignment", aligner.align, acq, root, load, **normalized_options)
         if sha256_file(load) != source_fingerprint:
             raise CampaignError("INPUT_CHANGED_DURING_ALIGNMENT", "load source changed while alignment was running")
+        _validate_result_freshness(root, acq, action="ALIGNMENT")
         if not isinstance(raw, Mapping):
             raise CampaignError("ALIGNMENT_RESULT_INVALID", "alignment.align must return a stage record")
         record = finalize_stage_record(root, raw, fingerprint=expected)
+        if record.get("status") not in {"COMPLETE", "COMPLETED"}:
+            raise CampaignError("ALIGNMENT_STAGE_INCOMPLETE", f"alignment did not complete: {record.get('status')!r}; previous alignment was retained")
         if current is not None:
             _archive_alignment(acq, reason="alignment_fingerprint_changed")
         record.setdefault("provenance", {}).update({

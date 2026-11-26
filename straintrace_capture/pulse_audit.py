@@ -254,13 +254,16 @@ def audit_external_pulses(root, source, *, phase, event_column="event_number", f
 
 def write_pulse_csv(report, path):
     """Write the pulse table. Array fields keep IDs and line numbers unambiguous."""
-    path = Path(path).expanduser().resolve()
+    from .output import resolve_output_path
+    from .report_files import new_text_output
+
+    path = resolve_output_path(path)
     columns = ("event_number", "status", "daq_lines", "capture_event_ids", "frame_ids", "missing_cameras",
                "duplicate_cameras", "unexpected_cameras", "invalid_frame_ids", "conflicts")
     timing_columns = (("exposure_timing_status", "start_skew_ns", "start_skew_min_ns", "start_skew_max_ns", "camera_timing")
                       if "exposure_timing" in report else ())
     binding_columns = ("association_basis", "first_event", "last_event", "daq_unlisted_pulses") if "association" in report else ()
-    with path.open("x", encoding="utf-8-sig", newline="") as stream:
+    with new_text_output(path, encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow((*columns, *timing_columns, *binding_columns))
         for row in report["pulses"]:

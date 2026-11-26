@@ -200,6 +200,22 @@ def test_fullfield_mode_keeps_component_results_separate_from_extensometer_avera
     assert any(path.endswith("Exx_map.txt") for path in result["artifacts"])
 
 
+def test_failed_fullfield_stage_reports_failed_progress(tmp_path, monkeypatch):
+    acquisition, _reference, _paths = _campaign(tmp_path, mode="fullfield")
+    acquisition["roi"]["groups"] = []
+    acquisition["roi"]["proposal_hash"] = roi.proposal_hash(acquisition["roi"])
+    acquisition["approval"] = roi.approve(acquisition, "synthetic-reviewer", specimen_confirmed=True)
+    monkeypatch.setattr(core, "run_fullfield_sequence", lambda settings, progress_callback=None: {
+        "status": "failed", "frames": [], "outputs": [], "json_summary": {"scientific_ok": False},
+    })
+    events = []
+
+    result = numerics.analyze(acquisition, tmp_path, progress=events.append)
+
+    assert result["status"] == "FAILED"
+    assert events[-1]["status"] == "failed"
+
+
 def test_numerics_policy_flat_columns_mask_fingerprint_and_texture_preflight(tmp_path):
     acquisition, reference, paths = _campaign(tmp_path)
     with pytest.raises(CampaignError, match="unsupported normalization policy"):

@@ -15,9 +15,9 @@ from .continuation_analysis import (
 )
 from .handoff import select_camera
 from .image_inputs import (
-    frame_part_selector, read_analysis_image, require_part_geometry, select_frame_image, validate_analysis_part, verified_image_path,
+    frame_part_selector, read_analysis_image, require_part_geometry, select_frame_image, validate_analysis_part,
 )
-from .storage import ExperimentReader, sha256_file
+from .storage import ExperimentReader
 
 
 def _roi(rect) -> tuple[int, int, int, int]:
@@ -32,23 +32,21 @@ def number_or_none(value):
     return float(value) if value is not None and math.isfinite(value) else None
 
 
-def _receive_elapsed(row, first):
+def _receive_elapsed(row, first, *, allow_earlier=False):
     sample = row["timestamps"].get("received_monotonic") or {}
     anchor = first["timestamps"].get("received_monotonic") or {}
     actual, origin = sample.get("value"), anchor.get("value")
     if (type(actual) is int and type(origin) is int and sample.get("clock_id") and
             sample["clock_id"] == anchor.get("clock_id") and sample.get("unit") == anchor.get("unit") == "ns"
-            and actual >= origin):
+            and sample.get("reference") == anchor.get("reference")
+            and (allow_earlier or actual >= origin)):
         return (actual - origin) / 1e9
     return None
 
 
 def read_linked_reference_image(reference, *, debayer):
     path = Path(reference["absolute_path"])
-    image = read_analysis_image(path, reference, debayer=debayer)
-    if sha256_file(path) != reference["sha256"]:
-        raise CaptureError("CAPTURE_IMAGE_CHANGED", reference["frame_id"])
-    return image
+    return read_analysis_image(path, reference, debayer=debayer, verify=True)
 
 
 class LiveAnalysis:
@@ -145,6 +143,10 @@ class LiveAnalysis:
                 return None
             reference = select_frame_image(candidates[0], self.image_part)
             raw = self._read_image(reference)
+            self._phases = phase_sensor_geometry(self.reader, self.camera_id)
+            features = self._phases.get(str(reference["phase"]), {})
+            self._reference_geometry = calibration_geometry(reference["shape"], features,
+                                                            reference.get("backend_metadata") or {})
         norm = self._core.compute_reference_normalization_bounds(raw)
         reference8 = self._core.normalize_with_bounds(raw, norm)
         states = []
@@ -164,14 +166,22 @@ class LiveAnalysis:
         return reference
 
     def _read_image(self, row):
-        return read_analysis_image(verified_image_path(self.reader, row), row, debayer=self.debayer_luminance)
+        return read_analysis_image(self.reader.image_path(row), row, debayer=self.debayer_luminance, verify=True)
 
     def _check_live_geometry(self, row):
         phase = str(row["phase"])
         if phase not in self._phases:
             self._phases.update(phase_sensor_geometry(self.reader, self.camera_id))
-        require_continuation_geometry(self.reference, self._linked_geometry, row,
-                                      self._phases.get(phase, self._linked["camera_features"]))
+        if self._linked:
+            require_continuation_geometry(self.reference, self._linked_geometry, row,
+                                          self._phases.get(phase, self._linked["camera_features"]))
+            return
+        require_part_geometry(self.reference, row)
+        observed = calibration_geometry(row["shape"], self._phases.get(phase, {}), row.get("backend_metadata") or {})
+        expected = self._reference_geometry["sensor_geometry"]
+        actual = observed["sensor_geometry"]
+        if any(expected[key] != actual[key] for key in expected.keys() & actual.keys()):
+            raise CaptureError("FRAME_GEOMETRY_CHANGED", f"{row['frame_id']} · 传感器成像区域或采样方式与参考图不同。")
 
     def record_context(self):
         """Snapshot the sources and settings used for the initialized reference."""
@@ -219,15 +229,13 @@ class LiveAnalysis:
     def analyze_committed_test(self, row, *, omitted=0):
         """Measure a test receipt from this analyzer's camera after initializing the reference."""
         row = select_frame_image(row, self.image_part)
+        self._check_live_geometry(row)
         if self._linked:
-            self._check_live_geometry(row)
             if self._first_test is None:
                 if omitted:
                     self._first_test, _ = self.reader.next_test_frame(self.camera_id, after=0, latest=False)
                 else:
                     self._first_test = row
-        elif self.image_part is not None or frame_part_selector(self.reference) or frame_part_selector(row):
-            require_part_geometry(self.reference, row)
         return self._measure(row, self._read_image(row), omitted=omitted)
 
     def _measure(self, row, raw, *, reference_row=False, omitted=0):
@@ -240,8 +248,7 @@ class LiveAnalysis:
             elapsed = None if reference_row else _receive_elapsed(row, self._first_test)
         else:
             frame_index = row["sequence"] - self.reference["sequence"]
-            elapsed = (row["timestamps"]["received_monotonic"]["value"] -
-                       self.reference["timestamps"]["received_monotonic"]["value"]) / 1e9
+            elapsed = _receive_elapsed(row, self.reference, allow_earlier=True)
         gauges = []
         for state in self._gauge_states:
             tracked, _ = self._core.track_extensometer_group_frame(

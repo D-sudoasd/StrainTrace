@@ -101,6 +101,70 @@ def test_fixed_template_rigid_translation_has_zero_gauge_strain():
     assert row["fb_status"] == "passed"
 
 
+def test_fractional_reference_rois_use_registered_templates():
+    reference = core.generate_synthetic_speckle(128, 160, seed=17)
+    group = {
+        "name": "G01",
+        "roi1": (20.1, 40.1, 25, 25),
+        "roi2": (90.4, 40.4, 25, 25),
+        "actual_mode": "x",
+    }
+    state = core.initialize_extensometer_group_state(reference, group)
+    params = _params(search_radius_base=15, enable_fb_check=False)
+    core.track_extensometer_group_frame(state, reference, 0, "reference", params)
+    row, _ = core.track_extensometer_group_frame(state, reference, 1, "unchanged", params)
+
+    np.testing.assert_allclose(state["template1"], core.extract_patch_subpixel(reference, group["roi1"]))
+    np.testing.assert_allclose(state["template2"], core.extract_patch_subpixel(reference, group["roi2"]))
+    assert row["accepted"] is True
+    # The parabolic peak estimate has finite interpolation bias, but must not
+    # contain the much larger error from comparing a rounded template to L0.
+    assert row["engineering_strain"] == pytest.approx(0.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("rect", [(-0.1, 20, 25, 25), (135.1, 20, 25, 25)])
+def test_fractional_roi_outside_image_is_rejected(rect):
+    reference = core.generate_synthetic_speckle(128, 160, seed=17)
+    group = {"name": "G01", "roi1": rect, "roi2": (90, 40, 25, 25), "actual_mode": "x"}
+    assert not core.rect_is_inside_image(rect, reference.shape)
+    assert core.extract_patch_subpixel(reference, rect).size == 0
+    with pytest.raises(core.CoreError) as error:
+        core.initialize_extensometer_group_state(reference, group)
+    assert error.value.code == "ROI_OUT_OF_BOUNDS"
+
+
+def test_fractional_roi_dimensions_do_not_silently_change_gauge_length():
+    reference = core.generate_synthetic_speckle(128, 160, seed=17)
+    group = {"name": "G01", "roi1": (20, 40, 25.4, 25), "roi2": (90, 40, 25, 25), "actual_mode": "x"}
+    with pytest.raises(core.CoreError) as error:
+        core.initialize_extensometer_group_state(reference, group)
+    assert error.value.code == "INVALID_ROI_GROUP"
+
+
+def test_low_texture_remains_a_visible_warning_when_tracking_is_accepted(tmp_path):
+    image = core.generate_synthetic_speckle(128, 160, seed=17).astype(np.uint8)
+    for x in (20, 90):
+        patch = image[40:65, x:x + 25].astype(float)
+        image[40:65, x:x + 25] = np.clip(100 + .035 * (patch - 100), 0, 255).astype(np.uint8)
+    paths = [tmp_path / "reference.png", tmp_path / "unchanged.png"]
+    for path in paths:
+        core.write_image_checked(path, image)
+    result = core.run_extensometer_sequence({
+        "image_paths": paths, "output_dir": tmp_path / "output",
+        "roi_groups": [{"name": "G01", "roi1": (20, 40, 25, 25),
+                        "roi2": (90, 40, 25, 25), "actual_mode": "x"}],
+        "search_radius_base": 15, "enable_fb_check": False,
+    })
+
+    assert set(result["dataframe"]["texture_code_roi1"]) == {"LOW_TEXTURE"}
+    assert result["dataframe"]["accepted"].all()  # correlation remains inspectable
+    assert result["scientific_ok"] is True
+    assert "texture_preflight:G01:roi1:LOW_TEXTURE" in result["warnings"]
+    assert "texture_preflight:G01:roi2:LOW_TEXTURE" in result["warnings"]
+    gate = result["manifest"]["scientific_gate"]
+    assert gate["groups"]["G01"]["texture_codes"] == {"roi1": "LOW_TEXTURE", "roi2": "LOW_TEXTURE"}
+
+
 def test_known_ten_percent_uniform_stretch_is_recovered():
     reference = core.generate_synthetic_speckle(256, 256, seed=9)
     deformed = core.warp_image_deformation_gradient(reference, np.array([[1.10, 0.0], [0.0, 1.0]]))

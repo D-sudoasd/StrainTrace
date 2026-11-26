@@ -96,8 +96,38 @@ def test_software_rounds_continue_while_the_signal_ledger_transaction_is_held(tm
 
 
 def test_rearming_continues_while_the_previous_window_record_is_waiting_to_commit(tmp_path, monkeypatch):
+    from straintrace_capture import session as capture_module
+
     entered, release = threading.Event(), threading.Event()
+    steps = threading.Semaphore(0)
     insert = storage._insert_event
+
+    class ControllerClock:
+        # Advance the capture schedule only when the test releases a round.
+        # Other threads and image receipt timestamps retain their real clock.
+        value = time.perf_counter()
+
+        def perf_counter(self):
+            return self.value if threading.current_thread().name == "capture-controller" else time.perf_counter()
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    clock = ControllerClock()
+
+    class SteppedStop(threading.Event):
+        def wait(self, timeout=None):
+            if threading.current_thread().name != "capture-controller":
+                return super().wait(timeout)
+            while not self.is_set():
+                if steps.acquire(timeout=.05):
+                    clock.value += timeout or 0
+                    return False
+            return True
+
+    def advance(rounds):
+        for _ in range(rounds):
+            steps.release()
 
     def hold_first_window(db, kind, details, **options):
         insert(db, kind, details, **options)
@@ -106,15 +136,24 @@ def test_rearming_continues_while_the_previous_window_record_is_waiting_to_commi
             assert release.wait(4)
 
     monkeypatch.setattr(storage, "_insert_event", hold_first_window)
-    session = CaptureSession(plan(fps=6, post_frames=3, duration_s=8), tmp_path / "delayed-window")
+    monkeypatch.setattr(capture_module, "time", clock)
+    data = plan(fps=6, post_frames=3, duration_s=8).to_dict()
+    for camera in data["cameras"]:
+        camera["settings"].update(width=32, height=32)
+    session = CaptureSession(CaptureConfig.from_dict(data), tmp_path / "delayed-window")
+    session._stop = SteppedStop()
     session.start()
     try:
+        advance(3)
         until(lambda: window(session, 1, "waiting"))
         first = session.request_trigger(expected_window=1)
+        advance(3)
         assert entered.wait(3)
+        advance(3)
         until(lambda: window(session, 2, "waiting"), timeout=1.3)
         second = session.request_trigger(expected_window=2)
         release.set()
+        advance(3)
         result = session.wait(6)
     finally:
         release.set()
@@ -122,7 +161,14 @@ def test_rearming_continues_while_the_previous_window_record_is_waiting_to_commi
 
     assert result["state"] == "completed" and result["scheduled_misses"] == 0, result
     with ExperimentReader(session.output) as reader:
-        assert [event["signal_id"] for event in reader.events(kind="event_window")] == [first, second]
+        windows = reader.events(kind="event_window")
+        assert [event["signal_id"] for event in windows] == [first, second]
+        assert all((event["pre_retained_rounds"], event["post_received_rounds"]) == (3, 3) for event in windows)
+        for identity in (first, second):
+            for camera in ("sim:0", "sim:1"):
+                frames = [row for row in reader.frames(camera_id=camera) if row["event_context_id"] == identity]
+                assert sum(row["event_position"] == "pre" for row in frames) == 3
+                assert sum(row["event_position"] == "post" for row in frames) == 3
         assert reader.verify()["complete"]
 
 

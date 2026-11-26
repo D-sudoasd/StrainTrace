@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import importlib
 import math
+import os
 import platform
 import sys
 import tempfile
@@ -111,10 +113,13 @@ _CSV_FIELDS = (
     "accepted",
     "quality_accept",
     "quality_label_good",
+    "finite_error_label_good",
     "false_accept",
     "false_reject",
     "quality_false_accept",
     "quality_false_reject",
+    "finite_error_quality_false_accept",
+    "finite_error_quality_false_reject",
     "quality_score",
     "quality_score_version",
     "corruption_applied",
@@ -529,6 +534,12 @@ def _observation(
     p95 = float(np.percentile(strict_errors, 95)) if strict_errors.size else None
     max_error = float(np.max(strict_errors)) if strict_errors.size else None
     oracle_exx, oracle_eyy, oracle_exy = _oracle_strain(case)
+    # A validity flag alone is not evidence that a measurement exists.  Check
+    # all numeric cases, including the corruption panel, against the actual
+    # raw displacements and strain components before computing coverage.
+    strain_components = {name: _as_array(field, (name,), n) for name in ("Exx", "Eyy", "Exy")}
+    finite_strain = np.column_stack([np.isfinite(strain_components[name]) for name in ("Exx", "Eyy", "Exy")]).all(axis=1)
+    strain_ok = strain_valid & valid_finite & finite_strain
     strain_arrays: dict[str, Any] = {name: None for name in ("Exx", "Eyy", "Exy")}
     strain_errors: dict[str, Any] = {name: None for name in ("Exx", "Eyy", "Exy")}
     affine_fit: dict[str, Any] | None = None
@@ -536,8 +547,7 @@ def _observation(
     strain_consistency_abs_max = None
     metadata_ok = True
     if case["kind"] == "affine":
-        for name in strain_arrays:
-            strain_arrays[name] = _as_array(field, (name,), n)
+        strain_arrays.update(strain_components)
         affine_fit = _fit_affine(raw_u, raw_v, valid, np.asarray(LOCKED_COORDINATES, dtype=float))
         strain_stack = np.column_stack(
             (
@@ -546,7 +556,6 @@ def _observation(
                 np.asarray(strain_arrays["Exy"], dtype=float) - oracle_exy,
             )
         )
-        strain_ok = strain_valid & np.isfinite(strain_stack).all(axis=1)
         if np.any(strain_ok):
             strain_abs_max = float(np.max(np.abs(strain_stack[strain_ok])))
             estimated_E = np.asarray((affine_fit["E"][0, 0], affine_fit["E"][1, 1], affine_fit["E"][0, 1]), dtype=float)
@@ -578,6 +587,9 @@ def _observation(
         # when no finite displacement error can be formed.  This keeps AUC
         # population accounting honest while preserving raw diagnostics.
         label_good = bool(accepted and np.isfinite(error_px[index]) and error_px[index] <= ERROR_TOLERANCE_PX)
+        finite_error_label_good = (
+            bool(error_px[index] <= ERROR_TOLERANCE_PX) if np.isfinite(error_px[index]) else None
+        )
         candidate_within_tol = bool(
             (np.isfinite(error_px[index]) and error_px[index] <= ERROR_TOLERANCE_PX)
             or (np.isfinite(cand_error_px[index]) and cand_error_px[index] <= ERROR_TOLERANCE_PX)
@@ -617,10 +629,13 @@ def _observation(
                 "accepted": accepted,
                 "quality_accept": quality_accept,
                 "quality_label_good": label_good,
+                "finite_error_label_good": finite_error_label_good,
                 "false_accept": bool(accepted and label_good is False),
                 "false_reject": bool((not accepted) and candidate_within_tol),
                 "quality_false_accept": bool(quality_accept is True and label_good is False),
                 "quality_false_reject": bool(quality_accept is False and label_good is True),
+                "finite_error_quality_false_accept": None if finite_error_label_good is None else bool(quality_accept is True and not finite_error_label_good),
+                "finite_error_quality_false_reject": None if finite_error_label_good is None else bool(quality_accept is False and finite_error_label_good),
                 "quality_score": quality,
                 "quality_score_version": QUALITY_SCORE_VERSION,
                 "corruption_applied": index in target_indices,
@@ -643,11 +658,15 @@ def _observation(
                 "preflight_code": None,
             }
         )
-    gates = {"diagnostics_complete": True}
+    gates = {
+        "diagnostics_complete": True,
+        "displacement_validity_consistent": not bool(np.any(valid & ~finite_raw)),
+        "strain_validity_consistent": not bool(np.any(strain_valid & (~valid_finite | ~finite_strain))),
+    }
     if panel is None:
         gates.update(
             {
-                "valid_fraction": float(np.count_nonzero(valid) / n) >= float(thresholds["valid_fraction_min"]),
+                "valid_fraction": float(np.count_nonzero(valid_finite) / n) >= float(thresholds["valid_fraction_min"]),
                 "rmse_px": rmse is not None and rmse <= float(thresholds["rmse_px_max"]),
                 "p95_error_px": p95 is not None and p95 <= float(thresholds["p95_error_px_max"]),
                 "max_error_px": max_error is not None and max_error <= float(thresholds["max_error_px_max"]),
@@ -666,13 +685,18 @@ def _observation(
                     "affine_metadata": metadata_ok,
                     "strain_component_abs_error": strain_abs_max is not None and strain_abs_max <= float(thresholds["strain_component_abs_error_max"]),
                     "strain_consistency_abs_error": strain_consistency_abs_max is not None and strain_consistency_abs_max <= float(thresholds["strain_consistency_abs_error_max"]),
-                    "strain_valid_fraction": float(np.count_nonzero(strain_valid) / n) >= float(thresholds["strain_valid_fraction_min"]),
+                    "strain_valid_fraction": float(np.count_nonzero(strain_ok) / n) >= float(thresholds["strain_valid_fraction_min"]),
                 }
             )
     observed = {
-        "valid_fraction": float(np.count_nonzero(valid) / n),
-        "strain_valid_fraction": float(np.count_nonzero(strain_valid) / n),
+        "valid_fraction": float(np.count_nonzero(valid_finite) / n),
+        "strain_valid_fraction": float(np.count_nonzero(strain_ok) / n),
+        "correlation_flag_fraction": float(np.count_nonzero(valid) / n),
+        "strain_flag_fraction": float(np.count_nonzero(strain_valid) / n),
         "raw_finite_count": int(np.count_nonzero(finite_raw)),
+        "accepted_without_raw_displacement_count": int(np.count_nonzero(valid & ~finite_raw)),
+        "strain_flag_without_valid_displacement_count": int(np.count_nonzero(strain_valid & ~valid_finite)),
+        "strain_flag_without_finite_components_count": int(np.count_nonzero(strain_valid & ~finite_strain)),
         "rejected_count": int(np.count_nonzero(~valid)),
         "rmse_px": rmse,
         "p95_error_px": p95,
@@ -826,10 +850,65 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
             path,
             _CSV_FIELDS,
             ({field: _csv_value(row.get(field)) for field in _CSV_FIELDS} for row in rows),
+            exclusive=True,
             extrasaction="ignore",
         )
     except OSError as exc:
         raise BenchmarkIOError(f"cannot write benchmark CSV: {path}: {exc}") from exc
+
+
+def _publish_reports(staging: Path, output: Path) -> None:
+    """Publish fresh artifacts and roll back only the files from this attempt."""
+    published: list[dict[str, Any]] = []
+    try:
+        for name in ("benchmark_report.csv", "benchmark_report.json"):
+            source, target = staging / name, output / name
+            identity = source.stat()
+            source_hash = _common_sha256_file(source)
+            try:
+                # A hard link publishes completed bytes without replacing a
+                # concurrent writer's destination; staging is on the same volume.
+                os.link(source, target)
+            except OSError as exc:
+                unsupported = exc.errno in {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP} or getattr(exc, "winerror", None) in {1, 50}
+                if not unsupported:
+                    raise
+                # Some volumes do not support links. Exclusive creation still
+                # avoids overwriting a competing writer on those filesystems.
+                with source.open("rb") as src, target.open("xb", buffering=0) as dst:
+                    digest = hashlib.sha256()
+                    record = {"path": target, "identity": os.fstat(dst.fileno()), "sha256": digest.hexdigest()}
+                    published.append(record)
+                    while chunk := src.read(1024 * 1024):
+                        view = memoryview(chunk)
+                        while view:
+                            written = dst.write(view)
+                            if not written:
+                                raise OSError("short write publishing benchmark artifact")
+                            digest.update(view[:written])
+                            record["sha256"] = digest.hexdigest()
+                            view = view[written:]
+            else:
+                published.append({"path": target, "identity": identity, "sha256": source_hash})
+    except BaseException as exc:
+        retained: list[str] = []
+        for record in reversed(published):
+            target = record["path"]
+            try:
+                same_file = os.path.samestat(record["identity"], target.stat())
+                same_content = _common_sha256_file(target) == record["sha256"]
+                if same_file and same_content:
+                    target.unlink()
+                else:
+                    retained.append(str(target))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                retained.append(str(target))
+        if isinstance(exc, OSError):
+            detail = f"; retained changed or inaccessible outputs: {', '.join(retained)}" if retained else ""
+            raise BenchmarkIOError(f"cannot publish benchmark reports in {output}: {exc}{detail}") from exc
+        raise
 
 
 def run_benchmark(
@@ -864,10 +943,14 @@ def run_benchmark(
                 raise BenchmarkIOError(f"cannot create benchmark output directory: {output}: {exc}") from exc
         if not output.is_dir():
             raise BenchmarkIOError(f"benchmark output path is not a directory: {output}")
+        for artifact in (output / "benchmark_report.csv", output / "benchmark_report.json"):
+            if artifact.exists():
+                raise BenchmarkIOError(f"benchmark output already exists; use a fresh directory: {artifact}")
         try:
             core = core_module or importlib.import_module("ezdic_core")
         except Exception as exc:
             raise BenchmarkError(f"cannot import ezdic_core: {exc}") from exc
+        provenance_start = _code_provenance(core, selected_cases_path)
         expected_ids = ["small_translation", "large_translation", "small_affine_strain", "near_1d_periodic"]
         if [str(case["case_id"]) for case in document["cases"]] != expected_ids:
             raise BenchmarkConfigError("locked benchmark case set is incomplete or reordered")
@@ -960,6 +1043,10 @@ def run_benchmark(
                 panel_rows_for_case = [row for row in case_rows if row["case_id"] == case_id and row["corruption_applied"]]
                 expected_panel_variants = [variant for variant in panel_doc["variants"] if case_id in variant["case_ids"]]
                 panel_gate = len(panel_rows_for_case) == sum(len(variant["target_point_indices"]) for variant in expected_panel_variants)
+                panel_results_gate = len(run_records) == len(expected_panel_variants) + 1 and all(
+                    observation.get("status") == "PANEL_OBSERVATION" for observation in run_records[1:]
+                )
+                case_pass = baseline_pass and panel_gate and panel_results_gate
                 record = {
                     "case_id": case_id,
                     "kind": case["kind"],
@@ -968,13 +1055,15 @@ def run_benchmark(
                     "config_hash": case_hash,
                     "input_sha256": fixture["input_sha256"],
                     "thresholds": dict(case_thresholds),
-                    "status": "PASS" if baseline_pass and panel_gate else "FAIL",
-                    "benchmark_pass": baseline_pass and panel_gate,
-                    "scientific_ok": baseline_pass,
-                    "failure_code": None if baseline_pass and panel_gate else "SCIENTIFIC_GATE_FAILED",
+                    "status": "PASS" if case_pass else "FAIL",
+                    "benchmark_pass": case_pass,
+                    "scientific_ok": case_pass,
+                    "scientific_ok_scope": "Synthetic benchmark gate only; no experimental accuracy or scientific acceptance is implied.",
+                    "failure_code": None if case_pass else "SCIENTIFIC_GATE_FAILED",
                     "texture_preflight": dict(preflight),
                     "metrics": dict(baseline_observation["observed"]),
-                    "gates": {**dict(baseline_observation["gates"]), "corruption_rows": panel_gate},
+                    "gates": {**dict(baseline_observation["gates"]), "corruption_rows": panel_gate,
+                              "corruption_observations": panel_results_gate},
                     "runs": run_records,
                     "corruption_panel_version": CORRUPTION_PANEL_VERSION,
                 }
@@ -999,10 +1088,10 @@ def run_benchmark(
         good_count = int(sum(labels))
         bad_count = int(len(labels) - good_count)
         finite_label_rows = [row for row in quality_rows if row.get("error_px") is not None]
-        finite_good_count = int(sum(bool(row["quality_label_good"]) for row in finite_label_rows))
+        finite_good_count = int(sum(bool(row["finite_error_label_good"]) for row in finite_label_rows))
         finite_bad_count = int(len(finite_label_rows) - finite_good_count)
-        false_accept = int(sum(bool(row["quality_false_accept"]) for row in finite_label_rows))
-        false_reject = int(sum(bool(row["quality_false_reject"]) for row in finite_label_rows))
+        false_accept = int(sum(bool(row["finite_error_quality_false_accept"]) for row in finite_label_rows))
+        false_reject = int(sum(bool(row["finite_error_quality_false_reject"]) for row in finite_label_rows))
         ranking_false_accept = int(sum(bool(row["quality_false_accept"]) for row in quality_rows))
         ranking_false_reject = int(sum(bool(row["quality_false_reject"]) for row in quality_rows))
         bad_min_gate = bad_count >= int(quality_contract["minimum_bad_label_count"])
@@ -1030,6 +1119,10 @@ def run_benchmark(
             "finite_error_label_count": len(finite_label_rows),
             "ranking_point_count": len(quality_rows),
             "ranking_label_basis": "numeric solver rows; accepted finite error <= tolerance is good, rejected or nonfinite is bad; near-1D preflight excluded",
+            "ranking_interpretation": "The locked ranking combines solver validity with error: rejected points receive score zero and are labelled bad. A high AUC does not independently establish error discrimination or calibrated thresholds.",
+            "finite_error_metrics_version": "finite_raw_error_independent_of_acceptance_v1",
+            "finite_error_label_basis": "Finite raw displacement error <= tolerance is good, independently of solver acceptance; missing raw displacements are excluded even if a candidate exists.",
+            "finite_error_threshold_scope": "False-accept and false-reject rates describe the illustrative, uncalibrated quality threshold only among scored points with finite raw displacement error.",
             "all_row_count": len(all_rows),
             "rejected_point_count": int(sum(not bool(row["accepted"]) for row in all_rows)),
             "good_label_count": finite_good_count,
@@ -1089,9 +1182,15 @@ def run_benchmark(
             "core_source_sha256",
             "cli_source_sha256",
         )
-        provenance_gate = all(isinstance(provenance.get(key), str) and len(str(provenance[key])) == 64 for key in provenance_keys)
+        provenance_available = all(
+            isinstance(snapshot.get(key), str) and len(str(snapshot[key])) == 64
+            for snapshot in (provenance_start, provenance) for key in provenance_keys
+        )
+        provenance_unchanged = all(provenance_start.get(key) == provenance.get(key) for key in provenance_keys)
+        provenance_gate = provenance_available and provenance_unchanged
         expected_rows_gate = len(all_rows) == expected_row_count
-        csv_path = output / "benchmark_report.csv"
+        staging = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".benchmark-", dir=output)))
+        csv_path = staging / "benchmark_report.csv"
         _write_csv(csv_path, all_rows)
         try:
             csv_exists_gate = csv_path.is_file() and csv_path.stat().st_size > 0
@@ -1128,6 +1227,7 @@ def run_benchmark(
             "locked_cases_hash": locked_case_hash(),
             "app": {"name": "ezDIC", "benchmark": "quality_to_known_error", "version": core_version},
             "code": provenance,
+            "code_provenance_scope": "On-disk source and case hashes are sampled at start and end; they do not attest to in-memory changes before or during the run.",
             "environment": {"python": platform.python_version(), "platform": platform.system(), "image_shape": list(IMAGE_SHAPE)},
             "contract": document["contract"],
             "texture_preflight_contract": TEXTURE_PREFLIGHT,
@@ -1144,19 +1244,24 @@ def run_benchmark(
             "exit_code": EXIT_SUCCESS if overall_pass else EXIT_GATE_ERROR,
         }
         if not provenance_gate:
-            report["provenance_failure"] = "CODE_PROVENANCE_UNAVAILABLE"
+            report["provenance_failure"] = (
+                "CODE_PROVENANCE_UNAVAILABLE" if not provenance_available else "CODE_PROVENANCE_CHANGED"
+            )
+            report["code_at_start"] = provenance_start
         safe_report = _json_safe(report)
         try:
             write_json_lf(
-                output / "benchmark_report.json",
+                staging / "benchmark_report.json",
                 safe_report,
+                exclusive=True,
                 indent=None,
                 ensure_ascii=False,
                 sort_keys=True,
                 allow_nan=False,
             )
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
             raise BenchmarkIOError(f"cannot write benchmark report: {output / 'benchmark_report.json'}: {exc}") from exc
+        _publish_reports(staging, output)
         return safe_report
 
 

@@ -164,6 +164,93 @@ def test_residual_threshold_is_explicit_and_reports_rejection_reason():
     assert np.all(np.asarray(field["invalid_reason"], dtype=object) == "RESIDUAL_ABOVE_THRESHOLD")
 
 
+@pytest.mark.parametrize("eligible", [np.ones(9, dtype=bool), np.zeros(9, dtype=bool)])
+def test_zero_fraction_thresholds_never_accept_a_field_without_valid_points(eligible):
+    field = {"eligible": eligible, "valid": np.zeros(9, dtype=bool), "strain_valid": np.zeros(9, dtype=bool)}
+    summary = core.field_quality_summary(
+        field, min_correlation_valid_fraction=0.0, min_strain_valid_fraction=0.0
+    )
+    assert summary["scientific_ok"] is False
+    assert summary["correlation_valid_count"] == 0
+    assert summary["strain_valid_count"] == 0
+    assert "no_valid_strain_points" in summary["scientific_reasons"]
+
+
+def test_strain_validity_requires_eligible_valid_correlation():
+    field = {
+        "eligible": np.array([True, True, False]),
+        "valid": np.array([True, False, True]),
+        "strain_valid": np.array([False, True, True]),
+        "Exx": np.zeros(3), "Eyy": np.zeros(3), "Exy": np.zeros(3),
+    }
+    summary = core.field_quality_summary(
+        field, min_correlation_valid_fraction=0.0, min_strain_valid_fraction=0.0
+    )
+    assert summary["correlation_valid_count"] == 1
+    assert summary["strain_valid_count"] == 0
+    assert summary["strain_valid_fraction"] == 0.0
+    assert summary["scientific_ok"] is False
+    assert not core.fullfield_field_has_finite_strain(field)
+
+
+def test_measured_field_coverage_counts_complete_finite_vectors_and_tensors():
+    field = dict(valid=[True] * 9, eligible=[True] * 9, strain_valid=[True] * 9,
+                 u=[0.] * 9, v=[np.nan] + [0.] * 8, Exx=[0.] * 9,
+                 Eyy=[0., 0.] + [np.nan] * 7, Exy=[0.] * 9)
+    report = core.field_quality_summary(field)
+    assert report["correlation_valid_count"] == 8
+    assert report["strain_valid_count"] == 1
+    assert report["scientific_ok"] is False
+    assert core.fullfield_field_has_finite_strain(field)
+    field["eligible"] = [True]
+    assert core.field_quality_summary(field)["eligible_point_count"] == 0
+    assert not core.fullfield_field_has_finite_strain(field)
+
+
+def test_fullfield_finite_strain_check_retains_legacy_fallback():
+    field = {"valid": np.array([True]), "Exx": [0.0], "Eyy": [0.0], "Exy": [0.0]}
+    assert core.fullfield_field_has_finite_strain(field)
+    field["strain_valid"] = np.array([False])
+    assert not core.fullfield_field_has_finite_strain(field)
+
+
+@pytest.mark.parametrize("threshold", ["min_correlation_valid_fraction", "min_strain_valid_fraction"])
+@pytest.mark.parametrize("value", [float("nan"), -0.1, 1.1])
+def test_invalid_quality_fraction_cannot_silently_pass(threshold, value):
+    field = {"valid": np.ones(3, dtype=bool), "strain_valid": np.ones(3, dtype=bool)}
+    with pytest.raises(ValueError, match=threshold):
+        core.field_quality_summary(field, **{threshold: value})
+
+
+@pytest.mark.parametrize("option", ["zncc_min", "min_correlation_valid_fraction", "min_strain_valid_fraction"])
+def test_dic_rejects_nonfinite_quality_threshold_before_running(option):
+    image = core.generate_synthetic_speckle(48, 48, seed=17)
+    with pytest.raises(ValueError, match=option):
+        core.run_2d_dic(image, image, (8, 8, 32, 32), subset_size=9, step=8,
+                        initialization="local", **{option: float("nan")})
+
+
+def test_gui_permitted_low_texture_cannot_pass_fullfield_scientific_gate(tmp_path):
+    image = core.generate_synthetic_speckle(80, 80, seed=17).astype(np.uint8)
+    patch = image[12:68, 12:68].astype(float)
+    image[12:68, 12:68] = np.clip(100 + .035 * (patch - 100), 0, 255).astype(np.uint8)
+    paths = [tmp_path / "reference.png", tmp_path / "unchanged.png"]
+    for path in paths:
+        core.write_image_checked(path, image)
+    result = core.run_fullfield_sequence({
+        "image_paths": paths, "output_dir": tmp_path / "output", "field_roi": (12, 12, 56, 56),
+        "subset_size": 15, "step": 10, "search_radius": 5, "strain_window": 3,
+        "initialization": "local", "_allow_low_texture_preflight": True,
+    })
+    manifest = result["manifest"]
+    assert manifest["texture_preflight"]["field_roi"]["code"] == "LOW_TEXTURE"
+    assert result["scientific_ok"] is False
+    assert result["status"] == "scientific_gate_failed"
+    assert "texture_preflight_failed" in manifest["scientific_gate"]["reasons"]
+    assert manifest["frames"][0]["scientific_valid"] is False
+    assert manifest["frames"][0]["scientific_ok"] is False
+
+
 def test_rejected_ambiguous_points_do_not_fail_scientific_gate_by_themselves():
     valid = np.ones(20, dtype=bool)
     valid[0] = False

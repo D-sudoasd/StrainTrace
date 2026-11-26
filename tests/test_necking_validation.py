@@ -38,6 +38,19 @@ def test_target_pixels_match_independent_bracketed_inverse(params):
         assert target[py, px] == pytest.approx(float(expected), abs=1e-9)
 
 
+@pytest.mark.parametrize("overrides", [
+    {"axial": -1.0, "peak": 0.0},
+    {"axial": 0.0, "peak": -1.01},
+    {"lateral": -1.0, "neck": 0.0},
+    {"lateral": 0.0, "neck": -1.01},
+    {"width": 0.0},
+    {"width": float("nan")},
+])
+def test_noninvertible_or_nonfinite_deformation_cannot_generate_images(overrides):
+    with pytest.raises(ValueError):
+        bench.image_pair({**bench.CASES["uniform"], **overrides})
+
+
 def test_uniform_and_localized_fields_produce_auditable_accuracy():
     uniform = bench.run_case(bench.CASES["uniform"])
     narrow = bench.run_case(bench.CASES["narrow_localization"])

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -45,6 +46,7 @@ def test_force_exit_recovers_native_frame_identity_and_trigger(tmp_path, cut, du
     root = tmp_path / "experiment"
     program = """
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -57,7 +59,7 @@ publish = storage._publish_path
 commit = storage.ExperimentWriter.commit_frames
 
 def hold(path):
-    pause.write_text(str(path), encoding="utf-8")
+    pause.write_text(json.dumps({"path": str(path), "pid": os.getpid()}), encoding="utf-8")
     time.sleep(30)
     raise TimeoutError("test never stopped the writer")
 
@@ -90,9 +92,16 @@ run.wait(40)
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
+    paused = None
     try:
         deadline = time.monotonic() + 12
-        while not marker.is_file() or not marker.stat().st_size:
+        while paused is None:
+            try:
+                paused = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            if paused is not None:
+                break
             if process.poll() is not None:
                 pytest.fail(process.stderr.read().decode(errors="replace"))
             if time.monotonic() >= deadline:
@@ -103,11 +112,15 @@ run.wait(40)
         assert error.value.code == "WRITER_ACTIVE"
     finally:
         if process.poll() is None:
-            process.kill()
+            # The venv launcher may be a different process from the writer.
+            if paused is not None and paused["pid"] != process.pid:
+                os.kill(paused["pid"], signal.SIGTERM)
+            else:
+                process.kill()
         process.wait(timeout=6)
         process.stderr.close()
 
-    raw_path = Path(marker.read_text(encoding="utf-8"))
+    raw_path = Path(paused["path"])
     raw = raw_path.read_bytes()
     journal = (root / FRAME_WRITE_JOURNAL).read_bytes().splitlines()
     descriptors = [json.loads(line.split(b" ", 1)[1]) for line in journal]
@@ -486,14 +499,17 @@ def test_failed_ledger_commit_preserves_frame_for_recovery(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("fail_commit", [False, True], ids=["commit", "recover"])
 def test_large_buffered_tiff_publication_can_continue_across_batches_during_a_commit(tmp_path, monkeypatch, fail_commit):
+    from straintrace_capture.cameras.simulated import SimulatedCamera
+
     original_insert = storage._insert_frames
     original_publish = ExperimentWriter._publish_frame
+    original_read = SimulatedCamera.read
     entered, release, published_last = threading.Event(), threading.Event(), threading.Event()
     frame_count = 5
     commit_attempts = []
 
     def hold_first_commit(db, rows):
-        commit_attempts.append(rows[0].record["sequence"])
+        commit_attempts.append([row.record["sequence"] for row in rows])
         if rows[0].record["sequence"] == 1:
             entered.set()
             assert release.wait(30)
@@ -506,17 +522,25 @@ def test_large_buffered_tiff_publication_can_continue_across_batches_during_a_co
         if row.record["sequence"] == frame_count:
             published_last.set()
 
+    def wait_until_first_commit(camera, timeout_s):
+        # Keep the first batch to one frame, then let the stream proceed while
+        # its ledger transaction is held. No timed capture ticks can be missed.
+        if camera._counter and not entered.wait(15):
+            raise TimeoutError("the first frame did not reach its ledger commit")
+        return original_read(camera, timeout_s)
+
     monkeypatch.setattr(storage, "_insert_frames", hold_first_commit)
     monkeypatch.setattr(ExperimentWriter, "_publish_frame", mark_last_tiff)
+    monkeypatch.setattr(SimulatedCamera, "read", wait_until_first_commit)
     data = capture_plan().to_dict()
-    data["cameras"][0]["settings"] = {"width": 1600, "height": 720, "pixel_format": "Mono16"}
-    data["phases"] = [{"mode": "timed", "role": "test", "fps": 5, "frame_count": frame_count}]
-    data["max_buffer_bytes"] = 3 * 2**20
+    data["cameras"][0]["settings"] = {"width": 1600, "height": 720, "pixel_format": "Mono16", "fps": 5.}
+    data["phases"] = [{"mode": "continuous", "role": "test", "frame_count": frame_count}]
+    data["max_buffer_bytes"] = 12 * 2**20
     session = CaptureSession(CaptureConfig.from_dict(data), tmp_path / "concurrent-tiffs")
     session.start()
     try:
-        # Generous budgets: a loaded shared runner writes five 2.3 MB TIFFs slowly, but
-        # the property under test is that none of them waits for the held SQLite commit.
+        # The property under test is that subsequent TIFF publication does not
+        # wait for the held SQLite commit, regardless of camera or disk speed.
         assert entered.wait(15)
         assert published_last.wait(15), "the first SQLite transaction stalled a later TIFF"
         deadline = time.monotonic() + 5
@@ -537,14 +561,15 @@ def test_large_buffered_tiff_publication_can_continue_across_batches_during_a_co
 
     if fail_commit:
         assert result["state"] == "failed" and result["cameras"]["sim:0"]["app_unsaved"] == frame_count
-        assert commit_attempts == [1]
+        assert commit_attempts == [[1]]
         with ExperimentReader(session.output) as reader:
             assert not reader.frames()
         recovered = recover_experiment(session.output)
         assert recovered["ok"] and len(recovered["recovery"]["recovered"]) == frame_count
     else:
         assert result["state"] == "completed"
-        assert commit_attempts == list(range(1, frame_count + 1))
+        assert commit_attempts[0] == [1] and len(commit_attempts) > 1
+        assert [sequence for batch in commit_attempts for sequence in batch] == list(range(1, frame_count + 1))
     with ExperimentReader(session.output) as reader:
         assert [row["sha256"] for row in reader.frames()] == hashes
         assert reader.verify()["ok"]

@@ -289,6 +289,7 @@ class CaptureSession:
         self._ended: float | None = None
         self._error: dict | None = None
         self._writer_failed = False
+        self._writer_crashed = False
         self._store: ExperimentWriter | None = None
         self._live_write = LiveWriteTiming(max(WRITE_BATCH_FRAME_LIMIT, len(self.config.cameras)),
                                           self.config.max_buffer_bytes, self._frames.maxsize)
@@ -666,20 +667,26 @@ class CaptureSession:
         if self.config.durability == "buffered":
             tiff_workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tiff-checksum")
         self._tiff_workers = tiff_workers
-        writer = threading.Thread(target=self._write, name="capture-disk")
-        writer.start()
+        writer = threading.Thread(target=self._write_guarded, name="capture-disk")
+        writer_started = False
         quality_stop = threading.Event()
         quality_worker = None
-        if self._quality_watch is not None:
-            quality_worker = threading.Thread(target=self._sample_image_quality, args=(quality_stop,),
-                                              name="capture-image-quality")
-            try:
-                quality_worker.start()
-            except RuntimeError:
-                with self._mutex:
-                    self._quality_watch.measurement_errors += 1
-                quality_worker = None
         try:
+            try:
+                writer.start()
+                writer_started = True
+            except RuntimeError as exc:
+                self._writer_crashed = True
+                raise CaptureError("WRITER_THREAD_FAILED", f"could not start capture writer: {exc}") from exc
+            if self._quality_watch is not None:
+                quality_worker = threading.Thread(target=self._sample_image_quality, args=(quality_stop,),
+                                                  name="capture-image-quality")
+                try:
+                    quality_worker.start()
+                except RuntimeError:
+                    with self._mutex:
+                        self._quality_watch.measurement_errors += 1
+                    quality_worker = None
             with ExitStack() as stack:
                 cameras = []
                 for configured in self.config.cameras:
@@ -719,10 +726,13 @@ class CaptureSession:
                     self._quality_watch.deferred = False
             self._producers_done.set()
             self._writer_ready.set()
-            writer.join()
+            if writer_started:
+                writer.join()
             if tiff_workers is not None:
                 tiff_workers.shutdown(wait=True, cancel_futures=True)
                 self._tiff_workers = None
+            if self._writer_crashed:
+                self._reconcile_crashed_writer()
             with self._mutex:
                 self._ended = time.perf_counter()
                 if self._trial_timing is not None:
@@ -950,7 +960,7 @@ class CaptureSession:
             stats.host_unselected_frames += not chosen
             change = self._native_counter_change(camera_id, index, image, stats)
         if change:
-            self._store.event(*change)
+            self._diagnostic_event(*change)
 
     def _record_image(self, camera: Camera | HostFrameSampler, phase: Phase, index: int,
                       image: Image, trigger: TriggerEvent | None) -> _Pending:
@@ -968,8 +978,15 @@ class CaptureSession:
             if not isinstance(camera, HostFrameSampler):
                 discontinuity = self._native_counter_change(camera_id, index, image, stats)
         if discontinuity:
-            self._store.event(*discontinuity)
+            self._diagnostic_event(*discontinuity)
         return _Pending(camera_id, sequence, index, phase.role, image, trigger)
+
+    def _diagnostic_event(self, kind, details, *, event_id=None, once=False):
+        try:
+            self._store.event(kind, details, event_id=event_id, once=once)
+        except Exception as exc:
+            self._fail(CaptureError("DIAGNOSTIC_LEDGER_WRITE_FAILED", f"{kind}: {exc}"),
+                       "DIAGNOSTIC_LEDGER_WRITE_FAILED", phase=details.get("phase"))
 
     def _enqueue(self, item: _Pending) -> None:
         self._enqueue_batch((item,))
@@ -1034,9 +1051,67 @@ class CaptureSession:
             self._queue_high_water = max(self._queue_high_water, queued)
             self._raw_high_water = max(self._raw_high_water, self._queue_bytes + self._prebuffer_bytes)
 
+    def _write_guarded(self) -> None:
+        try:
+            self._write()
+        except Exception as exc:
+            self._signal_writer_failure(exc)
+
+    def _signal_writer_failure(self, exc):
+        with self._mutex:
+            if self._writer_crashed:
+                return
+            self._writer_crashed = self._writer_failed = self._event_ledger_failed = True
+            self._stop.set()
+        # Release waiters before trying to log the error: the ledger itself may
+        # still be finishing a previous batch while holding the database lock.
+        self._event_ledger_drained.set()
+        while True:
+            try:
+                _identity, _record, receipt = self._markers.get_nowait()
+            except queue.Empty:
+                break
+            receipt.set_exception(CaptureError("MARKER_WRITE_FAILED", "capture writer stopped unexpectedly"))
+        self._fail(exc, "WRITER_THREAD_FAILED")
+
+    def _reconcile_crashed_writer(self):
+        # A ledger task may have committed while the disk thread was unwinding.
+        # Read its authoritative totals before classifying outstanding frames.
+        try:
+            totals = self._store.committed_frame_totals()
+        except Exception as exc:
+            self._fail(exc, "WRITER_RECONCILIATION_FAILED")
+            totals = None
+        with self._mutex:
+            if totals is not None:
+                for camera_id, stats in self._stats.items():
+                    count, size = totals.get(camera_id, (0, 0))
+                    difference = count - stats.saved
+                    if 0 <= difference <= stats.pending_write + stats.app_unsaved:
+                        stats.app_unsaved += stats.pending_write - difference
+                        stats.pending_write = 0
+                        stats.saved, stats.saved_bytes = count, size
+            while True:
+                try:
+                    self._frames.get_nowait()
+                except queue.Empty:
+                    break
+            self._queue_bytes = 0
+
     def _write(self) -> None:
+        with ExitStack() as stack:
+            ledger = (stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="capture-ledger"))
+                      if self.config.durability == "buffered" else None)
+            try:
+                self._write_batches(ledger)
+            except Exception as exc:
+                # Stop producers before ExitStack waits for any in-flight commit.
+                self._signal_writer_failure(exc)
+                raise
+
+    def _write_batches(self, ledger) -> None:
         pending: deque[_Pending] = deque()
-        buffered = self.config.durability == "buffered"
+        buffered = ledger is not None
         batch_wait_s = _BUFFERED_BATCH_WAIT_S if buffered else _WRITE_BATCH_WAIT_S
         ledger_writes: deque[Future[bool]] = deque()
         commit_allowed = True
@@ -1045,56 +1120,54 @@ class CaptureSession:
             nonlocal commit_allowed
             commit_allowed = ledger_writes.popleft().result() and commit_allowed
 
-        with ExitStack() as stack:
-            ledger = stack.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="capture-ledger")) if buffered else None
-            while pending or not (self._producers_done.is_set() and self._frames.empty() and self._markers.empty()
-                                  and self._event_writes.empty() and not self._quality_notices_pending()):
-                self._write_event_records()
-                self._write_markers()
-                self._write_quality_notices()
-                if not pending and not self._take_work(pending, None):
-                    continue
-                start = time.perf_counter()
-                prepared, items = [], []
-                small_batch = buffered
-                while len(items) < WRITE_BATCH_FRAME_LIMIT:
-                    if not pending:
-                        wait_s = _SMALL_BUFFERED_BATCH_WAIT_S if small_batch else batch_wait_s
-                        remaining = wait_s - (time.perf_counter() - start)
-                        if (not small_batch and remaining <= 0) or not self._take_work(pending, remaining):
-                            break
-                    source = pending.popleft()
-                    item = _WriteReceipt(source.camera_id, source.sequence, source.phase, source.image.received_utc_ns,
-                                         source.image.raw_bytes, source.trigger)
-                    items.append(item)
-                    small_batch = small_batch and item.raw_bytes <= _SMALL_BUFFERED_FRAME_BYTES
-                    try:
-                        if row := self._stage_pending_frame(source):
-                            prepared.append(row)
-                    except Exception as exc:
-                        self._write_failure(exc, item)
-                    finally:
-                        del source
-                        with self._mutex:
-                            self._queue_bytes -= item.raw_bytes
-                while ledger_writes and ledger_writes[0].done():
+        while pending or not (self._producers_done.is_set() and self._frames.empty() and self._markers.empty()
+                              and self._event_writes.empty() and not self._quality_notices_pending()):
+            self._write_event_records()
+            self._write_markers()
+            self._write_quality_notices()
+            if not pending and not self._take_work(pending, None):
+                continue
+            start = time.perf_counter()
+            prepared, items = [], []
+            small_batch = buffered
+            while len(items) < WRITE_BATCH_FRAME_LIMIT:
+                if not pending:
+                    wait_s = _SMALL_BUFFERED_BATCH_WAIT_S if small_batch else batch_wait_s
+                    remaining = wait_s - (time.perf_counter() - start)
+                    if (not small_batch and remaining <= 0) or not self._take_work(pending, remaining):
+                        break
+                source = pending.popleft()
+                item = _WriteReceipt(source.camera_id, source.sequence, source.phase, source.image.received_utc_ns,
+                                     source.image.raw_bytes, source.trigger)
+                items.append(item)
+                small_batch = small_batch and item.raw_bytes <= _SMALL_BUFFERED_FRAME_BYTES
+                try:
+                    if row := self._stage_pending_frame(source):
+                        prepared.append(row)
+                except Exception as exc:
+                    self._write_failure(exc, item)
+                finally:
+                    del source
+                    with self._mutex:
+                        self._queue_bytes -= item.raw_bytes
+            while ledger_writes and ledger_writes[0].done():
+                finish_ledger_batch()
+            if ledger is not None and not small_batch and prepared and commit_allowed:
+                previous = ledger_writes[-1] if ledger_writes else None
+                ledger_writes.append(ledger.submit(self._commit_queued_write_batch, previous, items, prepared))
+                if len(ledger_writes) >= _BUFFERED_LEDGER_BATCH_LIMIT:
                     finish_ledger_batch()
-                if ledger is not None and not small_batch and prepared and commit_allowed:
-                    previous = ledger_writes[-1] if ledger_writes else None
-                    ledger_writes.append(ledger.submit(self._commit_queued_write_batch, previous, items, prepared))
-                    if len(ledger_writes) >= _BUFFERED_LEDGER_BATCH_LIMIT:
-                        finish_ledger_batch()
-                    if self._store.frame_journal_needs_checkpoint():
-                        while ledger_writes:
-                            finish_ledger_batch()
-                else:
+                if self._store.frame_journal_needs_checkpoint():
                     while ledger_writes:
                         finish_ledger_batch()
-                    if not commit_allowed:
-                        prepared.clear()
-                    commit_allowed = self._commit_write_batch(items, prepared) and commit_allowed
-            while ledger_writes:
-                finish_ledger_batch()
+            else:
+                while ledger_writes:
+                    finish_ledger_batch()
+                if not commit_allowed:
+                    prepared.clear()
+                commit_allowed = self._commit_write_batch(items, prepared) and commit_allowed
+        while ledger_writes:
+            finish_ledger_batch()
 
     def _stage_pending_frame(self, item):
         if self._writer_failed:
@@ -1382,7 +1455,7 @@ class CaptureSession:
                 stats.hardware_identity_missing += 1
                 first = stats.hardware_identity_missing == 1
             if first:
-                self._store.event("hardware_identity_unavailable", {
+                self._diagnostic_event("hardware_identity_unavailable", {
                     "camera_id": camera_id, "phase": index, "counter_feature": pairing.counter_feature,
                     "observed": value, "first_counter": anchor, "received_utc_ns": image.received_utc_ns,
                 })
@@ -1396,16 +1469,20 @@ class CaptureSession:
             "counter_feature": pairing.counter_feature, "first_cam_counter": dict(pairing.first_counter),
         })
 
-    def _fire(self, camera: Camera | HostFrameSampler, phase: Phase, index: int, event: TriggerEvent) -> _Pending:
+    def _fire(self, camera: Camera | HostFrameSampler, phase: Phase, index: int, event: TriggerEvent) -> _Pending | None:
+        if self._stop.is_set():
+            return None
         dispatched_utc, dispatched_monotonic = receipt_times()
         camera.trigger()
         deadline = time.perf_counter() + phase.frame_timeout_s
-        while (remaining := deadline - time.perf_counter()) > 0:
+        while not self._stop.is_set() and (remaining := deadline - time.perf_counter()) > 0:
             image = camera.read(min(0.2, remaining))
             if image is not None:
                 metadata = {**image.metadata, "software_trigger_dispatch_utc_ns": dispatched_utc,
                             "software_trigger_dispatch_monotonic_ns": dispatched_monotonic}
                 return self._record_image(camera, phase, index, replace(image, metadata=metadata), event)
+        if self._stop.is_set():
+            return None
         raise CaptureError("TRIGGER_FRAME_TIMEOUT", f"{camera.device.id} produced no image for {event.id}")
 
     def _round(self, executor, cameras, phase, index, *, due=None, signal=None, prebuffer=False) -> list[_Pending]:
@@ -1426,13 +1503,17 @@ class CaptureSession:
         received, failed = [], []
         for camera, future in zip(cameras, futures):
             try:
-                received.append(future.result())
+                item = future.result()
+                if item is None:
+                    failed.append({"camera_id": camera.device.id, "message": "capture stopped before frame receipt"})
+                else:
+                    received.append(item)
             except Exception as exc:
                 failed.append({"camera_id": camera.device.id, "message": str(exc)})
                 self._fail(exc, "SOFTWARE_TRIGGER_FAILED")
         if failed:
-            self._store.event(event.kind, event.details, event_id=event.id, once=True)
-            self._store.event("trigger_incomplete", {
+            self._diagnostic_event(event.kind, event.details, event_id=event.id, once=True)
+            self._diagnostic_event("trigger_incomplete", {
                 "phase": index, "trigger_event_id": event_id, "issued_utc_ns": utc, "failed": failed,
             })
         return received

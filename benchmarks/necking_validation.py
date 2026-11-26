@@ -67,6 +67,19 @@ def truth(x, y, params):
 
 def image_pair(params):
     """Make target pixels by solving for reference positions, not raster warping."""
+    names = ("axial", "peak", "width", "lateral", "neck")
+    try:
+        params = {name: float(params[name]) for name in names}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("deformation requires finite axial, peak, width, lateral, and neck parameters") from exc
+    if not all(np.isfinite(value) for value in params.values()) or params["width"] <= 0:
+        raise ValueError("deformation parameters must be finite and width must be positive")
+    # The inverse below assumes y' is strictly increasing and the lateral
+    # stretch is positive.  g ranges from zero to one over the plane.
+    if 1 + params["axial"] + min(params["peak"], 0.0) <= 0:
+        raise ValueError("axial deformation is not strictly increasing")
+    if 1 + params["lateral"] + min(params["neck"], 0.0) <= 0:
+        raise ValueError("lateral deformation is not invertible")
     y, x = np.indices(SHAPE, dtype=float)
     cy, cx = SHAPE[0] / 2, SHAPE[1] / 2
     # y' = y + v(y) is strictly increasing in all manufactured cases.
@@ -77,14 +90,21 @@ def image_pair(params):
                     params["peak"] * params["width"] * np.sqrt(np.pi / 2) *
                     erf(ry / (np.sqrt(2) * params["width"])) - (y - cy))
         ry -= residual / (1 + params["axial"] + params["peak"] * g)
-    if np.max(np.abs(residual)) > 1e-10:
-        raise RuntimeError("inverse deformation failed to converge")
     g = np.exp(-0.5 * (ry / params["width"]) ** 2)
+    residual = ((1 + params["axial"]) * ry +
+                params["peak"] * params["width"] * np.sqrt(np.pi / 2) *
+                erf(ry / (np.sqrt(2) * params["width"])) - (y - cy))
+    if not np.isfinite(ry).all() or not np.isfinite(residual).all() or np.max(np.abs(residual)) > 1e-10:
+        raise RuntimeError("inverse deformation failed to converge")
     lateral_stretch = 1 + params["lateral"] + params["neck"] * g
-    if np.min(lateral_stretch) <= 0:
+    if not np.isfinite(lateral_stretch).all() or np.min(lateral_stretch) <= 0:
         raise ValueError("deformation is not invertible")
     rx = cx + (x - cx) / lateral_stretch
-    return analytic_texture(x, y, seed=SEED), analytic_texture(rx, cy + ry, seed=SEED)
+    reference = analytic_texture(x, y, seed=SEED)
+    target = analytic_texture(rx, cy + ry, seed=SEED)
+    if not np.isfinite(reference).all() or not np.isfinite(target).all():
+        raise RuntimeError("inverse deformation produced nonfinite image values")
+    return reference, target
 
 
 def _footprint_categories(X, Y, params, solver_params):
@@ -107,6 +127,28 @@ def _footprint_categories(X, Y, params, solver_params):
         clear[index] = (np.all(px < x0 - 3) or np.all(px >= x1 + 3) or
                         np.all(py < y0 - 3) or np.all(py >= y1 + 3))
     return covered, clear
+
+
+def _boolean_mask(values, shape, name):
+    values = np.asarray(values)
+    if values.dtype.kind != "b":
+        raise ValueError(f"{name} must contain boolean flags")
+    try:
+        return values.reshape(shape)
+    except ValueError as exc:
+        raise ValueError(f"{name} shape does not match the POI grid") from exc
+
+
+def _validate_strain_support(valid, strain_valid, u, v, eyy):
+    """Reject flagged strains that have no corresponding finite measurement."""
+    valid = np.asarray(valid, dtype=bool)
+    strain_valid = np.asarray(strain_valid, dtype=bool)
+    u, v, eyy = (np.asarray(value, dtype=float) for value in (u, v, eyy))
+    if any(value.shape != valid.shape for value in (strain_valid, u, v, eyy)):
+        raise ValueError("strain support arrays have inconsistent shapes")
+    supported = valid & np.isfinite(u) & np.isfinite(v) & np.isfinite(eyy)
+    if np.any(strain_valid & ~supported):
+        raise ValueError("strain-valid point lacks valid correlation, finite displacement, or finite strain")
 
 
 def run_case(params, solver_core=core, corruption=None, solver_params=None, noise_sigma=0.0,
@@ -147,9 +189,10 @@ def run_case(params, solver_core=core, corruption=None, solver_params=None, nois
     elapsed = time.perf_counter() - started
     X, Y = np.asarray(field["X"]), np.asarray(field["Y"])
     u, v, eyy = truth(X, Y, params)
-    valid = np.asarray(field["valid"], dtype=bool).reshape(X.shape)
-    strain_valid = np.asarray(field["strain_valid"], dtype=bool).reshape(X.shape)
+    valid = _boolean_mask(field["valid"], X.shape, "valid")
+    strain_valid = _boolean_mask(field["strain_valid"], X.shape, "strain_valid")
     measured_eyy = np.asarray(field["Eyy_grid"], dtype=float)
+    _validate_strain_support(valid, strain_valid, field["U"], field["V"], measured_eyy)
     fit_support = valid
     pos_jac = getattr(solver_core, "_positive_deformation_jacobian", None)
     if callable(pos_jac) and "P" in field:

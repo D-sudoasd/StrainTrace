@@ -166,6 +166,8 @@ def parse_config_text(text: str) -> dict[str, Any]:
 def load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
     try:
         text = Path(path).read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("CONFIG_JSON_ERROR", f"config must be UTF-8: {exc}") from exc
     except OSError as exc:
         raise ConfigError("CONFIG_INPUT_ERROR", f"cannot read config: {exc}") from exc
     return parse_config_text(text)
@@ -507,7 +509,9 @@ def _normalize_pyramid(raw: Any) -> dict[str, Any]:
     result["levels"] = _integer(result["levels"], "$.pyramid.levels", minimum=1)
     if result["levels"] > 8:
         _fail("CONFIG_VALUE_ERROR", "pyramid levels must be <= 8", "$.pyramid.levels")
-    result["scale"] = _number(result["scale"], "$.pyramid.scale", minimum=0, maximum=1, exclusive_minimum=True)
+    result["scale"] = _number(result["scale"], "$.pyramid.scale", minimum=0, exclusive_minimum=True)
+    if result["scale"] >= 1:
+        _fail("CONFIG_VALUE_ERROR", "pyramid scale must be < 1", "$.pyramid.scale")
     return result
 
 
@@ -797,47 +801,19 @@ def _resolve_runtime_paths(normalized: Mapping[str, Any], core: Any) -> list[str
 def _resolve_code_paths(core_path: Path | None = None) -> list[Path]:
     """Resolve the complete real source set via :func:`ezdic_core.resolve_code_paths`."""
 
+    core = _import_core()
     bundle_root = getattr(sys, "_MEIPASS", None)
-    requested: list[Path] | None = None
-    if not bundle_root and core_path is not None and Path(core_path).name.casefold() == "ezdic_core.py":
-        requested = [Path(core_path)]
+    root = Path(bundle_root) if bundle_root else None
+    if root is None and core_path is not None and core_path.name.casefold() == "ezdic_core.py":
+        root = core_path.resolve().parent
     try:
-        core = _import_core()
-        resolve_root = Path(bundle_root).resolve() if bundle_root else None
-        if requested is not None and resolve_root is None:
-            try:
-                resolved_core = requested[0].resolve()
-            except OSError:
-                resolved_core = None
-            if resolved_core is not None and resolved_core.is_file():
-                runtime_root = core._runtime_code_root()
-                try:
-                    resolved_core.relative_to(runtime_root)
-                except ValueError:
-                    resolve_root = resolved_core.parent
-        return list(
-            core.resolve_code_paths(
-                paths=requested,
-                include_cli=True,
-                include_benchmark=True,
-                include_schema=True,
-                root=resolve_root,
-            )
+        return core.resolve_code_paths(
+            include_cli=True, include_benchmark=True, include_schema=True, root=root,
         )
-    except Exception as exc:
-        if bundle_root:
-            raise ConfigError(
-                "CODE_FILE_SET_INCOMPLETE",
-                "frozen bundle must contain ezdic_core.py, ezdic_cli.py, ezdic_benchmark.py, and run_config_v1.json",
-                "$.code_paths",
-            ) from exc
-    module_path = Path(core_path).resolve() if core_path is not None else None
-    fallback = [
-        module_path if module_path is not None and module_path.is_file() else Path(__file__).resolve(),
-        Path(__file__).resolve(),
-        SCHEMA_PATH.resolve(),
-    ]
-    return list(dict.fromkeys(path for path in fallback if path.is_file()))
+    except core.CoreError as exc:
+        raise ConfigError(
+            "CODE_FILE_SET_INCOMPLETE", f"cannot resolve run provenance: {exc}", "$.code_paths",
+        ) from exc
 
 
 class _CoreSettings(dict[str, Any]):

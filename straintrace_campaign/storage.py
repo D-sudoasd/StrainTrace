@@ -491,6 +491,8 @@ def stage_record_reusable(
         return False
     try:
         validate_stage_record(dict(record), "stage")
+        if record.get("status") not in {"COMPLETE", "COMPLETED", "IMPORTED_ACCEPTED"}:
+            return False
         if record.get("status") != "IMPORTED_ACCEPTED" and record.get("fingerprint") != expected_fingerprint:
             return False
         checksums_by_norm = {

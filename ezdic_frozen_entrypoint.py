@@ -148,4 +148,10 @@ if __name__ == "__main__":
                 _write_marker(Path(marker), {"smoke": "failed", "error": str(exc)})
             except Exception:
                 pass
+        if "--smoke-test" in sys.argv[1:]:
+            # An unhandled exception opens a modal PyInstaller dialog in a
+            # windowed build, which leaves unattended smoke checks waiting.
+            if sys.stderr is not None:
+                print(f"Smoke test failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
         raise

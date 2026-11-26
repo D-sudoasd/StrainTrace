@@ -13,6 +13,8 @@ from uuid import uuid4
 from .config import CaptureError
 from .event_images import event_scope, event_sequence, select_event_reference
 from .image_inputs import frame_part_selector, require_part_geometry, select_frame_image, validate_analysis_part
+from .output import resolve_output_path
+from .report_files import new_text_output
 from .storage import ExperimentReader, sha256_file
 
 
@@ -39,11 +41,30 @@ def select_reference(reader: ExperimentReader, camera_id: str, sequence: int | N
     return candidates[0]
 
 
+def _require_sequence_geometry(frames, sensor):
+    from .calibration import calibration_geometry
+
+    for row in frames[1:]:
+        require_part_geometry(frames[0], row)
+    # Compare known readbacks even if the reference phase lacks a particular
+    # field. A missing readback is unknown, not evidence of matching geometry.
+    known = {}
+    for row in frames:
+        phase = str(row["phase"])
+        features = row.get("analysis_sensor_geometry", sensor.get(phase, {}))
+        layout = calibration_geometry(row["shape"], features, row.get("backend_metadata") or {})
+        for name, value in layout["sensor_geometry"].items():
+            previous, previous_phase = known.setdefault(name, (value, phase))
+            if previous != value:
+                raise CaptureError("SEQUENCE_SENSOR_CHANGED",
+                                   f"阶段 {previous_phase} 的 {name}={previous}，阶段 {phase} 为 {value}。")
+
+
 def analysis_snapshot(root: str | Path, camera_id: str | None = None, reference_sequence: int | None = None,
                       *, image_part: str | None = None, event_context_id: str | None = None,
                       expected_id: str | None = None) -> dict:
     """Resolve one camera, image part and reference from committed receipts."""
-    from .calibration import calibration_geometry, phase_sensor_geometry
+    from .calibration import phase_sensor_geometry
 
     validate_analysis_part(image_part)
     with ExperimentReader(root) as reader:
@@ -68,21 +89,11 @@ def analysis_snapshot(root: str | Path, camera_id: str | None = None, reference_
             chosen = [reference] + [r for r in rows if r["role"] == "test" and r["sequence"] > reference["sequence"]]
         if image_part is not None:
             chosen = [select_frame_image(row, image_part) for row in chosen]
-        if image_part is not None or event is not None:
+        if image_part is not None:
             for row in chosen[1:]:
                 require_part_geometry(chosen[0], row)
         if event is not None:
-            geometry = {}
-            for row in chosen:
-                phase = str(row["phase"])
-                if phase in geometry:
-                    continue
-                layout = calibration_geometry(row["shape"], sensor.get(phase, {}), row["backend_metadata"])
-                geometry[phase] = layout["sensor_geometry"]
-            reference_geometry = geometry[str(reference["phase"])]
-            event_geometry = geometry[str(event["phase"])]
-            if any(reference_geometry[key] != event_geometry[key] for key in reference_geometry.keys() & event_geometry.keys()):
-                raise CaptureError("SEQUENCE_SENSOR_CHANGED", "参考图和本次事件的相机采样区域或配置不同。")
+            _require_sequence_geometry(chosen, sensor)
         inputs = [{**row, "absolute_path": str(reader.image_path(row)), "analysis_frame": number}
                   for number, row in enumerate(chosen, 1)]
         for frame in inputs:
@@ -131,6 +142,8 @@ def analysis_source(snapshot: dict) -> dict:
 
 
 def analysis_paths(snapshot: dict) -> list[str]:
+    if snapshot.get("frames") and "phase_sensor_geometry" in snapshot:
+        _require_sequence_geometry(snapshot["frames"], snapshot["phase_sensor_geometry"])
     if any(frame["color_model"] == "bayer" and not frame.get("analysis_path") for frame in snapshot["frames"]):
         raise CaptureError("BAYER_DERIVATION_REQUIRED", "prepare Bayer luminance in a derived folder before offline analysis")
     if any(frame["color_model"] in ("rgba", "bgra") and not frame.get("analysis_path") for frame in snapshot["frames"]):
@@ -195,14 +208,12 @@ def _derive(snapshot, output, *, debayer, drop_alpha, model, profile_hash):
             converted.append(row)
             continue
         source = Path(row["absolute_path"])
-        if sha256_file(source) != row["sha256"]:
-            raise CaptureError("CAPTURE_IMAGE_CHANGED", f"source checksum mismatch for {row['frame_id']}")
         transforms = []
         if is_bayer:
-            pixels = bayer_luminance(source, row["pixel_format"])
+            pixels = bayer_luminance(source, row["pixel_format"], expected_sha256=row["sha256"])
             transforms.append({"method": "opencv_bayer_to_luminance", "pixel_format": row["pixel_format"]})
         else:
-            pixels = decode_samples(source, color_model=color)
+            pixels = decode_samples(source, color_model=color, expected_sha256=row["sha256"])
         if is_alpha:
             pixels = cv2.cvtColor(pixels, cv2.COLOR_BGRA2GRAY)
             transforms.append({"method": "opencv_bgra_to_luminance", "alpha_policy": "exclude_unassociated_alpha"})
@@ -353,8 +364,8 @@ def read_corrected_analysis(path):
 
 
 def write_snapshot(snapshot: dict, output: str | Path) -> Path:
-    path = Path(output).expanduser().resolve()
-    with path.open("x", encoding="utf-8") as stream:
+    path = resolve_output_path(Path(output).expanduser().absolute())
+    with new_text_output(path) as stream:
         json.dump(snapshot, stream, ensure_ascii=False, allow_nan=False, indent=2)
         stream.write("\n")
     return path

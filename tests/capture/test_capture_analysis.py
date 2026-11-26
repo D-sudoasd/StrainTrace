@@ -96,8 +96,9 @@ def test_live_and_offline_analysis_use_exact_same_saved_part(tmp_path):
     target = Path(analysis_paths(binding)[1])
     contents = target.read_bytes()
     target.write_bytes(contents[:-1] + bytes([contents[-1] ^ 1]))
-    denied = subprocess.run(run, capture_output=True, text=True, timeout=45)
-    assert denied.returncode != 0 and "CAPTURE_IMAGE_CHANGED" in denied.stdout + denied.stderr
+    denied = subprocess.run(run, capture_output=True, timeout=45)
+    assert denied.returncode != 0
+    assert json.loads(denied.stderr)["error_code"] == "CAPTURE_IMAGE_CHANGED"
     with LiveAnalysis(root, image_part=ANALYSIS_PART, field_roi=(32, 28, 96, 84), field_step=14, field_subset=21) as live:
         assert live.poll()["sequence"] == 1
         with pytest.raises(CaptureError) as err:

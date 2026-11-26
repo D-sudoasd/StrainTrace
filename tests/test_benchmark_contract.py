@@ -103,6 +103,8 @@ def test_error_label_uses_raw_displacement_even_when_point_is_invalid() -> None:
     )
     field["valid"] = np.asarray(field["valid"], dtype=bool).copy()
     field["valid"][0] = False
+    field["strain_valid"] = np.asarray(field["strain_valid"], dtype=bool).copy()
+    field["strain_valid"][0] = False
     field["u_raw"] = np.asarray(field["u_raw"], dtype=float).copy()
     field["v_raw"] = np.asarray(field["v_raw"], dtype=float).copy()
     field["u_raw"][0] = fixture["oracle_u"][0] + 0.3
@@ -312,6 +314,8 @@ def test_false_reject_detects_rejected_point_within_error_tolerance() -> None:
     )
     field["valid"] = np.asarray(field["valid"], dtype=bool).copy()
     field["valid"][0] = False
+    field["strain_valid"] = np.asarray(field["strain_valid"], dtype=bool).copy()
+    field["strain_valid"][0] = False
     field["u_raw"] = np.asarray(field["u_raw"], dtype=float).copy()
     field["v_raw"] = np.asarray(field["v_raw"], dtype=float).copy()
     field["u_raw"][0] = fixture["oracle_u"][0] + 0.05

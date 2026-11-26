@@ -271,7 +271,10 @@ def _plan_path(root: Path, pointer: Mapping[str, Any]) -> Path:
     relative = pointer.get("current_plan")
     if not relative:
         raise AgentError("PLAN_REQUIRED", "run plan_project before running DIC")
-    path = root / str(relative)
+    try:
+        path = _safe_file(root, str(relative))
+    except ValueError as exc:
+        raise AgentError("PLAN_PATH_UNSAFE", str(exc), path="$.current_plan") from exc
     if not path.is_file():
         raise AgentError("PLAN_MISSING", f"current analysis plan is missing: {path}", path=str(path))
     return path
@@ -282,7 +285,10 @@ def _load_run_pointer(root: Path) -> tuple[dict[str, Any], Path]:
     relative = pointer.get("current_run")
     if not relative:
         raise AgentError("RUN_REQUIRED", "project does not have a current run")
-    run_root = root / str(relative)
+    try:
+        run_root = _safe_file(root, str(relative))
+    except ValueError as exc:
+        raise AgentError("RUN_PATH_UNSAFE", str(exc), path="$.current_run") from exc
     if not run_root.is_dir():
         raise AgentError("RUN_MISSING", f"current run directory is missing: {run_root}", path=str(run_root))
     return pointer, run_root

@@ -134,11 +134,20 @@ def _checkpoint_valid(
     run_root: Path, record: Mapping[str, Any], frame_position: int,
     reference_native_frame: int, run_fingerprint: str, input_sha: str,
     code_sha: Mapping[str, str], expected_parameters: Mapping[str, Any],
+    *, prior_receipts: Mapping[str, Any] | None = None, allow_unregistered: bool = True,
 ) -> tuple[Path, dict[str, Any]] | None:
     native_frame = int(record["native_frame"])
     checkpoint = run_root / "checkpoints" / f"{_frame_key(native_frame)}.npz"
     metadata_path = checkpoint.with_suffix(".json")
     if not metadata_path.is_file():
+        return None
+    prior_receipt = prior_receipts.get(metadata_path.name) if prior_receipts is not None else None
+    if prior_receipt is None:
+        if not allow_unregistered:
+            return None
+    elif not isinstance(prior_receipt, Mapping) or _api_attr("_sha256", _sha256)(metadata_path) != prior_receipt.get("sha256"):
+        # A sidecar also contains result rows and gauge measurements; checking
+        # only the NPZ hash and frame identity would silently bless edits.
         return None
 
     def matches_expected_identity(metadata: Mapping[str, Any]) -> bool:
@@ -194,6 +203,8 @@ def _checkpoint_valid(
         if not matches_expected_identity(metadata):
             return None
         if metadata.get("status") == "failed":
+            if prior_receipt is not None and prior_receipt.get("checkpoint_sha256") is not None:
+                return None
             if metadata.get("retryable") is True:
                 return None
             return metadata_path, metadata
@@ -201,6 +212,8 @@ def _checkpoint_valid(
             return None
         load_field_fn = _api_attr("_load_field", _load_field)
         arrays, metadata = load_field_fn(checkpoint, metadata_path)
+        if prior_receipt is not None and prior_receipt.get("checkpoint_sha256") != metadata.get("checkpoint_sha256"):
+            return None
         if not matches_expected_identity(metadata) or not arrays:
             return None
         return checkpoint, metadata
@@ -439,6 +452,12 @@ def _extraction_transaction(run_root: Path):
             replaced.append((target, backup))
             _replace_with_retry(source, target)
         refresh_fn(run_root)
+        manifest = _read_json(run_root / "manifest.json")
+        stale = manifest.get("stale_derived_artifacts", [])
+        if stale:
+            replaced_paths = {target.relative_to(run_root).as_posix() for target, _ in replaced}
+            manifest["stale_derived_artifacts"] = [path for path in stale if path not in replaced_paths]
+            _atomic_json(run_root / "manifest.json", manifest)
     except BaseException:
         cleanup = False
         for target, backup in reversed(replaced):
@@ -668,6 +687,9 @@ def _plot_standard_histories(run_root: Path) -> dict[str, Any]:
                 valid_series.append((series["label"], x[:count][valid], y[:count][valid]))
         path = plots_dir / specification["plot"]
         if not valid_series:
+            # A previous export may have had supported measurements. Never
+            # leave its old curve beside a newly unavailable result.
+            _unlink_with_retry(path)
             plot_summaries.append({"plot": specification["plot"], "status": "unavailable", "reason": specification.get("unavailable_reason", "no finite aligned samples"), "series": summary_series})
             continue
         fig, ax = plt.subplots(figsize=(6.6, 4.2))
@@ -734,11 +756,19 @@ def _build_outputs(
     records: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]],
     mechanics_status: Mapping[str, Any], run_fingerprint: str, input_sha: str,
     code_sha: Mapping[str, str], *, field_csv: bool, plots: bool,
-    include_checkpoints: bool = False, build_report: bool = True,
+    include_checkpoints: bool = False, build_report: bool = True, invalidate_extractions: bool = False,
 ) -> dict[str, Any]:
     sha256_fn = _api_attr("_sha256", _sha256)
     refresh_fn = _api_attr("_refresh_manifest_artifacts", _refresh_manifest_artifacts)
     run_state = _read_json(run_root / "run_state.json")
+    prior_manifest_path = run_root / "manifest.json"
+    prior_manifest = _read_json(prior_manifest_path) if prior_manifest_path.is_file() else {}
+    stale_artifacts = set(prior_manifest.get("stale_derived_artifacts", []))
+    if invalidate_extractions:
+        stale_artifacts.update(
+            path for path in (prior_manifest.get("artifacts") or {})
+            if isinstance(path, str) and path.startswith("extractions/")
+        )
     expected_native_frames = [int(record["native_frame"]) for record in records]
     computed_rows = [row for row in rows if row.get("status") != "pending"]
     try:
@@ -821,11 +851,19 @@ def _build_outputs(
             gauge_tmp.unlink()
         except FileNotFoundError:
             pass
-    if field_csv:
+    fields_dir = run_root / "fields_csv"
+    # Once field CSVs have been requested, keep them consistent when a later
+    # run recomputes or fails a frame, even if this invocation did not request
+    # an additional export.
+    refresh_existing_fields = fields_dir.is_dir() and any(
+        (fields_dir / f"{_frame_key(int(record['native_frame']))}.csv").is_file()
+        for record in records
+    )
+    if field_csv or refresh_existing_fields:
         import ezdic_core as core
 
-        fields_dir = run_root / "fields_csv"
         fields_dir.mkdir(exist_ok=True)
+        generated_fields: set[str] = set()
         for arrays, metadata in _iter_checkpoint_rows(run_root, validate_fingerprint=run_fingerprint):
             if not arrays:
                 continue
@@ -835,11 +873,16 @@ def _build_outputs(
             try:
                 core.dic_field_to_dataframe(field).to_csv(temporary, index=False)
                 _replace_with_retry(temporary, path)
+                generated_fields.add(path.name)
             finally:
                 try:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
+        for record in records:
+            expected = fields_dir / f"{_frame_key(int(record['native_frame']))}.csv"
+            if expected.name not in generated_fields:
+                _unlink_with_retry(expected)
     plot_result = None
     history_summary = None
     if plots:
@@ -904,6 +947,7 @@ def _build_outputs(
         "checkpoint_count": sum(1 for metadata in _iter_checkpoint_metadata(run_root) if metadata.get("checkpoint_sha256") is not None),
         "checkpoint_failures": sum(1 for path in (run_root / "checkpoints").glob("frame_native_*.json") if _read_json(path).get("status") == "failed"),
         "scientific_ok": quality["scientific_ok"], "numerical_quality_passed": quality["numerical_quality_passed"],
+        "stale_derived_artifacts": sorted(stale_artifacts),
         "quality_gate_scope": QUALITY_GATE_SCOPE, "scientific_acceptance": "not_assessed",
         "experimental_uncertainty_calibrated": False,
         "units": {"x_px": "px", "u_px": "px", "strain": "dimensionless", "force_N": "N", "stress_MPa": "MPa"},
@@ -931,7 +975,7 @@ def _build_outputs(
         "report_html": portable_report["report_html"] if portable_report else None,
         "plots": str(run_root / "plots"),
     }
-    result: dict[str, Any] = {"quality": quality, "artifacts": artifacts}
+    result: dict[str, Any] = {"quality": quality, "artifacts": artifacts, "stale_derived_artifacts": sorted(stale_artifacts)}
     if portable_report is not None:
         result["portable_report"] = portable_report
     return result
