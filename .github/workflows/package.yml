@@ -34,12 +34,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python -m pip check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($exe in @("straintrace.exe", "ezdic-cli.exe", "straintrace-gui.exe")) {
+          foreach ($exe in @("straintrace.exe", "ezdic-cli.exe", "straintrace-gui.exe", "straintrace-capture.exe", "straintrace-capture-gui.exe")) {
             $exePath = Join-Path $scripts $exe
             if (!(Test-Path -LiteralPath $exePath -PathType Leaf)) { throw "Missing installed console/GUI script: $exePath" }
           }
           Set-Location $env:RUNNER_TEMP
-          & $python -I -c "import importlib.resources as r, ezdic_cli, straintrace_campaign, straintrace_agent; assert ezdic_cli.SCHEMA_PATH.is_file(); assert r.files('straintrace_data').joinpath('run_config_v1.json').is_file(); assert r.files('straintrace_data').joinpath('campaign_config_v1.json').is_file()"
+          @'
+          from importlib.resources import files
+          from pathlib import Path
+          import ezdic_cli, ezdic_core, straintrace_agent, straintrace_campaign
+
+          data = files("straintrace_data")
+          for name in ("run_config_v1.json", "campaign_config_v1.json", "capture_config_v1.json"):
+              assert data.joinpath(name).is_file(), name
+          root = Path(ezdic_core.__file__).parent
+          schema = Path(str(data.joinpath("run_config_v1.json")))
+          assert ezdic_cli.SCHEMA_PATH == schema
+          assert set(ezdic_core.resolve_code_paths(include_cli=True, include_benchmark=True)) == {
+              root / "ezdic_core.py", root / "ezdic_cli.py", root / "ezdic_benchmark.py", schema,
+          }
+          '@ | & $python -I -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & (Join-Path $scripts "straintrace.exe") --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

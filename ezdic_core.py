@@ -19,6 +19,7 @@ import stat
 from contextlib import contextmanager
 from collections.abc import Mapping
 from importlib import metadata as importlib_metadata
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 
@@ -478,8 +479,9 @@ def _code_path_candidates(root, filename):
     PyInstaller executes Python modules from its archive, so ``module.__file__``
     is not a usable provenance path in a frozen process.  The release bundle
     deliberately carries auditable copies below ``_MEIPASS/sources`` while the
-    schema is copied below ``_MEIPASS/schemas``.  Keep the legacy
-    ``sources/schemas`` layout as a compatibility candidate for older bundles.
+    schema is copied below ``_MEIPASS/schemas``. Keep the legacy
+    ``sources/schemas`` layout for older bundles and the ``straintrace_data``
+    package layout used by installed wheels.
     """
     root = Path(root).resolve()
     filename = str(filename)
@@ -489,6 +491,7 @@ def _code_path_candidates(root, filename):
             root / "sources" / "schemas" / filename,
             root / "sources" / filename,
             root / filename,
+            root / "straintrace_data" / filename,
         )
     if getattr(sys, "_MEIPASS", None):
         return (root / "sources" / filename, root / filename)
@@ -1069,11 +1072,11 @@ def _color_to_gray(img, *, color_order, path=None):
     return _validate_finite_image(gray, path=path)
 
 
-def read_gray_image(path):
+def read_gray_image(path, *, encoded=None):
     """
     稳健读取图像。
     使用 np.fromfile + cv2.imdecode 解决 Windows 中文路径问题；
-    如果失败则用 Pillow 兜底读取。
+    如果失败则用 Pillow 兜底读取。传入已核验的 encoded 字节时，两种解码器均使用该副本。
     """
     path = str(path)
     img = None
@@ -1081,7 +1084,7 @@ def read_gray_image(path):
     errors = []
 
     try:
-        data = np.fromfile(path, dtype=np.uint8)
+        data = np.fromfile(path, dtype=np.uint8) if encoded is None else np.frombuffer(encoded, dtype=np.uint8)
         if data.size > 0:
             img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
             if img is not None:
@@ -1092,7 +1095,7 @@ def read_gray_image(path):
 
     if img is None:
         try:
-            with Image.open(path) as im:
+            with Image.open(path if encoded is None else BytesIO(encoded)) as im:
                 if getattr(im, "n_frames", 1) > 1:
                     im.seek(0)
                 img = np.array(_prepare_pillow_image(im))
@@ -1430,17 +1433,21 @@ def extract_patch(img8, rect):
 def extract_patch_subpixel(img8, rect):
     """Extract a registered ROI patch at a floating-point top-left position."""
     image = _as_float_image(img8)
-    x, y, w, h = rect
-    w, h = int(round(w)), int(round(h))
-    if w <= 0 or h <= 0:
+    try:
+        x, y, width, height = (float(value) for value in rect)
+    except (TypeError, ValueError):
         return np.zeros((0, 0), dtype=np.float32)
+    if (
+        not np.isfinite([x, y, width, height]).all()
+        or width <= 0 or height <= 0
+        or not width.is_integer() or not height.is_integer()
+    ):
+        return np.zeros((0, 0), dtype=np.float32)
+    w, h = int(width), int(height)
     center = (float(x) + (w - 1) / 2.0, float(y) + (h - 1) / 2.0)
     height, width = image.shape[:2]
     if (
-        center[0] - (w - 1) / 2.0 < 0
-        or center[1] - (h - 1) / 2.0 < 0
-        or center[0] + (w - 1) / 2.0 >= width
-        or center[1] + (h - 1) / 2.0 >= height
+        x < 0 or y < 0 or x + w > width or y + h > height
     ):
         return np.zeros((0, 0), dtype=np.float32)
     patch = cv2.getRectSubPix(image, (w, h), center)
@@ -1877,10 +1884,18 @@ def initialize_extensometer_group_state(
         raise CoreError("INVALID_ROI_GROUP", {"message": str(exc)}) from exc
     if len(rect1) != 4 or len(rect2) != 4:
         raise CoreError("INVALID_ROI_GROUP", {"message": "each ROI must contain x, y, width, height"})
+    try:
+        dimensions = [float(value) for rect in (rect1, rect2) for value in rect[2:]]
+    except (TypeError, ValueError) as exc:
+        raise CoreError("INVALID_ROI_GROUP", {"message": "ROI dimensions must be integer pixel counts"}) from exc
+    if not all(np.isfinite(value) and value.is_integer() for value in dimensions):
+        raise CoreError("INVALID_ROI_GROUP", {"message": "ROI dimensions must be integer pixel counts"})
     if not rect_is_inside_image(rect1, image.shape) or not rect_is_inside_image(rect2, image.shape):
         raise CoreError("ROI_OUT_OF_BOUNDS", {"roi1": rect1, "roi2": rect2})
-    texture1 = roi_texture_metrics(image, rect1)
-    texture2 = roi_texture_metrics(image, rect2)
+    template1 = extract_patch_subpixel(image, rect1)
+    template2 = extract_patch_subpixel(image, rect2)
+    texture1 = roi_texture_metrics(template1, (0, 0, template1.shape[1], template1.shape[0]))
+    texture2 = roi_texture_metrics(template2, (0, 0, template2.shape[1], template2.shape[0]))
     texture_code1 = texture_failure_code(
         texture1,
         min_texture_std,
@@ -1914,10 +1929,10 @@ def initialize_extensometer_group_state(
         "group": dict(group),
         "last_good_rect1": rect1,
         "last_good_rect2": rect2,
-        "template1": extract_patch(image, rect1),
-        "template2": extract_patch(image, rect2),
-        "last_good_template1": extract_patch(image, rect1),
-        "last_good_template2": extract_patch(image, rect2),
+        "template1": template1,
+        "template2": template2,
+        "last_good_template1": template1.copy(),
+        "last_good_template2": template2.copy(),
         "last_good_img8": image.copy(),
         "last_good_img": image.copy(),
         "L0": float(L0),
@@ -2713,11 +2728,15 @@ def rect_is_inside_image(rect, image_shape):
     if rect is None or image_shape is None:
         return False
     try:
-        x, y, w, h = (int(round(value)) for value in rect)
+        x, y, w, h = (float(value) for value in rect)
         H, W = (int(value) for value in image_shape[:2])
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError, OverflowError):
         return False
-    return bool(x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= W and y + h <= H)
+    return bool(
+        np.isfinite([x, y, w, h]).all()
+        and x >= 0 and y >= 0 and w > 0 and h > 0
+        and x + w <= W and y + h <= H
+    )
 
 
 def validate_image_sequence_dimensions(paths):
@@ -2742,17 +2761,21 @@ def fullfield_field_has_finite_strain(field):
     valid = np.asarray(field.get("valid", []), dtype=bool).ravel()
     if valid.size == 0 or not valid.any():
         return False
-    try:
-        finite_strain = (
-            np.isfinite(np.asarray(field["Exx"], dtype=float).ravel())
-            & np.isfinite(np.asarray(field["Eyy"], dtype=float).ravel())
-            & np.isfinite(np.asarray(field["Exy"], dtype=float).ravel())
-        )
-    except (KeyError, TypeError, ValueError):
-        return False
-    if finite_strain.size != valid.size:
-        return False
-    return bool(np.any(valid & finite_strain))
+    support = valid & _finite_field_components(field, ("Exx", "Eyy", "Exy"), valid.size)
+    if "u" in field or "v" in field:
+        support &= _finite_field_components(field, ("u", "v"), valid.size)
+    # Older field archives may omit these masks. When present, they are part
+    # of the validity contract even if finite diagnostic values are retained.
+    for name in ("eligible", "strain_valid"):
+        if name in field:
+            try:
+                mask = np.asarray(field[name], dtype=bool).ravel()
+            except (TypeError, ValueError):
+                return False
+            if mask.size != valid.size:
+                return False
+            support &= mask
+    return bool(np.any(support))
 
 
 def _empty_integer_cc_diagnostic(reason, *, return_diagnostics):
@@ -3505,6 +3528,28 @@ def _field_array(field, name, *, dtype=None, size=None, default=None):
     return arr
 
 
+def _finite_field_components(field, components, size):
+    """Require a complete finite vector or tensor at the same POI."""
+    finite = np.ones(size, dtype=bool)
+    for name in components:
+        try:
+            values = _field_array(field, name, dtype=float, size=size, default=np.nan)
+        except (TypeError, ValueError):
+            return np.zeros(size, dtype=bool)
+        finite &= np.isfinite(values)
+    return finite
+
+
+def _fraction_threshold(value, name):
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite fraction in [0, 1].") from exc
+    if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be a finite fraction in [0, 1].")
+    return value
+
+
 def field_quality_summary(
     field,
     *,
@@ -3513,20 +3558,36 @@ def field_quality_summary(
     max_residual_rms=float("inf"),
 ):
     """Summarize correlation and strain gates without conflating them."""
+    min_correlation_valid_fraction = _fraction_threshold(
+        min_correlation_valid_fraction, "min_correlation_valid_fraction"
+    )
+    min_strain_valid_fraction = _fraction_threshold(
+        min_strain_valid_fraction, "min_strain_valid_fraction"
+    )
     try:
         residual_threshold = float(max_residual_rms)
     except (TypeError, ValueError):
         residual_threshold = float("inf")
     valid = np.asarray(field.get("valid", []), dtype=bool).ravel()
     size = int(valid.size)
-    eligible = _field_array(field, "eligible", dtype=bool, size=size, default=True)
+    eligible = _field_array(field, "eligible", dtype=bool, size=size, default="eligible" not in field)
     eligible_count = int(eligible.sum())
     strain_valid = _field_array(field, "strain_valid", dtype=bool, size=size, default=False)
+    correlation_support = valid & eligible
+    # Summary-only callers provide masks. A field with measurement arrays
+    # must also supply finite values at each POI counted towards coverage.
+    if "u" in field or "v" in field:
+        correlation_support &= _finite_field_components(field, ("u", "v"), size)
+    strain_support = strain_valid & correlation_support
+    if any(name in field for name in ("Exx", "Eyy", "Exy")):
+        strain_support &= _finite_field_components(field, ("Exx", "Eyy", "Exy"), size)
+    correlation_count = int(correlation_support.sum())
+    strain_count = int(strain_support.sum())
     if eligible_count == 0:
         correlation_fraction = strain_fraction = 0.0
     else:
-        correlation_fraction = float((valid & eligible).sum()/eligible_count)
-        strain_fraction = float((strain_valid & eligible).sum()/eligible_count)
+        correlation_fraction = float(correlation_count/eligible_count)
+        strain_fraction = float(strain_count/eligible_count)
     reasons = _field_array(field, "invalid_reason", dtype=object, size=size, default="")
     peak_ambiguous = _field_array(field, "peak_is_ambiguous", dtype=bool, size=size, default=False)
     reason_ambiguous = np.asarray(
@@ -3559,6 +3620,12 @@ def field_quality_summary(
     )
     false_reject_proxy_count = int(false_reject_proxy_mask.sum())
     reasons_out = []
+    if eligible_count == 0:
+        reasons_out.append("no_eligible_points")
+    if correlation_count == 0:
+        reasons_out.append("no_valid_correlation_points")
+    if strain_count == 0:
+        reasons_out.append("no_valid_strain_points")
     if correlation_fraction < float(min_correlation_valid_fraction):
         reasons_out.append("correlation_valid_fraction_below_threshold")
     if strain_fraction < float(min_strain_valid_fraction):
@@ -3576,8 +3643,8 @@ def field_quality_summary(
         "eligible_point_count": eligible_count,
         "masked_point_count": size-eligible_count,
         "spatial_outlier_count": int(np.count_nonzero(field.get("spatial_outlier", []))),
-        "correlation_valid_count": int(valid.sum()),
-        "strain_valid_count": int(strain_valid.sum()),
+        "correlation_valid_count": correlation_count,
+        "strain_valid_count": strain_count,
         "correlation_valid_fraction": correlation_fraction,
         "strain_valid_fraction": strain_fraction,
         "converged_count": converged_count,
@@ -4135,6 +4202,18 @@ def run_2d_dic(
     """
     requested_subset_size = int(subset_size)
     requested_strain_window = int(strain_window)
+    min_correlation_valid_fraction = _fraction_threshold(
+        min_correlation_valid_fraction, "min_correlation_valid_fraction"
+    )
+    min_strain_valid_fraction = _fraction_threshold(
+        min_strain_valid_fraction, "min_strain_valid_fraction"
+    )
+    try:
+        zncc_min = float(zncc_min)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("zncc_min must be finite and in [-1, 1].") from exc
+    if not np.isfinite(zncc_min) or not -1.0 <= zncc_min <= 1.0:
+        raise ValueError("zncc_min must be finite and in [-1, 1].")
     if not isinstance(experimental_full_search, (bool, np.bool_)):
         raise ValueError("experimental_full_search must be a boolean")
     experimental_full_search = bool(experimental_full_search)
@@ -7386,10 +7465,16 @@ def _build_1d_gate(df, groups, settings, optional_failures=None):
     details = {}
     reasons = []
     for group in groups:
+        group_rows = df[df["group"] == group["name"]]
+        texture_codes = {}
+        for roi in ("roi1", "roi2"):
+            column = f"texture_code_{roi}"
+            codes = group_rows[column].dropna() if column in group_rows else pd.Series(dtype=object)
+            texture_codes[roi] = str(codes.iloc[0]) if not codes.empty and str(codes.iloc[0]) else None
         # The reference row is a registration baseline, not an independent
         # deformation measurement.  It must never satisfy a minimum-valid
         # deformation-frame gate by itself.
-        sub = df[(df["group"] == group["name"]) & (df["frame_global_1based"] != reference_frame)]
+        sub = group_rows[group_rows["frame_global_1based"] != reference_frame]
         accepted = sub.get("accepted", pd.Series(dtype=bool)).fillna(False).astype(bool)
         strain_valid = _strain_valid_mask(sub)
         count = len(sub)
@@ -7411,6 +7496,7 @@ def _build_1d_gate(df, groups, settings, optional_failures=None):
             "valid_frame_ratio": valid_frame_ratio,
             "strain_valid_frames": strain_count,
             "strain_valid_ratio": ratio,
+            "texture_codes": texture_codes,
             "passed": passed,
         }
     required_optional_failures = [item for item in (optional_failures or []) if item.get("required_for_scientific_gate")]
@@ -7561,6 +7647,12 @@ def run_extensometer_sequence(settings, progress_callback=None):
         summary = build_qc_summary(df)
         written, optional_failures, options = _export_extensometer_artifacts(df, groups, summary, settings, transaction.stage_root, input_count=len(inputs["processing_indices"]), staged_overlays=staged_overlays)
         gate = _build_1d_gate(df, groups, settings, optional_failures)
+        texture_warnings = [
+            f"texture_preflight:{name}:{roi}:{code}"
+            for name, details in gate["groups"].items()
+            for roi, code in details["texture_codes"].items()
+            if code
+        ]
         status = "completed" if gate["scientific_ok"] and not optional_failures else "completed_with_warnings"
         invalid_rows = [
             {"frame_global_1based": int(row["frame_global_1based"]), "group": row["group"], "reason": row.get("invalid_reason", "")}
@@ -7579,7 +7671,7 @@ def run_extensometer_sequence(settings, progress_callback=None):
             "texture_preflight": texture_preflight,
             "scientific_gate": gate,
             "invalid_frames": invalid_rows,
-            "warnings": (["invalid_tracking_rows_present"] if invalid_rows else []) + [item["message"] for item in optional_failures],
+            "warnings": (["invalid_tracking_rows_present"] if invalid_rows else []) + texture_warnings + [item["message"] for item in optional_failures],
             "optional_failures": optional_failures,
             "output_policy": options,
             "summary": summary,
@@ -7824,16 +7916,18 @@ def run_fullfield_sequence(settings, progress_callback=None):
                 "filename": Path(inputs["paths"][global_index]).name,
                 "correlation_valid_fraction": quality_summary.get("correlation_valid_fraction"),
                 "strain_valid_fraction": quality_summary.get("strain_valid_fraction"),
-                "scientific_ok": bool(quality_summary.get("scientific_ok", False)),
+                "texture_preflight_code": field_texture_code,
                 "invalid_reason_histogram": quality_summary.get("invalid_reason_histogram", {}),
             }
             computed = fullfield_field_has_finite_strain(field)
             scientific_valid = bool(
                 computed
+                and field_texture_code is None
                 and quality_summary.get("scientific_ok", False)
                 and float(quality_summary.get("correlation_valid_fraction", 0.0)) >= solver["min_correlation_valid_fraction"]
                 and float(quality_summary.get("strain_valid_fraction", 0.0)) >= solver["min_strain_valid_fraction"]
             )
+            frame_record["scientific_ok"] = scientific_valid
             if computed:
                 stem = f"frame_{global_index + 1:04d}"
                 exported = export_dic(field, transaction.stage_root / "dic", stem=stem)
@@ -7880,6 +7974,8 @@ def run_fullfield_sequence(settings, progress_callback=None):
         correlations = [float(item["correlation_valid_fraction"]) for item in quality_frames if item.get("correlation_valid_fraction") is not None and np.isfinite(item["correlation_valid_fraction"])]
         strains = [float(item["strain_valid_fraction"]) for item in quality_frames if item.get("strain_valid_fraction") is not None and np.isfinite(item["strain_valid_fraction"])]
         gate_reasons = []
+        if field_texture_code is not None:
+            gate_reasons.append("texture_preflight_failed")
         if len(quality_frames) < min_valid_frames:
             gate_reasons.append("valid_frame_count_below_threshold")
         if len(quality_frames) / max(len(frame_records), 1) < min_frame_ratio:

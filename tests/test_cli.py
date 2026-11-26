@@ -371,6 +371,42 @@ def test_benchmark_without_output_is_structured_config_error() -> None:
     assert error["error_code"] == "BENCHMARK_OUTPUT_REQUIRED"
 
 
+def test_pyramid_cannot_keep_the_same_image_scale():
+    config = _config("fullfield", ["a.png", "b.png"])
+    config["pyramid"] = {"levels": 2, "scale": 1.0}
+    with pytest.raises(ezdic_cli.ConfigError) as failure:
+        ezdic_cli.normalize_config(config)
+    assert failure.value.path == "$.pyramid.scale"
+    validator = pytest.importorskip("jsonschema").Draft202012Validator(ezdic_cli.load_schema())
+    assert not validator.is_valid(config)
+
+
+@pytest.mark.parametrize("command", ["validate-config", "run"])
+def test_invalid_config_encoding_is_a_structured_input_error(tmp_path, capsys, command):
+    path = tmp_path / "invalid-encoding.json"
+    path.write_bytes(b'{"metadata":"\xff"}')
+    assert ezdic_cli.main([command, "--config", str(path)]) == ezdic_cli.EXIT_CONFIG_ERROR
+    failure = json.loads(capsys.readouterr().err)
+    assert failure["error_code"] == "CONFIG_JSON_ERROR"
+
+
+def test_wheel_code_provenance_includes_packaged_schema_and_benchmark(tmp_path):
+    installed = tmp_path / "site-packages"
+    data = installed / "straintrace_data"
+    data.mkdir(parents=True)
+    required = ["ezdic_core.py", "ezdic_cli.py", "ezdic_benchmark.py"]
+    for name in required:
+        (installed / name).write_text("# wheel source", encoding="utf-8")
+    schema = data / "run_config_v1.json"
+    schema.write_text("{}", encoding="utf-8")
+    assert set(ezdic_cli._resolve_code_paths(installed / required[0])) == {
+        *(installed / name for name in required), schema,
+    }
+    (installed / "ezdic_benchmark.py").unlink()
+    with pytest.raises(ezdic_cli.ConfigError, match="cannot resolve run provenance"):
+        ezdic_cli._resolve_code_paths(installed / required[0])
+
+
 def test_schema_enforces_normalization_if_then_odd_solver_and_mode_fields() -> None:
     jsonschema = pytest.importorskip("jsonschema")
     validator = jsonschema.Draft202012Validator(ezdic_cli.load_schema())
