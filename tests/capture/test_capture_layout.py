@@ -1,6 +1,7 @@
 import sys
 import threading
 import time
+import types
 import tkinter as tk
 from contextlib import closing
 from dataclasses import asdict, replace
@@ -123,6 +124,15 @@ def test_compact_capture_controls_are_reachable_and_restore_the_wide_layout(tmp_
         app.preview_button.focus_force()
         settle(lambda: root.focus_get() is app.preview_button)
         root.geometry("1280x760+30+30")
+        deadline = time.monotonic() + 3
+        while app._compact_workspace and time.monotonic() < deadline:
+            root.update()
+            time.sleep(.01)
+        if app._compact_workspace:
+            # GitHub Windows runners use a 1024x768 desktop (and may substitute fonts),
+            # so Windows clamps the window below 1280 device pixels at this scaling.
+            # Drive the same reflow handler with a workspace wide enough for the docks.
+            app._reflow_workspace(types.SimpleNamespace(width=4000, height=700))
         settle(lambda: not app._compact_workspace)
         assert str(app._device_pane) not in app.tabs.tabs()
         assert app.tabs.select() == str(app.plan_panel)
